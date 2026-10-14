@@ -1,0 +1,463 @@
+"""Version eight business revisions, bounded reads and auditable corrections."""
+import json
+import sqlite3
+from contextlib import closing
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from functools import wraps
+from pathlib import Path
+from .repository import PortfolioRepository
+from .repository_base import RepositoryV07
+from .storage_v09 import migrate, backup_database, backup_records
+from portfolio_v5.accounts import account_key
+from portfolio_v5.storage import cached_read
+
+
+def reference(tx):
+    return json.dumps([tx['import_id'], tx.get('depot', tx['account']), tx['external_id']], ensure_ascii=False, separators=(',', ':'))
+
+
+def valid_cash_transfer(a,b):
+    kinds={'BANK_BOOKING','DEPOSIT','WITHDRAWAL','TRANSFER_IN','TRANSFER_OUT'}
+    return bool(a and b and a['kind'] in kinds and b['kind'] in kinds
+        and not a.get('security') and not b.get('security')
+        and account_key(a['account'])!=account_key(b['account']) and a['currency']==b['currency']
+        and Decimal(a['amount']) and Decimal(a['amount'])+Decimal(b['amount'])==0
+        and abs((date.fromisoformat(a['date'])-date.fromisoformat(b['date'])).days)<=3)
+
+
+def bounded(method):
+    @wraps(method)
+    def read(self, *args, **kwargs):
+        if self.db.in_transaction: return method(self, *args, **kwargs)
+        revision = (self.db.total_changes, self.db.execute('PRAGMA data_version').fetchone()[0])
+        if getattr(self, '_v8_cache_revision', None) != revision:
+            self._v8_cache_revision, self._v8_cache = revision, {}
+        key = (method.__name__, args, tuple(sorted(kwargs.items())))
+        if key not in self._v8_cache:
+            result = method(self, *args, **kwargs)
+            if len(self._v8_cache) >= getattr(self, '_v8_cache_cap', 32): self._v8_cache.pop(next(iter(self._v8_cache)))
+            self._v8_cache[key] = result
+        result = self._v8_cache[key]
+        if getattr(self, '_no_copy_reads', False):
+            return result
+        # Nur Listen von Zeilen werden flach kopiert, damit Aufrufer die
+        # gecachten Einträge nicht verändern. Dictionary-Ergebnisse (z. B.
+        # wealth_summary) sind bereits frisch und werden unverändert zurückgegeben.
+        if isinstance(result, list):
+            return [dict(row) if isinstance(row, dict) else row for row in result]
+        return result
+    return read
+
+
+class RepositoryV09(RepositoryV07):
+    def __init__(self, database, backups=True):
+        self.backup_folder = Path(database).parent / 'backups'
+        self.backups_enabled = backups
+        if Path(database).exists():
+            with closing(sqlite3.connect(database)) as existing:
+                version=existing.execute('PRAGMA user_version').fetchone()[0]
+                if version>9: raise ValueError('Diese Datenbank benötigt eine neuere PortMan-Version.')
+                asset_schema = existing.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='asset_identity'").fetchone()
+                if backups and (version<9 or not asset_schema): backup_database(existing,self.backup_folder,'before-migration')
+        PortfolioRepository.__init__(self, database)
+        migrate(self.db)
+        from .asset_schema import install_revision_triggers
+        install_revision_triggers(self.db)
+        if backups:
+            today = datetime.now(timezone.utc).date().isoformat()
+            if not any(r.get('created', '').startswith(today) for r in backup_records(self.backup_folder)):
+                self.backup('daily')
+            for name in ('delete_imports', 'delete_all_imports', 'delete_all_accounts', 'undo_import', 'correct_import', 'reassign_imports'):
+                original = getattr(self.store, name)
+                def protect(*args, _method=original, **kwargs):
+                    self.backup('before-change')
+                    return _method(*args, **kwargs)
+                setattr(self.store, name, protect)
+
+    def revision(self): return self.db.execute('SELECT value FROM v09_revision WHERE id=1').fetchone()[0]
+
+    def poll_revision(self):
+        """Best-effort UI poll; never wait behind a writer or invent a revision."""
+        timeout = self.db.execute('PRAGMA busy_timeout').fetchone()[0]
+        try:
+            self.db.execute('PRAGMA busy_timeout=0')
+            return self.revision()
+        except sqlite3.OperationalError as error:
+            code = getattr(error, 'sqlite_errorcode', 0) & 0xff
+            if code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                return None
+            raise
+        finally:
+            self.db.execute(f'PRAGMA busy_timeout={int(timeout)}')
+
+    def backup(self, reason='manual', label=''):
+        return backup_database(self.db, self.backup_folder, reason, label=label)
+
+    @bounded
+    def account_overview(self, as_of='9999-12-31'): return PortfolioRepository.account_overview(self, as_of)
+    @bounded
+    def wealth_summary(self, as_of='9999-12-31', account=None): return PortfolioRepository.wealth_summary(self, as_of, account)
+    @bounded
+    def holdings(self, as_of='9999-12-31', account=None): return PortfolioRepository.holdings(self, as_of, account)
+
+    @cached_read
+    def transactions(self, account=None):
+        hidden = {(r[0], r[1], r[2]) for r in self.db.execute('''SELECT s.old_import,s.old_account,s.old_id
+            FROM transaction_supersessions s JOIN imports i ON i.id=s.new_import WHERE i.active=1''')}
+        corrections={r['ref']:dict(r) for r in self.db.execute('SELECT * FROM transaction_classifications')}
+        edits={r['ref']:json.loads(r['payload']) for r in self.db.execute('SELECT ref,payload FROM transaction_edits')}
+        excluded={r[0] for r in self.db.execute('SELECT ref FROM transaction_exclusions')}
+        rows=[]
+        records = {r['account_key']: r for r in self.account_records() if r['active']}
+        name_keys = {account_key(r['name']): r['account_key'] for r in records.values()}
+        rules = [dict(r) for r in self.db.execute('SELECT * FROM portfolio_assignment_rules ORDER BY length(text_pattern) DESC,id')]
+        security_booking_context = {}
+        for t in self.store.transactions(account):
+            if (t['import_id'],t['depot'],t['external_id']) in hidden: continue
+            t=dict(t); ref=reference(t)
+            if ref in excluded: continue
+            if ref in edits: t.update(edits[ref], edited=True)
+            c=corrections.get(ref)
+            if c: t.update(kind=c['kind'],security=c['security'],quantity=c['quantity'],classification_source=c['reason'])
+            elif not t.get('edited'):
+                from portfolio_v5.settlement import infer_security_booking
+                inferred = infer_security_booking(self.store, t, security_booking_context)
+                if inferred: t.update(inferred)
+            if t.get('kind') in ('BANK_BOOKING','DIVIDEND','TAX','FEE') and not t.get('performance_depot_key'):
+                text = ' '.join(str(t.get(k) or '') for k in ('purpose','booking_text','operation','counterparty')).casefold()
+                source_key = name_keys.get(account_key(t['account']), account_key(t['account']))
+                matches = [rule for rule in rules if rule['account_key'] == source_key
+                           and t['kind'] in ('BANK_BOOKING', rule['kind'])
+                           and rule['text_pattern'].casefold() in text]
+                if len(matches) == 1:
+                    rule = matches[0]
+                    depot = records.get(rule['depot_key'])
+                    if depot and json.loads(depot['details']).get('cash_account_key') == source_key:
+                        t.update(kind=rule['kind'], security=rule['security'], performance_depot_key=rule['depot_key'],
+                                 assignment_source='Gespeicherte Zuordnungsregel')
+            if not c and not t.get('edited'):
+                from .interest_recognition import is_interest_transaction
+                if is_interest_transaction(t):
+                    t.update(kind='INTEREST',
+                             classification_source='Automatisch aus eindeutigem Zinsbuchungstext')
+            rows.append(t)
+        return rows
+
+    def edit_transaction(self, ref, values, reason):
+        tx = next((row for row in self.transactions() if reference(row) == ref), None)
+        if tx is None: raise ValueError('Buchung nicht mehr aktiv.')
+        reason = reason.strip()
+        if not reason: raise ValueError('Bitte einen Grund für die Änderung angeben.')
+        allowed = {'date','value_date','kind','amount','currency','counterparty','purpose','security','quantity',
+                   'gross_income','gross_currency','fees','taxes','withholding_tax','solidarity_tax',
+                   'withholding_country','withholding_tax_rate','transaction_reference',
+                   'tax_rate','per_share_amount','per_share_currency',
+                   'income_basis','performance_depot_key'}
+        payload = {key: values[key] for key in allowed if key in values}
+        from portfolio_v5.models import parse_date
+        if not parse_date(payload.get('date')) or parse_date(payload['date']) != payload['date']:
+            raise ValueError('Ungültiger Buchungstag.')
+        value_date = payload.get('value_date')
+        if value_date and (not parse_date(value_date) or parse_date(value_date) != value_date):
+            raise ValueError('Ungültige Valuta.')
+        try: amount = Decimal(str(payload.get('amount')))
+        except Exception: raise ValueError('Ungültiger Betrag.') from None
+        if not amount.is_finite(): raise ValueError('Ungültiger Betrag.')
+        payload['amount'] = str(amount)
+        payload['currency'] = str(payload.get('currency', '')).strip().upper()
+        if len(payload['currency']) != 3: raise ValueError('Währung mit drei Buchstaben angeben.')
+        for field in ('quantity', 'per_share_amount', 'gross_income', 'fees', 'taxes', 'withholding_tax', 'solidarity_tax',
+                      'withholding_tax_rate'):
+            value = payload.get(field)
+            if value in (None, ''):
+                payload[field] = None
+                continue
+            try: number = Decimal(str(value))
+            except Exception: raise ValueError(f'Ungültiger Wert für {field}.') from None
+            if not number.is_finite() or number < 0: raise ValueError(f'{field} muss eine nichtnegative Zahl sein.')
+            payload[field] = str(number)
+        if payload.get('withholding_tax_rate') is not None and Decimal(payload['withholding_tax_rate']) > 100:
+            raise ValueError('Der Quellensteuersatz darf nicht über 100 % liegen.')
+        tax_rate = payload.get('tax_rate')
+        if tax_rate in (None, ''):
+            payload['tax_rate'] = None
+        else:
+            try: tax_rate = Decimal(str(tax_rate))
+            except Exception: raise ValueError('Ungültiger effektiver Steuersatz.') from None
+            if not tax_rate.is_finite() or not Decimal() <= tax_rate <= Decimal(100):
+                raise ValueError('Der effektive Steuersatz muss zwischen 0 und 100 % liegen.')
+            payload['tax_rate'] = str(tax_rate)
+        payload['withholding_country'] = str(payload.get('withholding_country') or '').strip().upper()
+        if payload['withholding_country'] and (len(payload['withholding_country']) != 2 or
+                                               not payload['withholding_country'].isalpha()):
+            raise ValueError('Quellenstaat als zweistelligen Ländercode angeben, z. B. US.')
+        payload['transaction_reference'] = str(payload.get('transaction_reference') or '').strip()
+        payload['gross_currency'] = str(payload.get('gross_currency') or payload['currency']).strip().upper()
+        if len(payload['gross_currency']) != 3: raise ValueError('Bruttowährung mit drei Buchstaben angeben.')
+        payload['per_share_currency'] = str(payload.get('per_share_currency') or '').strip().upper()
+        if payload.get('per_share_amount') is not None and len(payload['per_share_currency']) != 3:
+            raise ValueError('Für den Betrag je Stück eine Währung mit drei Buchstaben angeben.')
+        if payload.get('withholding_tax') is not None and payload.get('taxes') is not None:
+            if Decimal(payload['withholding_tax']) > Decimal(payload['taxes']):
+                raise ValueError('Die Quellensteuer darf nicht höher als die gesamten Steuern sein.')
+        if payload.get('solidarity_tax') is not None and payload.get('taxes') is not None:
+            if Decimal(payload['solidarity_tax']) > Decimal(payload['taxes']):
+                raise ValueError('Der Solidaritätszuschlag darf nicht höher als die gesamten Steuern sein.')
+        if payload.get('kind') == 'DIVIDEND' and payload.get('gross_income') is not None \
+                and payload['gross_currency'] == payload['currency']:
+            expected = Decimal(payload['gross_income']) - Decimal(payload.get('fees') or 0) - Decimal(payload.get('taxes') or 0)
+            if abs(expected - amount) > Decimal('0.02'):
+                raise ValueError('Bei der Dividende muss Netto = Brutto − Gebühren − Steuern gelten.')
+        payload['income_basis'] = 'net'
+        depot_key = payload.get('performance_depot_key', '')
+        if depot_key:
+            records = {r['account_key']: r for r in self.account_records() if r['active']}
+            depot = records.get(depot_key)
+            source_key = next((r['account_key'] for r in records.values()
+                               if account_key(r['name']) == account_key(tx['account'])), account_key(tx['account']))
+            if not depot or json.loads(depot['details']).get('kind') != 'Depot':
+                raise ValueError('Bitte ein aktives Depot wählen.')
+            if json.loads(depot['details']).get('cash_account_key') != source_key:
+                raise ValueError('Das Depot ist nicht mit dem Verrechnungskonto dieser Buchung verbunden.')
+        if payload.get('kind') not in ('BANK_BOOKING','BUY','SELL','DIVIDEND','INTEREST','DEPOSIT','WITHDRAWAL','FEE','TAX','TRANSFER_IN','TRANSFER_OUT'):
+            raise ValueError('Ungültige Buchungsart.')
+        if self.backups_enabled: self.backup('before-change')
+        with self.db:
+            self.db.execute('''INSERT INTO transaction_edits(ref,payload,reason) VALUES(?,?,?)
+                ON CONFLICT(ref) DO UPDATE SET payload=excluded.payload,reason=excluded.reason,updated_at=CURRENT_TIMESTAMP''',
+                (ref,json.dumps(payload,ensure_ascii=False),reason))
+
+    def assign_portfolio_transaction(self, ref, kind, security, depot_key, reason, text_pattern=''):
+        """Attach a cash booking to one depot/security and optionally remember a rule."""
+        tx = next((row for row in self.transactions() if reference(row) == ref), None)
+        if tx is None: raise ValueError('Buchung nicht mehr aktiv.')
+        kind, security, depot_key, reason = kind.strip().upper(), security.strip(), depot_key.strip(), reason.strip()
+        if kind not in ('DIVIDEND','TAX','FEE'): raise ValueError('Nur Dividenden, Steuern und Gebühren können so zugeordnet werden.')
+        if not security: raise ValueError('Bitte eine Wertpapierposition auswählen.')
+        if not reason: raise ValueError('Bitte einen Grund oder Beleg angeben.')
+        records = {r['account_key']: r for r in self.account_records() if r['active']}
+        depot = records.get(depot_key)
+        source_key = next((r['account_key'] for r in records.values()
+                           if account_key(r['name']) == account_key(tx['account'])), account_key(tx['account']))
+        if not depot or json.loads(depot['details']).get('kind') != 'Depot':
+            raise ValueError('Bitte ein aktives Depot auswählen.')
+        if json.loads(depot['details']).get('cash_account_key') != source_key:
+            raise ValueError('Das Depot ist nicht mit dem Verrechnungskonto dieser Buchung verbunden.')
+        holdings = self.holdings(tx['date'], depot['name'])
+        if not any(security in (p.get('isin'), p.get('key'), p.get('wkn')) for p in holdings):
+            raise ValueError('Die gewählte Wertpapierposition ist an diesem Buchungstag nicht im Depot belegt.')
+        existing = self.db.execute('SELECT payload FROM transaction_edits WHERE ref=?', (ref,)).fetchone()
+        payload = json.loads(existing[0]) if existing else {}
+        payload.update(kind=kind, security=security, performance_depot_key=depot_key)
+        pattern = ' '.join(text_pattern.split()).casefold()
+        if text_pattern and len(pattern) < 4:
+            raise ValueError('Der Regeltext muss mindestens vier Zeichen enthalten.')
+        if self.backups_enabled: self.backup('before-change')
+        with self.db:
+            self.db.execute('''INSERT INTO transaction_edits(ref,payload,reason) VALUES(?,?,?)
+                ON CONFLICT(ref) DO UPDATE SET payload=excluded.payload,reason=excluded.reason,updated_at=CURRENT_TIMESTAMP''',
+                (ref,json.dumps(payload,ensure_ascii=False),reason))
+            if pattern:
+                self.db.execute('''INSERT INTO portfolio_assignment_rules(account_key,kind,text_pattern,security,depot_key,reason)
+                    VALUES(?,?,?,?,?,?) ON CONFLICT(account_key,kind,text_pattern) DO UPDATE SET
+                    security=excluded.security,depot_key=excluded.depot_key,reason=excluded.reason,created_at=CURRENT_TIMESTAMP''',
+                    (source_key,kind,pattern,security,depot_key,reason))
+
+    def portfolio_assignment_rules(self):
+        return [dict(r) for r in self.db.execute('SELECT * FROM portfolio_assignment_rules ORDER BY kind,text_pattern')]
+
+    def remove_portfolio_assignment_rule(self, identifier):
+        with self.db:
+            self.db.execute('DELETE FROM portfolio_assignment_rules WHERE id=?', (identifier,))
+
+    def exclude_transactions(self, refs, reason):
+        active = {reference(tx) for tx in self.transactions()}
+        refs = list(dict.fromkeys(refs)); reason = reason.strip()
+        if not refs or not set(refs) <= active: raise ValueError('Mindestens eine aktive Buchung auswählen.')
+        if not reason: raise ValueError('Bitte einen Grund für das Löschen angeben.')
+        if self.backups_enabled: self.backup('before-change')
+        with self.db:
+            self.db.executemany('INSERT OR REPLACE INTO transaction_exclusions(ref,reason) VALUES(?,?)',
+                                [(ref,reason) for ref in refs])
+
+    def reviewed_duplicates(self):
+        return {r[0] for r in self.db.execute('SELECT ref FROM transaction_duplicate_reviews')}
+
+    def resolve_duplicate(self, ref, reason):
+        tx = next((row for row in self.transactions() if reference(row) == ref), None)
+        if tx is None or len(tx.get('booking_sources', ())) < 2:
+            raise ValueError('Die ausgewählte Buchung ist keine erkennbare Dublette.')
+        reason = reason.strip()
+        if not reason: raise ValueError('Bitte das Prüfergebnis angeben.')
+        with self.db:
+            self.db.execute('INSERT OR REPLACE INTO transaction_duplicate_reviews(ref,reason) VALUES(?,?)',
+                            (ref,reason))
+
+    def classify(self,ref,kind,security,quantity,reason):
+        if ref not in {reference(t) for t in self.transactions()}: raise ValueError('Buchung nicht mehr aktiv.')
+        if kind not in ('BANK_BOOKING','BUY','SELL','DIVIDEND','INTEREST','DEPOSIT','WITHDRAWAL','FEE','TAX','TRANSFER_IN','TRANSFER_OUT') or not reason.strip(): raise ValueError('Art und Begründung angeben.')
+        q=Decimal(str(quantity)) if quantity not in (None,'') else None
+        if q is not None and (not q.is_finite() or q<=0): raise ValueError('Positive Stückzahl angeben.')
+        if kind in ('BUY','SELL','TRANSFER_IN','TRANSFER_OUT') and (q is None or not security.strip()): raise ValueError('Wertpapier und Stückzahl fehlen.')
+        with self.db:
+            self.db.execute('INSERT OR REPLACE INTO transaction_classifications(ref,kind,security,quantity,reason) VALUES(?,?,?,?,?)',
+                            (ref,kind,security.strip(),str(q) if q is not None else None,reason.strip()))
+
+    def remove_classification(self,ref):
+        with self.db: self.db.execute('DELETE FROM transaction_classifications WHERE ref=?',(ref,))
+
+    def confirm_fee(self,aux_ref,field,fee_ref,reason):
+        txs={reference(t):t for t in self.transactions()}; a,b=txs.get(aux_ref),txs.get(fee_ref)
+        if not a or not b or aux_ref==fee_ref or field not in ('fees','taxes') or not reason.strip(): raise ValueError('Zwei unterschiedliche aktive Buchungen und Begründung erforderlich.')
+        if b['kind']!=('FEE' if field=='fees' else 'TAX') or a['account']!=b['account'] or a['currency']!=b['currency'] or a.get(field) is None or abs(Decimal(a[field]))!=abs(Decimal(b['amount'])): raise ValueError('Gebührenbelege passen nicht zusammen.')
+        with self.db: self.db.execute('INSERT INTO fee_links VALUES(?,?,?,?)',(aux_ref,field,fee_ref,reason.strip()))
+
+    def fee_links(self,include_invalid=False):
+        txs={reference(t):t for t in self.transactions()}; result=[]
+        for r in self.db.execute('SELECT * FROM fee_links'):
+            if include_invalid: result.append(dict(r)); continue
+            a,b=txs.get(r['aux_ref']),txs.get(r['fee_ref'])
+            if a and b and r['aux_ref']!=r['fee_ref'] and a['account']==b['account'] and a['currency']==b['currency'] and a.get(r['field']) is not None and b['kind']==('FEE' if r['field']=='fees' else 'TAX') and abs(Decimal(a[r['field']]))==abs(Decimal(b['amount'])): result.append(dict(r))
+        return result
+
+    def revoke_fee(self,aux_ref,field):
+        with self.db: self.db.execute('DELETE FROM fee_links WHERE aux_ref=? AND field=?',(aux_ref,field))
+
+    def correct_action(self,identifier,**values):
+        from .import_v09 import transaction
+        if not self.db.execute('SELECT 1 FROM corporate_actions WHERE id=? AND active=1',(identifier,)).fetchone(): raise ValueError('Maßnahme nicht mehr aktiv.')
+        with transaction(self,commit=True):
+            self.add_action(**values)
+            self.revoke_action(identifier,'Durch korrigierte Maßnahme ersetzt: '+values['source'])
+
+    def revoke_action(self,identifier,reason):
+        if not reason.strip(): raise ValueError('Begründung fehlt.')
+        with self.db:
+            self.db.execute('UPDATE corporate_actions SET active=0,source=source||? WHERE id=? AND active=1',(' · Rücknahme: '+reason,identifier))
+
+    def revoke_transfer(self,identifier,reason):
+        if not reason.strip(): raise ValueError('Begründung fehlt.')
+        with self.db:
+            self.db.execute('UPDATE transfer_pairs SET note=note||? WHERE id=?',(' · Rücknahme: '+reason,identifier))
+            self.db.execute('DELETE FROM transfer_pairs WHERE id=?',(identifier,))
+
+    def confirm_recurring(self,candidate):
+        active={reference(t) for t in self.transactions()}
+        if len(candidate['refs'])<3 or not set(candidate['refs'])<=active: raise ValueError('Mindestens drei aktive Belege erforderlich.')
+        if self.db.execute('SELECT 1 FROM recurring_rules WHERE account=? AND description=? AND currency=? AND amount=? AND interval_days=?',
+                           (candidate['account'],candidate['description'],candidate['currency'],candidate['amount'],candidate['interval_days'])).fetchone(): raise ValueError('Diese Regelmäßigkeit wurde bereits bestätigt.')
+        with self.db: self.db.execute('INSERT INTO recurring_rules(account,description,currency,amount,interval_days,source_refs) VALUES(?,?,?,?,?,?)',
+            (candidate['account'],candidate['description'],candidate['currency'],candidate['amount'],candidate['interval_days'],json.dumps(candidate['refs'])))
+
+    def sync_security_master(self):
+        # Opening a reviewed database must not rewrite unchanged security records.
+        if not self.db.execute("SELECT 1 FROM sqlite_master WHERE name='v09_revision'").fetchone():
+            return PortfolioRepository.sync_security_master(self)
+        signature=str(self.revision())
+        old=self.db.execute("SELECT value FROM meta WHERE key='v09_master_signature'").fetchone()
+        if old and old[0]==signature: return
+        PortfolioRepository.sync_security_master(self)
+        with self.db: self.db.execute("INSERT OR REPLACE INTO meta VALUES('v09_master_signature',?)",(str(self.revision()),))
+
+    def remember_transaction_security_identifiers(self):
+        """Add an evidenced ISIN from a booking to an existing WKN master record."""
+        import re
+        from portfolio_v5.models import valid_isin
+        updates = set()
+        for tx in self.transactions():
+            if tx.get('assignment_source') != 'Automatisch aus Wertpapierkennung oder Positionsname und Betrag':
+                continue
+            text = ' '.join(str(tx.get(key) or '') for key in ('purpose', 'booking_text', 'operation', 'raw_text')).upper()
+            isins = {value for value in re.findall(r'(?<![A-Z0-9])[A-Z]{2}[A-Z0-9]{9}\d(?![A-Z0-9])', text)
+                     if valid_isin(value)}
+            wkns = set(re.findall(r'\b(?:WKN|WPKNR)\s*:?\s*([A-Z0-9]{6})\b', text))
+            if len(isins) == len(wkns) == 1:
+                updates.add((next(iter(isins)), next(iter(wkns))))
+        with self.db:
+            for isin, wkn in updates:
+                row = self.db.execute('SELECT security_key,isin FROM security_master WHERE wkn=?', (wkn,)).fetchone()
+                conflict = self.db.execute('SELECT security_key FROM security_master WHERE isin=?', (isin,)).fetchone()
+                if row and not row['isin'] and (not conflict or conflict['security_key'] == row['security_key']):
+                    self.db.execute('UPDATE security_master SET isin=?,updated_at=CURRENT_TIMESTAMP WHERE security_key=?',
+                                    (isin, row['security_key']))
+        if updates and 'assets' in self.__dict__:
+            self.assets.sync()
+
+    def save_view(self, name, payload, replace=False):
+        name = name.strip()
+        if not name or len(name) > 100: raise ValueError('Name: 1 bis 100 Zeichen.')
+        with self.db:
+            old = self.db.execute('SELECT payload FROM saved_views WHERE name=?', (name,)).fetchone()
+            if old and not replace: raise ValueError('Name bereits vorhanden. Aktualisieren oder unter neuem Namen speichern.')
+            if old: self.db.execute('INSERT INTO view_history(name,payload,operation) VALUES(?,?,?)', (name, old[0], 'UPDATE'))
+            self.db.execute('INSERT OR REPLACE INTO saved_views VALUES(?,?)', (name, json.dumps(payload, ensure_ascii=False)))
+
+    def delete_view(self, name):
+        with self.db:
+            old = self.db.execute('SELECT payload FROM saved_views WHERE name=?', (name,)).fetchone()
+            if old:
+                self.db.execute('INSERT INTO view_history(name,payload,operation) VALUES(?,?,?)', (name, old[0], 'DELETE'))
+                self.db.execute('DELETE FROM saved_views WHERE name=?', (name,))
+
+    def undo_view(self):
+        with self.db:
+            row = self.db.execute('SELECT * FROM view_history ORDER BY id DESC LIMIT 1').fetchone()
+            if not row: return None
+            name = row['name']
+            if row['operation'] == 'DELETE' and name in self.saved_views():
+                name += ' (wiederhergestellt ' + str(row['id']) + ')'
+            self.db.execute('INSERT OR REPLACE INTO saved_views VALUES(?,?)', (name, row['payload']))
+            self.db.execute('DELETE FROM view_history WHERE id=?', (row['id'],))
+            return name
+
+    def csv_profiles(self): return {r[0]: json.loads(r[1]) for r in self.db.execute('SELECT * FROM csv_profiles ORDER BY name')}
+
+    def save_csv_profile(self, name, payload):
+        if not name.strip(): raise ValueError('Profilname fehlt.')
+        with self.db: self.db.execute('INSERT OR REPLACE INTO csv_profiles VALUES(?,?)', (name.strip(), json.dumps(payload)))
+
+    def transfer_pairs(self,include_invalid=False):
+        active = {reference(t): t for t in self.transactions()}
+        return [dict(r) for r in self.db.execute('SELECT * FROM transfer_pairs') if include_invalid or valid_cash_transfer(active.get(r['first_ref']),active.get(r['second_ref']))]
+
+    def confirm_transfer(self, first, second, note):
+        active = {reference(t): t for t in self.transactions()}
+        a, b = active.get(first), active.get(second)
+        if not valid_cash_transfer(a,b): raise ValueError('Nur passende Geldbewegungen zwischen unterschiedlichen Konten können als Umbuchung bestätigt werden.')
+        if not a or not b or a['account'] == b['account'] or a['currency'] != b['currency'] or Decimal(a['amount']) + Decimal(b['amount']) != 0 or not Decimal(a['amount']):
+            raise ValueError('Umbuchung benötigt zwei aktive, betragsgleiche Gegenbuchungen auf unterschiedlichen Konten.')
+        if a.get('security') or b.get('security'): raise ValueError('Wertpapierbewegungen als Kapitalmaßnahme erfassen.')
+        if abs((date.fromisoformat(a['date']) - date.fromisoformat(b['date'])).days) > 3: raise ValueError('Buchungen liegen mehr als drei Tage auseinander.')
+        used = {r[k] for r in self.transfer_pairs(include_invalid=True) for k in ('first_ref', 'second_ref')}
+        if first in used or second in used or not note.strip(): raise ValueError('Bereits zugeordnet oder Begründung fehlt.')
+        with self.db: self.db.execute('INSERT INTO transfer_pairs(first_ref,second_ref,note) VALUES(?,?,?)', (first, second, note.strip()))
+
+    def add_action(self, day, depot, security, kind, source, target='', target_depot='', ratio='1', units=None, sequence=0):
+        date.fromisoformat(day)
+        if kind not in ('SPLIT', 'MERGER', 'TRANSFER') or not source.strip() or not depot or not security: raise ValueError('Art, Depot, Wertpapier und Belegquelle angeben.')
+        factor = Decimal(str(ratio))
+        if not factor.is_finite() or factor <= 0: raise ValueError('Verhältnis muss positiv sein.')
+        if kind == 'MERGER' and (not target or target == security): raise ValueError('Abweichende Zielkennung angeben.')
+        if kind == 'TRANSFER':
+            qty = Decimal(str(units))
+            if not target_depot or target_depot == depot or not qty.is_finite() or qty <= 0: raise ValueError('Anderes Zieldepot und positive Stückzahl angeben.')
+            if any(t['date'] == day and t.get('depot') == depot and t.get('security') == security and t['kind'] == 'TRANSFER_OUT' for t in self.transactions()):
+                raise ValueError('An diesem Tag liegt bereits eine ausgehende Transferbuchung vor; Doppelzählung vermeiden.')
+        with self.db:
+            self.db.execute('INSERT INTO corporate_actions(day,depot,security,kind,target,target_depot,ratio,units,sequence,source) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                (day,depot,security,kind,target,target_depot,str(factor),str(units) if units is not None else None,int(sequence),source.strip()))
+
+    def actions(self, start, end):
+        return [dict(r) for r in self.db.execute('SELECT * FROM corporate_actions WHERE active=1 AND day>? AND day<=? ORDER BY day,sequence,id', (start,end))]
+
+    def save_fx(self, day, currency, rate, source):
+        date.fromisoformat(day); rate = Decimal(str(rate)); currency = currency.strip().upper()
+        if len(currency) != 3 or not currency.isalpha() or not rate.is_finite() or rate <= 0 or not source.strip(): raise ValueError('Datum, ISO-Währung, positiven EUR-Kurs und Quelle angeben.')
+        if currency == 'EUR' and rate != 1: raise ValueError('EUR/EUR muss 1 sein.')
+        with self.db: self.db.execute('INSERT OR REPLACE INTO historical_fx VALUES(?,?,?,?)', (day,currency,str(rate),source.strip()))
+
+    def historical_rate(self, currency, day):
+        if currency == 'EUR': return Decimal(1)
+        row = self.db.execute('SELECT day,rate FROM historical_fx WHERE currency=? AND day<=? ORDER BY day DESC LIMIT 1', (currency,day)).fetchone()
+        return Decimal(row['rate']) if row and (date.fromisoformat(day) - date.fromisoformat(row['day'])).days <= 7 else None

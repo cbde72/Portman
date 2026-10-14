@@ -1,0 +1,45 @@
+# Beispiel-TOML-Profil für ein Bank-Plugin
+# Diese Datei dient als Vorlage für eigene TOML-basierte PDF-Import-Plugin.
+# Kopieren Sie diese Datei und passen Sie die Werte an Ihre Bank an.
+
+[plugin]
+id = "example.bank"          # Eindeutige Plugin-ID (Format: domain.name)
+bank = "Example Bank"        # Anzeigename der Bank
+version = 1                # Versionsnummer
+
+# Dokumenttyp 1: Kontoauszug
+[[documents]]
+id = "kontoauszug"                    # Eindeutige Dokument-ID
+type = "Example Bank Kontoauszug"     # Anzeigename des Dokumenttyps
+required = ["Example Bank", "Buchungstag"]  # Pflichtmerkmale (alle müssen vorkommen)
+optional = ["IBAN", "Kontostand"]     # Optionale Merkmale (erhöhen Konfidenz)
+confidence = 0.80                     # Basis-Konfidenz (0.0–1.0)
+
+# Kontoerkennung
+account_regex = "IBAN\\s*:?[ \\t]*(?P<id>[A-Z]{2}[0-9]{2}[A-Z0-9 ]{11,30})"
+account_prefix = "Example Bank "      # Präfix vor der erkannten Kontonummer
+currency = "EUR"
+
+# Buchungen
+transaction_kind = "BANK_BOOKING"
+transaction_regex = "(?m)^(?P<date>[0-9]{2}\\.[0-9]{2}\\.[0-9]{4})[ \\t]+(?P<value_date>[0-9]{2}\\.[0-9]{2}\\.[0-9]{4})[ \\t]+(?P<purpose>.*?)[ \\t]+(?P<amount>[+-]?[0-9.]+,[0-9]{2})$"
+
+# Saldo
+balance_regex = "Kontostand(?: zum)?[ \\t]+(?P<date>[0-9]{2}\\.[0-9]{2}\\.[0-9]{4})[ \\t]+(?P<amount>[+-]?[0-9.]+,[0-9]{2})"
+balance_category = "Liquidität"
+
+# Dokumentdatum
+document_date_regex = "Stand(?: zum)?[ \\t]+(?P<date>[0-9]{2}\\.[0-9]{2}\\.[0-9]{4})"
+
+# Dokumenttyp 2: Depotstand
+[[documents]]
+id = "depotstand"
+type = "Example Bank Depotstand"
+required = ["Example Bank", "Depotübersicht"]
+confidence = 0.85
+
+account_regex = "Depot(?:nummer|-Nr\\.)?[ \\t]*:?[ \\t]*(?P<id>[0-9/-]+)"
+snapshot_date_regex = "Bewertung zum[ \\t]+(?P<date>[0-9]{2}\\.[0-9]{2}\\.[0-9]{4})"
+position_regex = "(?m)^(?P<isin>[A-Z]{2}[A-Z0-9]{9}[0-9])[ \\t]+(?P<name>.*?)[ \\t]+(?P<quantity>[0-9.,]+)[ \\t]+(?P<value>[0-9.]+,[0-9]{2})[ \\t]+(?P<currency>[A-Z]{3})$"
+asset_type = "Sonstiges"
+complete_snapshot = true

@@ -1,0 +1,7 @@
+[tool.ruff]
+target-version = "py313"
+line-length = 160
+exclude = [".venv", "build", "dist", "tmp"]
+
+[tool.ruff.lint]
+select = ["F"]

@@ -1,0 +1,25 @@
+# Zeilenenden normalisieren: LF im Repo, plattformuebergreifend stabil
+* text=auto
+
+# Windows-Skripte behalten CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binaerdateien nicht anfassen
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.xlsx binary
+*.sqlite binary
+*.onnx binary
+
+# Sprachspezifisch
+*.py  text eol=lf
+*.md  text eol=lf
+*.toml text eol=lf
+*.ini text eol=lf
+*.json text eol=lf

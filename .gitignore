@@ -1,0 +1,91 @@
+# ============================================================
+# PortmanNL – .gitignore
+# ============================================================
+
+# --- Python -------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# --- Paketierung / Build ------------------------------------
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+*.egg
+
+# --- Virtuelle Umgebungen (227 MB) --------------------------
+.venv/
+venv/
+env/
+ENV/
+
+# --- Test-/Lint-/Type-Caches --------------------------------
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+.tox/
+.nox/
+.hypothesis/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.cover
+
+# --- Laufzeitdaten des Programms (persoenlich!) -------------
+# Enthaelt Portfolio-SQLite, Einstellungen, Backups, Sessions.
+data/
+logs/
+history/
+factsheets/
+
+# --- Generierte Laufzeit-Konfiguration im Projekt-Root ------
+portfolio_settings.json
+custom_charts.json
+*.last-good
+portman.lock
+
+# --- Persoenliche Exporte (Konten/Portfolios) --------------
+# Enthalten echte Namen und Kontonummern -> niemals versionieren.
+*.portman.json
+
+# --- SQLite-Reste / WAL / Backups ---------------------------
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
+*.tmp-shm
+*.tmp-wal
+*.db-journal
+
+# --- Logs ---------------------------------------------------
+*.log
+
+# --- Editor / Betriebssystem --------------------------------
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# VS Code: geteilte Startkonfiguration wird versioniert
+# (tests/test_ing_credentials.py prueft .vscode/launch.json),
+# persoenliche Settings bleiben lokal.
+.vscode/*
+!.vscode/launch.json
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/tasks.json
+
+# --- Sonstiges ----------------------------------------------
+*.bak
+*.orig
+*.rej
+*.tmp
