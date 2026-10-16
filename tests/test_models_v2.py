@@ -4,7 +4,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from portfolio_v5.models import (AccountInfo, AccountStatement, BankTransaction, CorporateEvent,
-    CostItem, CostReport, FeeItem, ImportBatch, Kind, SecurityInfo, TaxEvent, TaxItem,
+    CostItem, CostReport, FeeItem, ImportBatch, Kind, SecurityInfo, Snapshot, TaxEvent, TaxItem,
     Transaction, check_transaction, number, parse_decimal, parse_money, parse_quantity)
 from portman.import_v09 import decode_batch
 from portman.repository_v09 import RepositoryV09
@@ -82,6 +82,24 @@ def test_dates_and_exchange_rates_are_strictly_validated():
     ambiguous = Transaction('Depot', 'ambiguous', '2026-01-01', Kind.DIVIDEND, '90', 'EUR',
                             gross_amount='90', original_amount='100', fx_rate='1.111111')
     assert any('ohne Fremdwährung' in problem for problem in check_transaction(ambiguous))
+
+
+def test_validation_issues_have_stable_codes_and_severities():
+    invalid = Transaction('Depot', 'coded', '2026-02-30', Kind.BUY, 'NaN', 'EUR')
+    issues = check_transaction(invalid)
+    by_code = {issue.code: issue for issue in issues}
+    assert by_code['NUMBER_INVALID'].severity == 'error'
+    assert by_code['NUMBER_INVALID'].field == 'amount'
+    assert by_code['DATE_INVALID'].severity == 'warning'
+    assert isinstance(by_code['NUMBER_INVALID'], str)
+
+
+def test_import_batch_reports_complete_partial_and_invalid_quality():
+    assert ImportBatch('complete', '1').quality_status == 'complete'
+    assert ImportBatch('partial', '2', snapshots=[
+        Snapshot('Depot', '2026-01', '2026-01-01', 'Test', complete=False)]).quality_status == 'partial'
+    assert ImportBatch('warning', '3', warnings=['prüfen']).quality_status == 'partial'
+    assert ImportBatch('invalid', '4', errors=['kaputt']).quality_status == 'invalid'
 
 
 def test_exchange_rate_preserves_legacy_division_and_supports_explicit_pair():
