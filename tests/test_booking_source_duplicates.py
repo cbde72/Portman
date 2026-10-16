@@ -132,6 +132,19 @@ def test_trade_confirmation_adds_provision_to_matching_statement_booking(repo):
     assert len(transactions[0]['booking_sources']) == 2
 
 
+def test_distinct_security_orders_with_same_day_and_amount_are_not_merged(repo):
+    first = batch('pdf', 'order-one', reference='', amount='-100',
+                  purpose='Kauf ISIN: DE0005933998', valuta='2026-07-27')
+    second = batch('online', 'order-two', reference='', amount='-100',
+                   purpose='Kauf ISIN: DE0005933998', valuta='2026-07-27')
+    first.transactions[0].security = second.transactions[0].security = 'DE0005933998'
+    first.transactions[0].order_id = 'ORDER-ONE'
+    second.transactions[0].order_id = 'ORDER-TWO'
+    repo.store.import_batch(first)
+    repo.store.import_batch(second)
+    assert len(repo.transactions()) == 2
+
+
 def test_reassignment_rechecks_account_boundary(repo):
     repo.store.import_batch(batch('online','sync'))
     imported=repo.store.import_batch(batch('pdf','statement'))

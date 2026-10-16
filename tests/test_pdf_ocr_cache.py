@@ -16,6 +16,12 @@ def test_seed_model_cache_copies_models_once_and_keeps_them(tmp_path):
     seed_model_cache(source, target)
     assert (target / 'det.onnx').stat().st_mtime_ns == first_mtime
 
+    # A package update can replace a model without changing its byte length.
+    (source / 'det.onnx').write_bytes(b'new-model!')
+    assert len(b'new-model!') == len(b'model-data')
+    seed_model_cache(source, target)
+    assert (target / 'det.onnx').read_bytes() == b'new-model!'
+
 
 def test_persistent_model_dir_uses_local_app_data(monkeypatch, tmp_path):
     from portfolio_v5.pdf_ocr import persistent_model_dir

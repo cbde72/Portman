@@ -3,6 +3,7 @@ from functools import lru_cache
 import os
 from pathlib import Path
 import shutil
+import hashlib
 from threading import Lock
 
 _ocr_lock = Lock()
@@ -23,7 +24,10 @@ def seed_model_cache(source, target):
         if not model.is_file() or model.name == '.gitkeep':
             continue
         cached = target / model.name
-        if not cached.exists() or cached.stat().st_size != model.stat().st_size:
+        changed = (not cached.exists() or cached.stat().st_size != model.stat().st_size)
+        if not changed:
+            changed = hashlib.sha256(cached.read_bytes()).digest() != hashlib.sha256(model.read_bytes()).digest()
+        if changed:
             shutil.copy2(model, cached)
     return target
 
@@ -96,7 +100,8 @@ def ocr_page(path, page_index):
                 page.close()
     if result.txts is None:
         return '', 0.0
-    source=Path(path); key=(str(source.resolve()),source.stat().st_mtime_ns,source.stat().st_size,page_index)
+    source=Path(path); stat=source.stat()
+    key=(str(source.resolve()),stat.st_mtime_ns,stat.st_ctime_ns,stat.st_size,page_index)
     regions=[{'text':str(text),'confidence':float(score),'box':[min(float(p[0]) for p in box)/scale,min(float(p[1]) for p in box)/scale,max(float(p[0]) for p in box)/scale,max(float(p[1]) for p in box)/scale]} for box,text,score in zip(result.boxes,result.txts,result.scores)]
     if len(_region_cache)>=8: _region_cache.pop(next(iter(_region_cache)))
     _region_cache[key]=regions
@@ -104,6 +109,7 @@ def ocr_page(path, page_index):
 
 
 def ocr_page_regions(path,page_index):
-    source=Path(path); key=(str(source.resolve()),source.stat().st_mtime_ns,source.stat().st_size,page_index)
+    source=Path(path); stat=source.stat()
+    key=(str(source.resolve()),stat.st_mtime_ns,stat.st_ctime_ns,stat.st_size,page_index)
     if key not in _region_cache: ocr_page(path,page_index)
     return list(_region_cache.get(key,[]))

@@ -393,6 +393,22 @@ class PortfolioRepository:
     def save_wkn(self, key, wkn, source='Manuell eingetragen'):
         return self.update_position(key, wkn=wkn, source=source)
 
+    def _resolve_security_key(self, key):
+        """Resolve a current ISIN/WKN alias to the stable master key."""
+        value = str(key or '').strip().upper()
+        direct = self.db.execute(
+            'SELECT security_key FROM security_master WHERE security_key=?', (value,)).fetchone()
+        if direct:
+            return direct['security_key']
+        if value.startswith('WKN:'):
+            rows = self.db.execute(
+                'SELECT security_key FROM security_master WHERE wkn=?', (value[4:],)).fetchall()
+        else:
+            rows = self.db.execute(
+                'SELECT security_key FROM security_master WHERE isin=? OR wkn=?', (value, value)).fetchall()
+        keys = {row['security_key'] for row in rows}
+        return next(iter(keys)) if len(keys) == 1 else None
+
     def _save_wkn(self, key, wkn, source):
         wkn = wkn.strip().upper()
         if len(wkn) != 6 or not all(c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789' for c in wkn):
@@ -414,6 +430,9 @@ class PortfolioRepository:
         """Single write entry point for user initiated position master-data edits."""
         if classification is None and wkn is None:
             raise ValueError('Keine Änderung für die Depotposition angegeben.')
+        key = self._resolve_security_key(key)
+        if key is None:
+            raise ValueError('Wertpapier nicht gefunden. Bitte die Depotpositionen neu laden.')
         if classification is not None:
             self._save_security_classification(key, classification)
         if wkn is not None:
@@ -421,9 +440,10 @@ class PortfolioRepository:
 
     def security_classification(self, key):
         from .security_classification import CLASSIFICATION_CHOICES
+        key = self._resolve_security_key(key)
+        if key is None:
+            raise ValueError('Wertpapier nicht gefunden. Bitte die Depotpositionen neu laden.')
         row = self.db.execute('SELECT * FROM security_master WHERE security_key=?', (key,)).fetchone()
-        if row is None:
-            raise ValueError('Wertpapier nicht gefunden. Bitte Depotpositionen neu laden.')
         override = self.db.execute('SELECT * FROM security_classifications WHERE security_key=?', (key,)).fetchone()
         return {'name': row['canonical_name'],
                 'base': {field: row[field] for field in CLASSIFICATION_CHOICES},

@@ -35,6 +35,14 @@ def security_identifiers(tx):
 def same_booking(a, b):
     if a.get('value_date') and b.get('value_date') and a['value_date'] != b['value_date']: return False
     if a.get('counterparty_iban') and b.get('counterparty_iban') and normalized(a['counterparty_iban']) != normalized(b['counterparty_iban']): return False
+    # Explicit business references outrank a coincidentally identical amount,
+    # date and security. Two orders for the same instrument must stay separate.
+    # ``transaction_reference`` is intentionally excluded: legacy importers
+    # populate it from the (sometimes line-wrapped) bank reference.
+    for field in ('order_id', 'document_reference', 'execution_ref'):
+        left, right = reference(a.get(field)), reference(b.get(field))
+        if left and right and left != right:
+            return False
     ra, rb = reference(a.get('bank_reference')), reference(b.get('bank_reference'))
     if ra and rb and ra == rb: return True
     # comdirect prints a long online bank reference across two PDF lines.

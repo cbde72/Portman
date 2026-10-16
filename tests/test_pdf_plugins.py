@@ -59,6 +59,39 @@ def test_registry_rejects_ambiguous_document_handlers():
         select_plugin(document('x'), [Plugin()])
 
 
+def test_registry_collapses_duplicate_detection_of_same_handler():
+    class Plugin:
+        plugin_id, bank_name, version = 'test', 'Test', '1'
+        def detect(self, doc):
+            return [Detection(.91, 'A', 'same'), Detection(.86, 'A', 'same')]
+        def parse(self, document, detection, context): return context.batch
+    plugin, detection = select_plugin(document('x'), [Plugin()])
+    assert plugin.plugin_id == 'test'
+    assert detection.handler_id == 'same'
+    assert detection.confidence == .91
+
+
+def test_deka_missing_turnover_is_partial_snapshot():
+    import importlib.util
+    path = Path(__file__).resolve().parents[1] / 'pdf_plugins' / 'deka_quartalsbericht.py'
+    spec = importlib.util.spec_from_file_location('deka_partial_snapshot_test', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    source = document('''Deka
+Quartalsbericht per 30.09.2026
+Depot: 12345678
+Depotübersicht
+DE0008474511 01 AriDeka CF 100,00 +0,00
+Gesamt in EUR 100,00 +0,00
+''')
+    detection = module.plugin.detect(source)[0]
+    batch = module.plugin.parse(
+        source, detection, ParseContext(ImportBatch('deka.pdf', 'hash', source_sheet='PDF')))
+    assert batch.snapshots[0].complete is False
+    assert batch.snapshots[0].positions[0].quantity is None
+    assert any('Anteile bekannt' in warning for warning in batch.warnings)
+
+
 def test_toml_plugin_preserves_named_reference_group(tmp_path):
     profile = tmp_path / 'reference.toml'
     profile.write_text('''

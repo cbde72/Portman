@@ -52,6 +52,40 @@ def test_wkn_identity_and_validation(tmp_path):
     repo.close()
 
 
+def test_later_isin_resolves_to_stable_wkn_master_key(tmp_path):
+    repo = PortfolioRepository(tmp_path / 'alias.sqlite')
+    repo.commit_batches([batch(isin='', wkn='123456')])
+    repo.commit_batches([batch('2', isin='DE0000000001', wkn='123456')])
+    assert repo.db.execute(
+        'SELECT security_key FROM security_master WHERE isin=?', ('DE0000000001',)).fetchone()[0] == 'WKN:123456'
+
+    state = repo.security_classification('DE0000000001')
+    assert state['name'] == 'Testfonds'
+    repo.save_security_classification('DE0000000001', {'region': 'Europa'})
+    assert repo.security_classification('WKN:123456')['overrides']['region'] == 'Europa'
+    repo.close()
+
+
+def test_position_editor_handles_a_genuinely_stale_row(qtbot):
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QTableWidget, QTableWidgetItem
+    from portman.gui.position_tables import open_position_editor
+
+    table = QTableWidget(1, 1)
+    item = QTableWidgetItem('missing')
+    item.setData(Qt.ItemDataRole.UserRole, 'missing')
+    table.setItem(0, 0, item)
+    qtbot.addWidget(table)
+    window = SimpleNamespace(
+        tables={'Alle': table}, get_current_category=lambda: 'Alle',
+        repository=SimpleNamespace(db=SimpleNamespace(total_changes=0)), reload_portfolio=lambda: None)
+    with patch('portman.classification_dialog.WertpapierEditDialog',
+               side_effect=ValueError('Wertpapier nicht gefunden')), \
+         patch('portman.gui.position_tables.QMessageBox.warning') as warning:
+        open_position_editor(window, table.model().index(0, 0))
+    warning.assert_called_once()
+
+
 def test_dialog_reset_cancel_and_save(tmp_path, qtbot):
     from PySide6.QtWidgets import QApplication
     from portman.classification_dialog import ClassificationDialog

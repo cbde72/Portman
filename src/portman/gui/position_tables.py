@@ -43,7 +43,12 @@ def open_position_editor(window, index=None):
         return
     from portman.classification_dialog import WertpapierEditDialog
     revision = window.repository.db.total_changes
-    accepted = WertpapierEditDialog(window.repository, index.data(Qt.ItemDataRole.UserRole), window).exec()
+    try:
+        accepted = WertpapierEditDialog(
+            window.repository, index.data(Qt.ItemDataRole.UserRole), window).exec()
+    except ValueError as error:
+        QMessageBox.warning(window, 'Wertpapier nicht verfügbar', str(error))
+        return
     if accepted or window.repository.db.total_changes != revision:
         window.reload_portfolio()
 

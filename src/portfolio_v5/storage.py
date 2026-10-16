@@ -6,7 +6,7 @@ import sqlite3
 from collections import defaultdict
 from dataclasses import asdict
 from datetime import date, datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from functools import wraps
 from bisect import bisect_right
@@ -484,6 +484,36 @@ class Store:
                 raise ValueError('Ein gewähltes Zielkonto fehlt oder wurde gelöscht. Importvorschau erneut öffnen.')
         if set(batch.remember_assignments) - set(assignments):
             raise ValueError('Für gemerkte Zuordnungen muss ein bestehendes Zielkonto gewählt werden.')
+        from .models import check_transaction, valid_isin
+        for snapshot in batch.snapshots:
+            try:
+                date.fromisoformat(snapshot.as_of or snapshot.period + '-01')
+            except (TypeError, ValueError):
+                raise ValueError(f'{snapshot.sheet}: ungültiger Depotstichtag {snapshot.as_of or snapshot.period!r}.') from None
+            for position in snapshot.positions:
+                if position.isin and not valid_isin(position.isin):
+                    batch.warnings.append(
+                        f'{snapshot.sheet}: ungültige ISIN {position.isin!r} bei {position.name}; '
+                        'Kennung unverändert übernommen und zur Prüfung markiert.')
+                for field in ('quantity', 'cost', 'value', 'price'):
+                    value = getattr(position, field, None)
+                    if value is not None:
+                        try:
+                            parsed = Decimal(value)
+                            if not parsed.is_finite(): raise InvalidOperation
+                        except (InvalidOperation, TypeError, ValueError):
+                            raise ValueError(f'{snapshot.sheet}: {position.name}: {field} ist keine endliche Zahl.') from None
+        for tx in batch.transactions:
+            problems = check_transaction(tx)
+            if problems:
+                source = f'Buchung {tx.external_id or "ohne ID"}'
+                hard_problems = [problem for problem in problems if
+                    'ungültige oder nicht endliche Dezimalzahl' in problem or
+                    'Exponentschreibweise' in problem or
+                    (tx.kind == 'ADVANCE_LUMP_SUM' and problem.startswith('Vorabpauschale'))]
+                if hard_problems:
+                    raise ValueError(source + ': ' + '; '.join(hard_problems))
+                batch.warnings.extend(source + ': ' + problem for problem in problems)
         from .comdirect_identity import preserve_booking_ids
         batch = preserve_booking_ids(self, batch)
         payload = asdict(batch)
@@ -550,7 +580,15 @@ class Store:
                 return {'status': 'duplicate', 'path': batch.path, 'id': duplicate['id']}
             cur = self.db.execute('INSERT INTO imports(path,file_hash,parser,imported_at,report) VALUES(?,?,?,?,?)',
                                   (batch.path, import_key, PARSER_VERSION, datetime.now(timezone.utc).isoformat(),
-                                   json.dumps({'source_sha256': batch.file_hash, **batch.summary(), 'account_assignments': assignments, 'source_sheet': batch.source_sheet}, ensure_ascii=False)))
+                                   json.dumps({'source_sha256': batch.file_hash, **batch.summary(),
+                                               'account_assignments': assignments,
+                                               'source_sheet': batch.source_sheet,
+                                               'parser_provenance': {
+                                                   'plugin_id': batch.plugin_id,
+                                                   'plugin_version': batch.plugin_version,
+                                                   'handler': batch.plugin_handler,
+                                                   'detection_confidence': batch.detection_confidence,
+                                               }}, ensure_ascii=False)))
             iid = cur.lastrowid
             result['id'] = iid
             result['documents'] = 0

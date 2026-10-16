@@ -149,7 +149,7 @@ class DekaQuartalsberichtPlugin:
         complete = all(p.quantity is not None for p in positions)
         batch.snapshots.append(Snapshot(account=account, period=as_of[:7], as_of=as_of,
                                         sheet='Deka Quartalsbericht', positions=positions,
-                                        complete=True, warnings=warnings))
+                                        complete=complete, warnings=warnings))
         batch.transactions.extend(transactions)
         batch.pdf_booking_evidence.extend(evidence)
         batch.documents.append(BankDocument(

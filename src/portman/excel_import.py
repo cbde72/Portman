@@ -1,6 +1,7 @@
 """Deka annual report tables with separate subaccounts and source rows."""
 from portfolio_v5.importers import read_sheets, parse_file
-from portfolio_v5.models import ImportBatch, Snapshot, Position, BankTransaction, digest, money, number, parse_date, text, norm
+from portfolio_v5.models import (ImportBatch, Snapshot, Position, BankTransaction, digest,
+    parse_date, parse_decimal, parse_money, parse_quantity, text, norm)
 from portman.storage_v09 import file_hash
 
 
@@ -16,7 +17,7 @@ def sheet_kind(rows):
 
 
 def source_account(data):
-    depot, sub = text(data.get('depot')), number(data.get('unterdepot'))
+    depot, sub = text(data.get('depot')), parse_decimal(data.get('unterdepot'), locale='de_DE')
     if not depot or sub is None or float(sub) < 0 or not float(sub).is_integer():
         raise ValueError('Depot oder Unterdepot fehlt / ist ungültig.')
     return f'Deka {depot} · Unterdepot {int(float(sub)):02d}'
@@ -49,7 +50,8 @@ def parse_excel_file(path, sheets=None):
                     raise ValueError('ISIN fehlt / ist ungültig.')
                 if kind == 'Bestände':
                     day = parse_date(data.get('datum'))
-                    quantity, value = number(data.get('anteile')), money(data.get('wert_eur'))
+                    quantity = parse_quantity(data.get('anteile'), locale='de_DE')
+                    value = parse_money(data.get('wert_eur'), 'EUR', locale='de_DE')
                     if not day or quantity is None or value is None or float(quantity) < 0 or float(value) < 0:
                         raise ValueError('Datum, Bestand oder Wert fehlt / ist ungültig.')
                     key = account, day, isin
@@ -64,7 +66,8 @@ def parse_excel_file(path, sheets=None):
                         asset_type='Fonds', quantity=quantity, value=value, quote_date=day, row=row_number))
                 else:
                     day = parse_date(data.get('buchungstag'))
-                    amount, quantity = money(data.get('betrag_eur')), number(data.get('anteile'))
+                    amount = parse_money(data.get('betrag_eur'), 'EUR', locale='de_DE')
+                    quantity = parse_quantity(data.get('anteile'), locale='de_DE')
                     if not day or amount is None or quantity is None or float(amount) < 0 or float(quantity) < 0:
                         raise ValueError('Datum, Betrag oder Anteile fehlt / ist ungültig.')
                     operation = norm(data.get('umsatzart'))
@@ -86,10 +89,10 @@ def parse_excel_file(path, sheets=None):
                         value_date=parse_date(data.get('abrechnungstag')) or '', operation=text(data.get('umsatzart')),
                         purpose=text(data.get('quelle')), bank_reference=reference,
                         document_reference=reference, transaction_reference=reference, raw_text=repr(data),
-                        withholding_tax=money(data.get('quellensteuer')),
+                        withholding_tax=parse_money(data.get('quellensteuer'), 'EUR', locale='de_DE'),
                         withholding_country=text(data.get('quellenstaat')).upper(),
-                        withholding_tax_rate=number(data.get('quellensteuersatz')),
-                        tax_rate=number(data.get('steuersatz')))
+                        withholding_tax_rate=parse_decimal(data.get('quellensteuersatz'), locale='de_DE'),
+                        tax_rate=parse_decimal(data.get('steuersatz'), locale='de_DE'))
                     if dividend:
                         batch.transactions.append(BankTransaction(**common, external_id='deka:' + identity + ':dividend', kind='DIVIDEND', amount=amount))
                     batch.transactions.append(BankTransaction(**common, external_id='deka:' + identity + ':buy', kind='BUY', amount='-' + amount, quantity=quantity))

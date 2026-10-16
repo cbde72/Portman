@@ -1,11 +1,13 @@
 """Read statements, extract locally with OCR as needed, and prepare a review batch."""
 import hashlib
 import re
+from datetime import date
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from pypdf import PdfReader
 
-from .models import ImportBatch
+from .models import ImportBatch, check_transaction, valid_isin
 from pdf_plugins._generic_document import analyse_pages as analyse_pages  # re-exported for tests
 from pdf_plugins._generic_document import parse_generic_document
 
@@ -16,9 +18,39 @@ def _validate_plugin_batch(batch, document):
     for tx in batch.transactions:
         if not tx.account or not tx.external_id or not tx.date or not tx.currency or tx.amount is None:
             raise ValueError('Plugin erzeugte eine unvollständige Buchung.')
+        try:
+            date.fromisoformat(tx.date)
+            amount = Decimal(tx.amount)
+            if not amount.is_finite(): raise InvalidOperation
+        except (InvalidOperation, TypeError, ValueError):
+            raise ValueError(f'Plugin erzeugte eine Buchung mit ungültigem Datum oder Betrag: {tx.external_id}.') from None
+        problems = check_transaction(tx)
+        hard_problems = [problem for problem in problems if
+            'ungültige oder nicht endliche Dezimalzahl' in problem or
+            'Exponentschreibweise' in problem or
+            (tx.kind == 'ADVANCE_LUMP_SUM' and problem.startswith('Vorabpauschale'))]
+        if hard_problems:
+            raise ValueError(f'Buchung {tx.external_id}: ' + '; '.join(hard_problems))
+        batch.warnings.extend(f'Buchung {tx.external_id}: {problem}' for problem in problems)
     for snapshot in batch.snapshots:
         if not snapshot.account or not snapshot.as_of:
             raise ValueError('Plugin erzeugte einen Depotstand ohne Depot oder Stichtag.')
+        try:
+            date.fromisoformat(snapshot.as_of)
+        except (TypeError, ValueError):
+            raise ValueError(f'Plugin erzeugte einen Depotstand mit ungültigem Stichtag: {snapshot.as_of!r}.') from None
+        for position in snapshot.positions:
+            if position.isin and not valid_isin(position.isin):
+                batch.warnings.append(
+                    f'{snapshot.sheet}: ungültige ISIN {position.isin!r} bei {position.name}; Originalwert beibehalten.')
+            for field in ('quantity', 'cost', 'value', 'price'):
+                value = getattr(position, field, None)
+                if value is not None:
+                    try:
+                        parsed = Decimal(value)
+                        if not parsed.is_finite(): raise InvalidOperation
+                    except (InvalidOperation, TypeError, ValueError):
+                        raise ValueError(f'{snapshot.sheet}: {position.name}: {field} ist keine endliche Zahl.') from None
     if batch.file_hash != document.file_hash: raise ValueError('Plugin darf den PDF-Dateihash nicht verändern.')
 
 
@@ -91,7 +123,13 @@ def parse_pdf(path, *, allow_ocr=True, preferred_plugin=None, preferred_handler=
             plugin = next((item for item in plugins if item.plugin_id == preferred_plugin), None)
             if plugin is None: raise ValueError('Gewähltes PDF-Plugin ist nicht installiert: ' + preferred_plugin)
             detections = plugin.detect(document)
-            detection = next((item for item in detections if not preferred_handler or item.handler_id == preferred_handler), None)
+            matches = [item for item in detections if not preferred_handler or item.handler_id == preferred_handler]
+            matches.sort(key=lambda item: item.confidence, reverse=True)
+            if len(matches) > 1 and not preferred_handler \
+                    and matches[0].confidence - matches[1].confidence < .10 \
+                    and matches[0].handler_id != matches[1].handler_id:
+                raise ValueError('Gewähltes PDF-Plugin erkennt mehrere Dokumenttypen nahezu gleich sicher; Handler ausdrücklich wählen.')
+            detection = matches[0] if matches else None
             if detection is None: raise ValueError('Gewähltes Plugin unterstützt diesen Dokumenttyp nicht oder erkennt das PDF nicht.')
             selected = plugin, detection
         else:

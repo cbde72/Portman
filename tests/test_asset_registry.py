@@ -98,7 +98,9 @@ def test_imported_vorabpauschale_is_visible_as_transaction_tax_fact(tmp_path):
     try:
         r.commit_batches([ImportBatch('tax-notice.pdf', 'tax-source', transactions=[
             BankTransaction('Depot A', 'tax-1', '2026-01-15', 'BANK_BOOKING', '-7.91', 'EUR',
-                security=KEY, purpose='Vorabpauschale 31,64 EUR; Steuerbelastung 7,91 EUR')])])
+                security=KEY, purpose='Vorabpauschale; Steuerbelastung 7,91 EUR',
+                advance_tax_base='31.64', advance_tax_currency='EUR',
+                field_sources={'advance_tax_base': 'synthetische Steuermitteilung'})])])
         tx = r.assets.transactions(KEY)[0]
         fact = r.assets.facts(KEY, 'tax', tx['reference'])
         assert fact['values'] == {'advance_tax_base': '31.64', 'currency': 'EUR'}

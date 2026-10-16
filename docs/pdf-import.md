@@ -70,7 +70,10 @@ document_tags=None, plugin_catalog=None)`.
    Import-Job (`portman/import_worker.py`), damit nicht jede PDF neu lädt.
 6. **Plugin auswählen**:
    - mit `preferred_plugin` / `preferred_handler` wird genau dieses Plugin bzw.
-     dieser Handler verwendet (sonst Fehler);
+     dieser Handler verwendet (sonst Fehler). Ohne `preferred_handler` wird der
+     sicherste Treffer gewählt; meldet das Plugin mehrere **unterschiedliche**
+     Handler mit weniger als `0.10` Abstand, bricht der Import mit der Bitte ab,
+     den Handler ausdrücklich zu wählen;
    - ansonsten `select_plugin(document, plugins, minimum=0.70)`.
 7. **Auswerten**: `plugin.parse(document, detection, ParseContext(batch))`.
    Danach setzt der Kern `plugin_id`, `plugin_version`, `plugin_handler`,
@@ -80,7 +83,14 @@ document_tags=None, plugin_catalog=None)`.
 9. **Prüfen** (`_validate_plugin_batch`):
    - `external_id` je Buchung eindeutig,
    - Konto, Kennung, Datum, Währung und Betrag vollständig,
-   - Snapshots mit Konto und Stichtag,
+   - Datum (`date.fromisoformat`) und Betrag (`Decimal`, endlich) gültig,
+   - `check_transaction` wird auf jede Buchung angewendet: **harte** Verstöße
+     (ungültige/nicht endliche Dezimalzahl, Exponentenschreibweise oder eine
+     Vorabpauschale mit Geldbetrag/Steuer/Auswirkung auf den Bestand) brechen
+     mit `ValueError` ab; alle übrigen Befunde werden zu `batch.warnings`;
+   - Snapshots mit Konto, gültigem Stichtag und endlichen Zahlenfeldern
+     (`quantity`, `cost`, `value`, `price`); ungültige ISINs werden nur als
+     Warnung vermerkt (Originalwert bleibt erhalten),
    - der Plugin-Batch darf den `file_hash` nicht verändern.
 10. **Fallback**: Wird kein Plugin ausgewählt, übernimmt
     `pdf_plugins._generic_document.parse_generic_document`
@@ -170,10 +180,14 @@ Fehler gemeldet.
 ### Auswahl (`select_plugin`)
 
 1. Alle Plugins werden befragt (`detect`).
-2. Sortierung nach `(confidence, plugin_id, handler_id)` absteigend.
-3. Der beste Treffer muss `confidence >= 0.70` erreichen, sonst kein Plugin.
-4. Liegen die beiden besten Treffer weniger als `0.10` auseinander, wird eine
-   `ValueError` geworfen (Mehrdeutigkeit → Erkennungsregeln präzisieren).
+2. Pro `(plugin_id, handler_id)` zählt nur der **beste** Treffer – meldet ein
+   Plugin denselben Handler mehrfach (überlappende Signaturen), ist das ein
+   Kandidat und nicht künstliche Mehrdeutigkeit.
+3. Sortierung nach `(confidence, plugin_id, handler_id)` absteigend.
+4. Der beste Treffer muss `confidence >= 0.70` erreichen, sonst kein Plugin.
+5. Liegen die beiden besten **unterschiedlichen** Treffer weniger als `0.10`
+   auseinander, wird eine `ValueError` geworfen (Mehrdeutigkeit →
+   Erkennungsregeln präzisieren).
 
 Der generische Fallback (`generic.kontoauszug`) meldet bewusst exakt `0.70`,
 also die Untergrenze – er greift nur, wenn nichts Spezifischeres passt.
@@ -533,12 +547,20 @@ als ISO-Strings (`YYYY-MM-DD`).
 | `text(value)` | `None` → `''`, sonst `str(value).strip()` |
 | `norm(value)` | ASCII-normalisierte, kleingeschriebene Zeichenkette nur aus `a-z0-9` (Vergleichsschlüssel) |
 | `plain_number(value)` | Formatierung als `Decimal` ohne Exponent (`'f'`) |
-| `number(value)` | Zahl aus Excel/PDF: erkennt deutsche Notation (`1.234,56`), entfernt `EUR`/`€`/`Stück`/`%`; leer, `-`, `--` → `None`; wirft bei ungültigen/nicht endlichen Werten |
-| `money(value)` | wie `number`, aber quantisiert auf 2 Nachkommastellen (als String) |
+| `number(value, *, number_format='auto')` | Kompatibilitäts-Wrapper um `parse_decimal`; `number_format` ∈ `auto`/`de`/`en`/`canonical` |
+| `money(value, *, number_format='auto')` | Kompatibilitäts-Wrapper um `parse_money` (Währung `EUR`) |
+| `parse_decimal(value, locale='de_DE')` | Zahl mit **explizitem Quell-Locale** parsen (`de_DE`/`en_US`/`canonical`, `auto` nur für eindeutige Formen); leer/`-`/`--` → `None` |
+| `parse_money(value, currency='EUR', *, locale='de_DE')` | wie `parse_decimal`, aber Rundung auf die Minor-Units der Währung (Default 2, u. a. `JPY` 0, `BHD`/`JOD`/`KWD`/`OMR`/`TND` 3, `CLF` 4, `BTC` 8, `ETH` 18); entfernt Währungszeichen |
+| `parse_quantity(value, precision=12, *, locale='de_DE')` | Stückzahl; mehr als `precision` Nachkommastellen werden **abgelehnt**, nicht gerundet |
+| `_number(value, *, number_format)` | interner Parser: entfernt Leerzeichen/`EUR`/`€`/`Stück`/`%`, lehnt uneindeutige einzelne Trennzeichen mit drei Nachkommastellen ab, prüft Tausendergruppen und verlangt endliche Zahlen |
 | `correction_number(value)` | für Editor-/Korrekturwerte: ein Punkt ist **nie** Tausendertrennzeichen; Fehlermeldung mit Beispiel |
 | `parse_date(value)` | `datetime`/`date` → ISO; sonst erstes `YYYY-MM-DD` oder `DD.MM.YYYY` im Text, sonst `None` |
 | `digest(value)` | SHA-256 über kanonisches JSON (sortierte Schlüssel) – Basis der stabilen `external_id`s |
 | `valid_isin(value)` | ISO-6166-Form + Luhn-Prüfziffer |
+
+> Hinweis: Neue Importer sollten `parse_decimal`/`parse_money`/`parse_quantity`
+> mit explizitem `locale` verwenden; `number`/`money` bleiben als
+> kompatible Wrapper für bestehende Aufrufer erhalten.
 
 ### 10.2 Buchungsarten (`Kind`) und Mengen
 
@@ -619,8 +641,13 @@ Zuordnung/Referenzen: `cash_account`, `depot_account`, `security_ref`,
 `transaction_reference`, `field_sources`, `review_state='offen'`.
 Steuern: `solidarity_tax`, `withholding_tax`, `withholding_country`,
 `withholding_tax_rate`, `tax_rate`, `advance_tax_base`, `advance_tax_currency`.
+Devisen (keyword-only): `fx_from_currency`, `fx_to_currency` – bei gesetztem
+Paar gilt explizit `Betrag(from) × fx_rate = Betrag(to)`.
 `__post_init__` summiert `taxes`/`fees` aus den Items, leitet
-`solidarity_tax` ab und ruft `enrich_tax_details` / `enrich_advance_tax_details`.
+`solidarity_tax` ab, ruft `enrich_tax_details` auf **und** hinterlegt in
+`_component_consistency_problems` (kein Dataclass-Feld, daher ohne
+Auswirkung auf Konstruktor/Serialisierung) Abweichungen zwischen
+Gesamtsteuer/-gebühr und den dokumentierten Einzelpositionen.
 
 #### BankTransaction (Unterklasse von Transaction)
 
@@ -643,19 +670,32 @@ gedeutet. Zusätzlich: `value_date`, `purpose`, `counterparty`, `bank_reference`
 - `transaction_reference` aus `bank_reference` oder `document_reference`.
 Jede Ableitung wird in `field_sources` dokumentiert.
 
-**`enrich_advance_tax_details(tx)`**: erkennt eine ausdrücklich benannte
-Vorabpauschale in `purpose`/`booking_text`/`operation`/`raw_text` und setzt
-`advance_tax_base`/`advance_tax_currency` – die Vorabpauschale ist die
-Steuerbasis, **nicht** gezahlte Steuer. Ein bereits gesetzter Wert wird nur
-formatiert.
+**Einzelpositionen statt Summen**: `_documented_component_total` summiert
+`tax_items`/`fee_items` und liefert `None`, sobald ein Betrag fehlt/ungültig
+ist (fehlende Positionen sind *unbekannt*, nicht null). In `__post_init__`
+werden `taxes`/`fees` nur dann aus den Items abgeleitet, wenn die Summe
+eindeutig ist. `_component_consistency_problems` vergleicht – nur wenn eine
+Detailliste **und** eine Gesamtsumme vorliegen – Gesamt gegen Einzelpositionen
+(Toleranz 0,011) und meldet Widersprüche.
+
+**Vorabpauschale**: Die Steuerbasis `advance_tax_base`/`advance_tax_currency`
+wird **von den Importern/Plugins** aus dem Beleg gesetzt (kein automatisches
+Erraten mehr); sie ist die Steuerbasis, **nicht** gezahlte Steuer.
 
 **`check_transaction(tx)`** liefert eine Liste von Konventionsverstößen (ohne
 Daten zu verändern):
 - unbekannte `kind`, Exponentenschreibweise in Zahlenfeldern,
-  ungültige/nicht endliche Dezimalzahlen, kein gültiges ISO-Datum
-  (`date.fromisoformat`-Roundtrip), unbekannter Prüfstatus;
-- `BUY` mit positivem Betrag; Ertragsarten mit negativem Betrag (außer Storno);
-  negative Steuer-/Gebührenbeträge (erlaubt nur bei Storno oder `TAX_REFUND`);
+  ungültige/nicht endliche Dezimalzahlen (auch in `tax_items`/`fee_items`),
+  kein gültiges ISO-Datum (`date.fromisoformat`-Roundtrip), unbekannter
+  Prüfstatus;
+- Vorzeichen der Zahlungsströme: `BUY`/`TAX`/`FEE` müssen negativ,
+  `TAX_REFUND` und die `INCOME_KINDS` positiv sein (jeweils außer bei Storno);
+  negative Steuer-/Gebührenbeträge sind nur bei Storno oder `TAX_REFUND`
+  zulässig;
+- Quellensteuer/Solidaritätszuschlag dürfen die ausgewiesene Gesamtsteuer nicht
+  übersteigen;
+- Abgleich Gesamtsumme ↔ dokumentierte Einzelpositionen
+  (`_component_consistency_problems`);
 - Brutto/Netto-Identität, wenn `gross_amount` gesetzt ist:
   - `BUY`: `-(gross + taxes + fees)`,
   - `INCOME_KINDS` (Dividende, Ausschüttung, Einlösung, Zinsen), `SELL`,
@@ -663,12 +703,19 @@ Daten zu verändern):
   - `REVERSAL`: Ein- und Auszahlungsidentität (mit/ohne Vorzeichen) werden
     akzeptiert,
   - andere Arten: keine Prüfung;
-- Fremdwährung: `fx_rate` endlich und `> 0`, `original_amount` und
-  `original_currency` müssen gesetzt sein, gleiche Währungen erzwingen
-  `fx_rate = 1`, und `original_amount ÷ fx_rate ≈ gross_amount`;
+- Devisen:
+  - ohne explizites Paar: `fx_rate` endlich und `> 0`, `original_amount` und
+    `original_currency` müssen gesetzt sein, gleiche Währungen erzwingen
+    `fx_rate = 1`, und `original_amount ÷ fx_rate ≈ gross_amount`
+    (historische Konvention);
+  - bei gesetztem `fx_from_currency`/`fx_to_currency`: beide Währungen
+    dreistellig und passend zu Original-/Buchungswährung, Kurs erforderlich,
+    und `original_amount × fx_rate ≈ gross_amount`;
 - `price × quantity ≈ gross_amount` bei Kauf/Verkauf;
-- `ADVANCE_LUMP_SUM`: darf keinen Geldbetrag, keine tatsächlichen Steuern und
-  keine Auswirkung auf den Geldbestand (`affects_cash`) haben.
+- Währung der Vorabpauschale: nur bei gesetzter strukturierter Steuerbasis,
+  gültiger Code; `ADVANCE_LUMP_SUM` darf keinen Geldbetrag, keine
+  tatsächlichen Steuern und keine Auswirkung auf den Geldbestand
+  (`affects_cash`) haben.
 
 ### 10.5 ImportBatch
 

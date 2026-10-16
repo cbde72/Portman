@@ -71,7 +71,14 @@ def select_plugin(document, plugins, minimum=.70, errors=None):
         for detection in detections:
             if not 0 <= detection.confidence <= 1: raise ValueError(f'{plugin.plugin_id}: ungültige Erkennungssicherheit.')
             candidates.append((detection.confidence, plugin.plugin_id, detection.handler_id, plugin, detection))
-    candidates.sort(key=lambda item: item[:3], reverse=True)
+    # A plugin may emit the same handler more than once from overlapping
+    # signatures. It is one candidate, not artificial evidence or ambiguity.
+    unique = {}
+    for candidate in candidates:
+        key = candidate[1], candidate[2]
+        if key not in unique or candidate[0] > unique[key][0]:
+            unique[key] = candidate
+    candidates = sorted(unique.values(), key=lambda item: item[:3], reverse=True)
     if not candidates or candidates[0][0] < minimum: return None
     if len(candidates) > 1 and candidates[0][0] - candidates[1][0] < .10:
         first, second = candidates[:2]

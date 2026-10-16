@@ -15,7 +15,8 @@ from decimal import Decimal
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-from .models import Balance, ImportBatch, Position, Snapshot, Transaction, money, norm, number, parse_date, text
+from .models import (Balance, ImportBatch, Position, Snapshot, Transaction, money, norm, number,
+                     parse_date, parse_money, parse_quantity, text)
 
 PARSER_VERSION = '5.1.0'
 
@@ -31,7 +32,7 @@ def file_digest(path):
         stat = path.stat()
     except OSError:
         return hashlib.sha256(path.read_bytes()).hexdigest()
-    key = (stat.st_mtime_ns, stat.st_size)
+    key = (stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
     cached = _DIGEST_CACHE.get(str(path))
     if cached and cached[0] == key:
         return cached[1]
@@ -222,8 +223,10 @@ def parse_positions(rows, sheet, path, period, override_date=None, override_acco
         key = isin or 'WKN:' + wkn
         try:
             pos = Position(key, name or key, isin, wkn, asset_type(name, cell(row, indexes['type'])),
-                           number(cell(row, indexes['quantity'])), money(cell(row, indexes['cost'])),
-                           money(cell(row, indexes['value'])), text(cell(row, indexes['currency'])) or 'EUR',
+                           parse_quantity(cell(row, indexes['quantity']), locale='de_DE'),
+                           parse_money(cell(row, indexes['cost']), 'EUR', locale='de_DE'),
+                           parse_money(cell(row, indexes['value']), 'EUR', locale='de_DE'),
+                           text(cell(row, indexes['currency'])) or 'EUR',
                            parse_date(cell(row, indexes['quote'])), rownum)
             # ING has several currency columns: the column following Kurswert is the valuation currency.
             if norm(cell(headers, indexes['value'] + 1)) == 'wahrung':
@@ -252,7 +255,7 @@ def parse_positions(rows, sheet, path, period, override_date=None, override_acco
         for i, value in enumerate(row):
             if norm(value) == 'depotwert':
                 try:
-                    declared = money(cell(row, i + 2))
+                    declared = parse_money(cell(row, i + 2), 'EUR', locale='de_DE')
                     total = sum(Decimal(p.value) for p in snapshot.positions)
                     if declared is not None and abs(Decimal(declared) - total) > Decimal('.10'):
                         raise ValueError(f'{sheet}: Depotwert {declared} stimmt nicht mit Positionssumme {total} überein.')
@@ -278,8 +281,8 @@ def parse_deka(rows, sheet, period):
             sub = sub[:-2]
         d = parse_date(cell(rows[labels['bewertungsdatum']], col)) if 'bewertungsdatum' in labels else None
         p = Position(isin, text(cell(rows[labels.get('bezeichnung', labels['isin'])], col)), isin=isin,
-                     asset_type='Fonds', quantity=number(cell(rows[labels['bestand']], col)),
-                     value=money(cell(rows[labels['wert']], col)), row=labels['wert'] + 1)
+                     asset_type='Fonds', quantity=parse_quantity(cell(rows[labels['bestand']], col), locale='de_DE'),
+                     value=parse_money(cell(rows[labels['wert']], col), 'EUR', locale='de_DE'), row=labels['wert'] + 1)
         if p.value is None:
             raise ValueError('Deka: Marktwert fehlt')
         result.append(Snapshot('Deka/' + sub, period or (d or '')[:7], d, sheet, [p], date_basis='document' if d else 'month'))
@@ -317,7 +320,7 @@ def parse_overview(rows, sheet, period, batch):
             if raw is None or not text(raw):
                 continue
             try:
-                amount = money(raw)
+                amount = parse_money(raw, 'EUR', locale='de_DE')
                 if amount is None:
                     continue
                 cat = 'Schulden' if norm(account) == 'darlehen' else category
@@ -333,7 +336,7 @@ def parse_overview(rows, sheet, period, batch):
         for col, cat in cols.items():
             if cat == category:
                 try:
-                    val = money(cell(rows[total_idx], col))
+                    val = parse_money(cell(rows[total_idx], col), 'EUR', locale='de_DE')
                     if val is not None:
                         declared.append(Decimal(val))
                 except ValueError:
@@ -355,7 +358,9 @@ def parse_timeline(rows, sheet, batch):
             period = datetime(year, month, 1).strftime('%Y-%m')
             if not 2000 <= year <= 2100:
                 continue
-            vals = [(category, money(cell(row, col))) for category, col in [('Archiv: Liquidität/Festgeld', 5), ('Archiv: Wertpapiere', 8), ('Immobilie (Schätzung)', 2)]]
+            vals = [(category, parse_money(cell(row, col), 'EUR', locale='de_DE')) for category, col in
+                    [('Archiv: Liquidität/Festgeld', 5), ('Archiv: Wertpapiere', 8),
+                     ('Immobilie (Schätzung)', 2)]]
             parsed.append((period, i, vals))
         except (ValueError, TypeError, AttributeError):
             continue

@@ -20,8 +20,13 @@ def plain_number(value):
     return format(Decimal(str(value)), 'f')
 
 
-def number(value):
-    """Excel numeric values are numeric; text exports use German number notation."""
+def _number(value, *, number_format):
+    """Parse a number without guessing a single three-digit separator.
+
+    Numeric values are already unambiguous.  Text can be ``auto`` (only
+    unambiguous forms), ``de`` (1.234,56), ``en`` (1,234.56), or
+    ``canonical`` (1234.56 without grouping).
+    """
     if value is None or text(value) in ('', '-', '--'):
         return None
     if isinstance(value, (float, int, Decimal)):
@@ -29,22 +34,112 @@ def number(value):
     else:
         raw = text(value).replace('\u00a0', '').replace(' ', '').replace('−', '-')
         raw = re.sub(r'(EUR|€|Stück|Stueck|%)', '', raw, flags=re.I)
-        if ',' in raw:
-            raw = raw.replace('.', '').replace(',', '.')
-        elif re.fullmatch(r'[+-]?\d{1,3}(\.\d{3})+', raw):
-            raw = raw.replace('.', '')
+        if number_format not in ('auto', 'de', 'en', 'canonical'):
+            raise ValueError(f'Unbekanntes Zahlenformat: {number_format!r}')
+        if number_format == 'canonical':
+            if ',' in raw or not re.fullmatch(r'[+-]?\d+(?:\.\d+)?', raw):
+                raise ValueError(f'Keine kanonische Dezimalzahl: {value!r}')
+        elif number_format in ('de', 'en'):
+            decimal_mark, grouping_mark = (',', '.') if number_format == 'de' else ('.', ',')
+            signless = raw.lstrip('+-')
+            parts = signless.split(decimal_mark)
+            if len(parts) > 2 or grouping_mark in (parts[1] if len(parts) == 2 else ''):
+                raise ValueError(f'Ungültige Zahl im Format {number_format}: {value!r}')
+            integer = parts[0]
+            if grouping_mark in integer and not re.fullmatch(
+                    rf'\d{{1,3}}(?:{re.escape(grouping_mark)}\d{{3}})+', integer):
+                raise ValueError(f'Ungültige Tausendergruppen: {value!r}')
+            raw = raw.replace(grouping_mark, '').replace(decimal_mark, '.')
+        else:
+            comma, dot = raw.count(','), raw.count('.')
+            if comma and dot:
+                number_format = 'de' if raw.rfind(',') > raw.rfind('.') else 'en'
+                return _number(value, number_format=number_format)
+            mark = ',' if comma else '.' if dot else ''
+            if mark:
+                if raw.count(mark) > 1:
+                    if not re.fullmatch(rf'[+-]?\d{{1,3}}(?:{re.escape(mark)}\d{{3}})+', raw):
+                        raise ValueError(f'Uneindeutige Tausendergruppen: {value!r}')
+                    raw = raw.replace(mark, '')
+                else:
+                    fraction = raw.rsplit(mark, 1)[1]
+                    if len(fraction) == 3:
+                        raise ValueError(
+                            f'Uneindeutiges Zahlenformat {value!r}; Format de, en oder canonical angeben')
+                    raw = raw.replace(mark, '.')
         try:
             result = Decimal(raw)
-        except InvalidOperation:
+        except (InvalidOperation, ValueError):
             raise ValueError(f'Ungültige Zahl: {value!r}')
     if not result.is_finite():
         raise ValueError(f'Nicht endliche Zahl: {value!r}')
     return plain_number(result.normalize())
 
 
-def money(value):
-    parsed = number(value)
-    return None if parsed is None else str(Decimal(parsed).quantize(Decimal('.01')))
+def parse_decimal(value, locale='de_DE'):
+    """Parse a decimal using an explicit source locale.
+
+    ``locale='auto'`` is reserved for sources without reliable metadata and
+    rejects a single separator followed by three digits as ambiguous.
+    """
+    formats = {'de_DE': 'de', 'de': 'de', 'en_US': 'en', 'en': 'en',
+               'canonical': 'canonical', 'auto': 'auto', None: 'auto'}
+    if locale not in formats:
+        raise ValueError(f'Nicht unterstütztes Zahlen-Locale: {locale!r}')
+    return _number(value, number_format=formats[locale])
+
+
+_CURRENCY_DECIMALS = {
+    'BHD': 3, 'CLF': 4, 'JPY': 0, 'JOD': 3, 'KWD': 3, 'OMR': 3, 'TND': 3,
+    'BTC': 8, 'ETH': 18,
+}
+
+
+def parse_money(value, currency='EUR', *, locale='de_DE'):
+    """Parse and round a monetary amount to the currency's minor unit."""
+    currency = text(currency).upper()
+    if not re.fullmatch(r'[A-Z]{3}', currency):
+        raise ValueError(f'Ungültige Währung: {currency!r}')
+    raw = value
+    if isinstance(value, str):
+        raw = re.sub(rf'(?i)(?:{re.escape(currency)}|€|\$|£|¥)', '', value).strip()
+    parsed = parse_decimal(raw, locale=locale)
+    if parsed is None:
+        return None
+    decimals = _CURRENCY_DECIMALS.get(currency, 2)
+    quantum = Decimal(1).scaleb(-decimals)
+    return str(Decimal(parsed).quantize(quantum))
+
+
+def parse_quantity(value, precision=12, *, locale='de_DE'):
+    """Parse a quantity without silently rounding excess fractional digits."""
+    if not isinstance(precision, int) or precision < 0:
+        raise ValueError('Mengenpräzision muss eine nichtnegative Ganzzahl sein')
+    parsed = parse_decimal(value, locale=locale)
+    if parsed is None:
+        return None
+    decimal = Decimal(parsed)
+    fractional_digits = max(0, -decimal.normalize().as_tuple().exponent)
+    if fractional_digits > precision:
+        raise ValueError(
+            f'Menge {value!r} hat {fractional_digits} Nachkommastellen; maximal {precision} zulässig')
+    return plain_number(decimal.normalize())
+
+
+def number(value, *, number_format='auto'):
+    """Compatibility wrapper; new importers should use ``parse_decimal``."""
+    locales = {'de': 'de_DE', 'en': 'en_US', 'canonical': 'canonical', 'auto': 'auto'}
+    if number_format not in locales:
+        raise ValueError(f'Unbekanntes Zahlenformat: {number_format!r}')
+    return parse_decimal(value, locale=locales[number_format])
+
+
+def money(value, *, number_format='auto'):
+    """Compatibility wrapper for EUR amounts; use ``parse_money`` in new code."""
+    locales = {'de': 'de_DE', 'en': 'en_US', 'canonical': 'canonical', 'auto': 'auto'}
+    if number_format not in locales:
+        raise ValueError(f'Unbekanntes Zahlenformat: {number_format!r}')
+    return parse_money(value, 'EUR', locale=locales[number_format])
 
 
 def correction_number(value):
@@ -356,19 +451,30 @@ class Transaction:
     # Tax basis documented by the bank. This is not the debited tax amount.
     advance_tax_base: str | None = None
     advance_tax_currency: str = ''
+    # Explicit multiplication convention: amount in ``from`` currency times
+    # fx_rate equals the amount in ``to`` currency. Keyword-only preserves all
+    # historical positional constructor calls.
+    fx_from_currency: str = field(default='', kw_only=True)
+    fx_to_currency: str = field(default='', kw_only=True)
 
     def __post_init__(self):
         if self.tax_items and self.taxes is None:
-            self.taxes = money(sum((Decimal(item.amount) for item in self.tax_items), Decimal(0)))
+            tax_total = _documented_component_total(self.tax_items)
+            if tax_total is not None:
+                self.taxes = money(tax_total)
         if self.solidarity_tax is None:
             solidarity = [item.amount for item in self.tax_items
                           if norm(item.kind) in ('solidaritaetszuschlag', 'solidaritytax', 'solz', 'soli')]
             if solidarity:
                 self.solidarity_tax = money(sum((Decimal(value) for value in solidarity), Decimal(0)))
         if self.fee_items and self.fees is None:
-            self.fees = money(sum((Decimal(item.amount) for item in self.fee_items), Decimal(0)))
+            fee_total = _documented_component_total(self.fee_items)
+            if fee_total is not None:
+                self.fees = money(fee_total)
         enrich_tax_details(self)
-        enrich_advance_tax_details(self)
+        # Deliberately not a dataclass field: existing constructors and serialized
+        # records stay unchanged. Missing detail rows are unknown, never zero.
+        self._component_consistency_problems = _component_consistency_problems(self)
 
 
 @dataclass
@@ -388,6 +494,49 @@ class BankTransaction(Transaction):
     gross_income: str | None = None
     gross_currency: str = ''
     income_basis: str = 'net'
+
+
+def _documented_component_total(items):
+    """Sum documented items, or return unknown if any amount is unusable."""
+    total = Decimal(0)
+    for item in items or ():
+        raw = item.get('amount') if isinstance(item, dict) else getattr(item, 'amount', None)
+        try:
+            amount = Decimal(raw)
+            if not amount.is_finite():
+                return None
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+        total += amount
+    return total
+
+
+def _component_consistency_problems(tx):
+    """Compare totals only when detail positions were actually documented."""
+    problems = []
+    tolerance = Decimal('0.011')
+    for items_name, total_name, label in (
+            ('tax_items', 'taxes', 'Steuer'), ('fee_items', 'fees', 'Gebühren')):
+        items = getattr(tx, items_name, None)
+        declared = getattr(tx, total_name, None)
+        if not items or declared in (None, ''):
+            # No detail list means unknown coverage, not a sum of zero.
+            continue
+        documented = _documented_component_total(items)
+        try:
+            aggregate = Decimal(declared)
+            aggregate_valid = aggregate.is_finite()
+        except (InvalidOperation, TypeError, ValueError):
+            aggregate_valid = False
+        if documented is None or not aggregate_valid:
+            continue  # Field-specific validation reports the malformed number.
+        difference = aggregate - documented
+        if abs(difference) > tolerance:
+            problems.append(
+                f'{label}summe widersprüchlich: Gesamt {aggregate:.2f}, dokumentierte Einzelpositionen '
+                f'{documented:.2f}, Differenz {difference:.2f}; Einzelpositionen können unvollständig '
+                'oder die Gesamtsumme kann falsch sein')
+    return problems
 
 
 def enrich_tax_details(tx):
@@ -420,27 +569,6 @@ def enrich_tax_details(tx):
             tx.field_sources['tax_rate'] = 'Berechnet: Steuern gesamt ÷ Bruttobetrag × 100'
     if not tx.transaction_reference:
         tx.transaction_reference = getattr(tx, 'bank_reference', '') or tx.document_reference
-
-
-def enrich_advance_tax_details(tx):
-    """Extract an explicitly labelled Vorabpauschale without treating it as tax paid."""
-    if tx.advance_tax_base is not None:
-        tx.advance_tax_base = money(tx.advance_tax_base)
-        tx.advance_tax_currency = (tx.advance_tax_currency or tx.currency).upper()
-        return
-    text = ' '.join(str(getattr(tx, field, '') or '') for field in
-                    ('purpose', 'booking_text', 'operation', 'raw_text'))
-    amount = r'(?P<amount>\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})'
-    currency = r'(?P<currency>EUR|USD|GBP|CHF)'
-    patterns = (
-        re.compile(r'Vorabpauschale\b.{0,80}?' + amount + r'\s*' + currency, re.I),
-        re.compile(currency + r'\s*' + amount + r'.{0,80}?\bVorabpauschale\b', re.I),
-    )
-    match = next((pattern.search(text) for pattern in patterns if pattern.search(text)), None)
-    if match:
-        tx.advance_tax_base = money(match.group('amount'))
-        tx.advance_tax_currency = match.group('currency').upper()
-        tx.field_sources['advance_tax_base'] = 'Vorabpauschale im Importbeleg'
 
 
 @dataclass
@@ -506,6 +634,30 @@ def check_transaction(tx):
             values[name] = parsed
         except (InvalidOperation, TypeError, ValueError):
             problems.append(f'{name}: ungültige oder nicht endliche Dezimalzahl {value!r}')
+
+    def component_total(items, field_name):
+        total = Decimal(0)
+        valid = True
+        for index, item in enumerate(items or (), 1):
+            raw = item.get('amount') if isinstance(item, dict) else getattr(item, 'amount', None)
+            try:
+                parsed = Decimal(raw)
+                if not parsed.is_finite():
+                    raise InvalidOperation
+            except (InvalidOperation, TypeError, ValueError):
+                problems.append(
+                    f'{field_name}[{index}].amount: ungültige oder nicht endliche Dezimalzahl {raw!r}')
+                valid = False
+                continue
+            if re.search(r'[eE]', str(raw)):
+                problems.append(f'{field_name}[{index}].amount: Exponentschreibweise {raw!r}')
+            total += parsed
+        return total if valid else None
+
+    component_total(getattr(tx, 'tax_items', ()), 'tax_items')
+    component_total(getattr(tx, 'fee_items', ()), 'fee_items')
+    tolerance = Decimal('0.011')
+    problems.extend(_component_consistency_problems(tx))
     try:
         amount = values['amount']
         if tx.kind in OUTFLOW_KINDS and amount > 0:
@@ -516,6 +668,18 @@ def check_transaction(tx):
             value = values.get(name)
             if value is not None and value < 0 and not (tx.is_reversal or tx.kind == Kind.TAX_REFUND):
                 problems.append(f'{name} muss ein positiver Abzugsbetrag sein')
+        if tx.kind == Kind.TAX and amount > 0 and not tx.is_reversal:
+            problems.append('Steuerzahlung muss als negativer Geldbetrag gebucht werden')
+        if tx.kind == Kind.TAX_REFUND and amount < 0 and not tx.is_reversal:
+            problems.append('Steuererstattung muss als positiver Geldbetrag gebucht werden')
+        if tx.kind == Kind.FEE and amount > 0 and not tx.is_reversal:
+            problems.append('Gebührenbuchung muss als negativer Geldbetrag gebucht werden')
+        taxes = values.get('taxes')
+        if taxes is not None and taxes >= 0 and not (tx.is_reversal or tx.kind == Kind.TAX_REFUND):
+            for name, label in (('withholding_tax', 'Quellensteuer'), ('solidarity_tax', 'Solidaritätszuschlag')):
+                component = values.get(name)
+                if component is not None and component > taxes + tolerance:
+                    problems.append(f'{label} übersteigt die ausgewiesene Gesamtsteuer')
         if 'gross_amount' in values:
             gross = values['gross_amount']
             taxes, fees = values.get('taxes', Decimal(0)), values.get('fees', Decimal(0))
@@ -538,10 +702,26 @@ def check_transaction(tx):
                 if tx.kind == Kind.REVERSAL:
                     purchase = -(gross + taxes + fees)
                     candidates.extend((purchase, -purchase))
-                if all(abs(candidate - amount) > Decimal('0.011') for candidate in candidates):
+                if all(abs(candidate - amount) > tolerance for candidate in candidates):
                     rendered = ' oder '.join(f'{candidate:.2f}' for candidate in candidates)
                     problems.append(f'Brutto/Netto passt nicht: erwartet {rendered}, Betrag {amount}')
         rate = values.get('fx_rate')
+        fx_from = text(getattr(tx, 'fx_from_currency', '')).upper()
+        fx_to = text(getattr(tx, 'fx_to_currency', '')).upper()
+        explicit_fx = bool(fx_from or fx_to)
+        if explicit_fx:
+            if not fx_from or not fx_to:
+                problems.append('Explizites Währungspaar benötigt Ausgangs- und Zielwährung')
+            if rate is None:
+                problems.append('Explizites Währungspaar benötigt einen Devisenkurs')
+            if fx_from and not re.fullmatch(r'[A-Z]{3}', fx_from):
+                problems.append(f'Ungültige FX-Ausgangswährung: {fx_from!r}')
+            if fx_to and not re.fullmatch(r'[A-Z]{3}', fx_to):
+                problems.append(f'Ungültige FX-Zielwährung: {fx_to!r}')
+            if fx_from and tx.original_currency and fx_from != tx.original_currency.upper():
+                problems.append('FX-Ausgangswährung widerspricht der Währung des Originalbetrags')
+            if fx_to and tx.currency and fx_to != tx.currency.upper():
+                problems.append('FX-Zielwährung widerspricht der Buchungswährung')
         if rate is not None:
             if rate <= 0:
                 problems.append('Devisenkurs muss endlich und größer als null sein')
@@ -552,11 +732,25 @@ def check_transaction(tx):
             elif tx.original_currency.upper() == tx.currency.upper() and rate != 1:
                 problems.append('Devisenkurs für identische Währungen muss 1 sein')
         if {'original_amount', 'fx_rate', 'gross_amount'} <= values.keys() and rate > 0:
-            if abs(values['original_amount'] / rate - values['gross_amount']) > Decimal('0.011'):
-                problems.append('Fremdwährungsbetrag / Devisenkurs passt nicht zum Bruttobetrag')
+            original, gross = values['original_amount'], values['gross_amount']
+            if explicit_fx:
+                if abs(original * rate - gross) > tolerance:
+                    problems.append(
+                        'Expliziter Devisenkurs passt nicht: Originalbetrag × Kurs ergibt nicht den Bruttobetrag')
+            elif abs(original / rate - gross) > tolerance:
+                problems.append(
+                    'Historischer Devisenkurs passt nicht: Originalbetrag ÷ Kurs ergibt nicht den Bruttobetrag')
         if {'price', 'quantity', 'gross_amount'} <= values.keys() and tx.kind in (Kind.BUY, Kind.SELL):
-            if abs(values['price'] * values['quantity'] - values['gross_amount']) > Decimal('0.011'):
+            if abs(values['price'] * values['quantity'] - values['gross_amount']) > tolerance:
                 problems.append('Kurs x Stückzahl passt nicht zum Kurswert')
+        advance_base = getattr(tx, 'advance_tax_base', None)
+        advance_currency = text(getattr(tx, 'advance_tax_currency', '')).upper()
+        if advance_base is not None and not advance_currency:
+            problems.append('Vorabpauschale benötigt eine explizite Währung aus der Importquelle')
+        elif advance_currency and not re.fullmatch(r'[A-Z]{3}', advance_currency):
+            problems.append(f'Ungültige Währung der Vorabpauschale: {advance_currency!r}')
+        if advance_currency and advance_base is None:
+            problems.append('Währung der Vorabpauschale ohne strukturierte Steuerbasis')
         if tx.kind == Kind.ADVANCE_LUMP_SUM:
             if amount:
                 problems.append('Vorabpauschale ist eine Steuerbasis und keine zusätzliche Geldbuchung')

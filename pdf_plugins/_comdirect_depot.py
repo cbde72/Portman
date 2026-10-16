@@ -1,7 +1,7 @@
 """Read and reconcile comdirect holdings across old and current layouts."""
 import re
 from decimal import Decimal
-from portfolio_v5.models import BankDocument, Position, Snapshot, money, number
+from portfolio_v5.models import BankDocument, Position, Snapshot, money, parse_quantity
 from pdf_plugins._finanzreport_help import report_date
 
 AMOUNT = r'\d[\d.]*,\d{2}'
@@ -55,7 +55,8 @@ def append_depot(batch, pages):
             value, cost, profit = [money(v) if v != '-----' else None for v in values.groups()[:3]]
             if cost is not None and profit is not None and abs(Decimal(value) - Decimal(cost) - Decimal(profit)) > Decimal('0.02'):
                 raise ValueError('Finanzreport: Wertpapierwerte nicht abgestimmt: ' + match[1])
-            pending = Position('WKN:' + match[1], values[4].strip(), wkn=match[1], quantity=number(match[2]),
+            pending = Position('WKN:' + match[1], values[4].strip(), wkn=match[1],
+                               quantity=parse_quantity(match[2], locale='de_DE'),
                                value=value, cost=cost, currency='EUR', quote_date=day, row=row)
         elif re.match(r'^[A-Z0-9]{6}(?: /| \d[\d.]*,)', line):
             raise ValueError('Finanzreport: nicht unterstützte Depotposition: ' + line)

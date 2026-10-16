@@ -1,10 +1,11 @@
 from dataclasses import asdict
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
+import pytest
 
 from portfolio_v5.models import (AccountInfo, AccountStatement, BankTransaction, CorporateEvent,
     CostItem, CostReport, FeeItem, ImportBatch, Kind, SecurityInfo, TaxEvent, TaxItem,
-    Transaction, check_transaction, number)
+    Transaction, check_transaction, number, parse_decimal, parse_money, parse_quantity)
 from portman.import_v09 import decode_batch
 from portman.repository_v09 import RepositoryV09
 
@@ -28,13 +29,24 @@ def test_withholding_metadata_is_promoted_and_rate_is_calculated():
     assert calculated.field_sources['withholding_tax_rate'].startswith('Berechnet:')
 
 
-def test_vorabpauschale_is_extracted_as_tax_basis_not_tax_paid():
-    tx = BankTransaction('Cash', 'advance-tax', '2026-01-15', Kind.BANK_BOOKING, '-7.91', 'EUR',
+def test_vorabpauschale_is_not_inferred_from_unstructured_booking_text():
+    unstructured = BankTransaction('Cash', 'advance-text', '2026-01-15', Kind.BANK_BOOKING, '-7.91', 'EUR',
         security='DE000A0F5UH1', purpose='Abrechnung Vorabpauschale 31,64 EUR; Kapitalertragsteuer 7,91 EUR')
+    assert unstructured.advance_tax_base is None
+    assert unstructured.advance_tax_currency == ''
+
+    tx = BankTransaction('Cash', 'advance-structured', '2026-01-15', Kind.BANK_BOOKING, '-7.91', 'EUR',
+        security='DE000A0F5UH1', purpose='Abrechnung Vorabpauschale',
+        advance_tax_base='31.64', advance_tax_currency='EUR',
+        field_sources={'advance_tax_base': 'comdirect.vorabpauschale:Steuermitteilung'})
     assert tx.advance_tax_base == '31.64'
     assert tx.advance_tax_currency == 'EUR'
     assert tx.taxes is None
-    assert tx.field_sources['advance_tax_base'] == 'Vorabpauschale im Importbeleg'
+    assert tx.field_sources['advance_tax_base'] == 'comdirect.vorabpauschale:Steuermitteilung'
+
+    incomplete = BankTransaction('Cash', 'advance-incomplete', '2026-01-15', Kind.BANK_BOOKING,
+        '0', 'EUR', advance_tax_base='31.64')
+    assert any('explizite Währung' in problem for problem in check_transaction(incomplete))
 
 
 def test_gross_net_validation_covers_trades_refunds_and_reversals():
@@ -72,19 +84,132 @@ def test_dates_and_exchange_rates_are_strictly_validated():
     assert any('ohne Fremdwährung' in problem for problem in check_transaction(ambiguous))
 
 
-def test_legacy_number_ambiguity_is_not_reinterpreted_silently():
-    # Historical text imports treat a single three-digit dot group as German
-    # thousands notation. Changing this would alter existing import results.
-    assert number('1.234') == '1234'
-    assert number('1,234') == '1.234'
+def test_exchange_rate_preserves_legacy_division_and_supports_explicit_pair():
+    quote = Transaction('Depot', 'quote', '2026-01-01', Kind.DIVIDEND, '80', 'EUR',
+        gross_amount='80', original_amount='100', original_currency='USD', fx_rate='1.25')
+    inverse = Transaction('Depot', 'inverse', '2026-01-01', Kind.DIVIDEND, '80', 'EUR',
+        gross_amount='80', original_amount='100', original_currency='USD', fx_rate='0.8',
+        fx_from_currency='USD', fx_to_currency='EUR')
+    assert check_transaction(quote) == []
+    assert check_transaction(inverse) == []
+
+    mismatch = Transaction('Depot', 'mismatch', '2026-01-01', Kind.DIVIDEND, '80', 'EUR',
+        gross_amount='80', original_amount='100', original_currency='USD', fx_rate='0.9',
+        fx_from_currency='USD', fx_to_currency='EUR')
+    assert any('Originalbetrag × Kurs' in problem for problem in check_transaction(mismatch))
+
+    incomplete = Transaction('Depot', 'incomplete', '2026-01-01', Kind.DIVIDEND, '80', 'EUR',
+        gross_amount='80', original_amount='100', original_currency='USD', fx_rate='0.8',
+        fx_from_currency='USD')
+    assert any('Ausgangs- und Zielwährung' in problem for problem in check_transaction(incomplete))
+
+    contradictory = Transaction('Depot', 'contradictory', '2026-01-01', Kind.DIVIDEND, '80', 'EUR',
+        gross_amount='80', original_amount='100', original_currency='USD', fx_rate='0.8',
+        fx_from_currency='GBP', fx_to_currency='CHF')
+    contradictory_problems = check_transaction(contradictory)
+    assert any('Ausgangswährung widerspricht' in problem for problem in contradictory_problems)
+    assert any('Zielwährung widerspricht' in problem for problem in contradictory_problems)
+
+
+def test_explicit_fx_pair_round_trips_without_changing_positional_constructor():
+    tx = BankTransaction('Cash', 'fx-roundtrip', '2026-01-01', Kind.DIVIDEND, '92', 'EUR',
+        gross_amount='92', original_amount='100', original_currency='USD', fx_rate='0.92',
+        fx_from_currency='USD', fx_to_currency='EUR')
+    decoded = decode_batch(asdict(ImportBatch('fx.json', 'hash', transactions=[tx]))).transactions[0]
+    assert decoded.fx_from_currency == 'USD'
+    assert decoded.fx_to_currency == 'EUR'
+    assert check_transaction(decoded) == []
+
+
+def test_tax_and_fee_components_must_match_aggregates_and_cash_direction():
+    inconsistent = Transaction('Depot', 'components', '2026-01-01', Kind.DIVIDEND, '84', 'EUR',
+        gross_amount='100', taxes='15', fees='1', withholding_tax='16', solidarity_tax='16',
+        tax_items=[TaxItem('kapst', '14')], fee_items=[FeeItem('order', '2')])
+    problems = check_transaction(inconsistent)
+    assert any('Steuersumme widersprüchlich' in problem for problem in problems)
+    assert any('Gebührensumme widersprüchlich' in problem for problem in problems)
+    assert any('Quellensteuer übersteigt' in problem for problem in problems)
+    assert any('Solidaritätszuschlag übersteigt' in problem for problem in problems)
+    assert any('Differenz 1.00' in problem and 'unvollständig' in problem for problem in problems)
+    assert any('Differenz -1.00' in problem and 'unvollständig' in problem for problem in problems)
+
+    assert any('negativer Geldbetrag' in problem for problem in check_transaction(
+        Transaction('Cash', 'tax', '2026-01-01', Kind.TAX, '1', 'EUR')))
+    assert any('positiver Geldbetrag' in problem for problem in check_transaction(
+        Transaction('Cash', 'refund', '2026-01-01', Kind.TAX_REFUND, '-1', 'EUR')))
+    assert any('negativer Geldbetrag' in problem for problem in check_transaction(
+        Transaction('Cash', 'fee', '2026-01-01', Kind.FEE, '1', 'EUR')))
+
+
+def test_missing_component_lists_remain_unknown_instead_of_zero():
+    tx = Transaction('Depot', 'aggregate-only', '2026-01-01', Kind.DIVIDEND, '75', 'EUR',
+        gross_amount='100', taxes='25', fees='0')
+    assert tx.tax_items == []
+    assert not any('Steuersumme widersprüchlich' in problem for problem in check_transaction(tx))
+
+    detailed = Transaction('Depot', 'partial-details', '2026-01-01', Kind.DIVIDEND, '75', 'EUR',
+        gross_amount='100', taxes='25',
+        tax_items=[TaxItem('kapitalertragsteuer', '20'), TaxItem('solidaritaetszuschlag', '1.10')])
+    assert detailed.taxes == '25'
+    assert detailed._component_consistency_problems == [
+        'Steuersumme widersprüchlich: Gesamt 25.00, dokumentierte Einzelpositionen 21.10, '
+        'Differenz 3.90; Einzelpositionen können unvollständig oder die Gesamtsumme kann falsch sein']
+    assert detailed.tax_items[0].amount == '20'
+
+
+def test_nested_component_numbers_are_validated_without_reinterpretation():
+    tx = Transaction('Depot', 'nested', '2026-01-01', Kind.DIVIDEND, '10', 'EUR')
+    # Also cover legacy/deserialized mappings, not only current dataclass items.
+    tx.tax_items = [{'kind': 'kapst', 'amount': '1,23'}]
+    tx.fee_items = [{'kind': 'fee', 'amount': 'NaN'}]
+    problems = check_transaction(tx)
+    assert any('tax_items[1].amount' in problem for problem in problems)
+    assert any('fee_items[1].amount' in problem for problem in problems)
+
+
+def test_ambiguous_number_requires_an_explicit_source_format():
+    for value in ('1.234', '1,234', '-12.345', '-12,345'):
+        with pytest.raises(ValueError, match='Uneindeutiges Zahlenformat'):
+            number(value)
+    assert number('1.234', number_format='de') == '1234'
+    assert number('1,234', number_format='de') == '1.234'
+    assert number('1.234', number_format='en') == '1.234'
+    assert number('1,234', number_format='en') == '1234'
+    assert number('1.234', number_format='canonical') == '1.234'
+
+
+def test_number_auto_mode_only_accepts_unambiguous_text():
+    assert number('1234') == '1234'
+    assert number('1234,56') == '1234.56'
+    assert number('1234.56') == '1234.56'
+    assert number('1.234,56') == '1234.56'
+    assert number('1,234.56') == '1234.56'
+    with pytest.raises(ValueError, match='Tausendergruppen'):
+        number('12.34.567', number_format='de')
+
+
+def test_domain_specific_number_parsers_require_source_context():
+    assert parse_decimal('1.234', locale='de_DE') == '1234'
+    assert parse_decimal('1.234', locale='en_US') == '1.234'
+    with pytest.raises(ValueError, match='Uneindeutiges Zahlenformat'):
+        parse_decimal('1.234', locale='auto')
+
+    assert parse_money('1.234,567', 'KWD', locale='de_DE') == '1234.567'
+    assert parse_money('1234,5', 'JPY', locale='de_DE') == '1234'
+    assert parse_money('0,123456789', 'BTC', locale='de_DE') == '0.12345679'
+
+    assert parse_quantity('0,123456789012', locale='de_DE') == '0.123456789012'
+    with pytest.raises(ValueError, match='maximal 12'):
+        parse_quantity('0,1234567890123', locale='de_DE')
 
 
 def test_advance_lump_sum_is_informational_not_cash_or_paid_tax():
     valid = BankTransaction('Cash', 'advance', '2026-01-01', Kind.ADVANCE_LUMP_SUM,
-                            '0', 'EUR', advance_tax_base='31.64', affects_cash=False)
+                            '0', 'EUR', advance_tax_base='31.64', advance_tax_currency='EUR', affects_cash=False)
     assert check_transaction(valid) == []
     invalid = BankTransaction('Cash', 'advance-paid', '2026-01-01', Kind.ADVANCE_LUMP_SUM,
-                              '-7.91', 'EUR', taxes='7.91', advance_tax_base='31.64')
+                              '-7.91', 'EUR', taxes='7.91', advance_tax_base='31.64',
+                              advance_tax_currency='EUR')
     problems = check_transaction(invalid)
     assert any('keine zusätzliche Geldbuchung' in problem for problem in problems)
     assert any('nicht als tatsächlich gezahlte Steuer' in problem for problem in problems)
