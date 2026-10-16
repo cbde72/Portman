@@ -4,6 +4,18 @@ from portman.crypto_wallet_import import read_wallet_csv, save_wallet
 from portman.repository_v09 import RepositoryV09
 
 
+def test_daily_value_lookup_only_returns_requested_snapshots():
+    import sqlite3
+    from portman.wallet_valuation import daily_values_for_snapshots
+    db = sqlite3.connect(':memory:')
+    db.row_factory = sqlite3.Row
+    db.execute('CREATE TABLE wallet_daily_values(snapshot_id INTEGER, security_key TEXT, value TEXT)')
+    db.executemany('INSERT INTO wallet_daily_values VALUES(?,?,?)',
+                   [(1, 'A', '10'), (2, 'A', '20'), (1000, 'B', '30')])
+    values = daily_values_for_snapshots(db, [1, 2])
+    assert set(values) == {(1, 'A'), (2, 'A')}
+
+
 def test_daily_values_are_historical_persistent_and_immutable(tmp_path):
     path = tmp_path / 'test.sqlite'
     repo = RepositoryV09(path, backups=False)

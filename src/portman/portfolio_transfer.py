@@ -51,9 +51,11 @@ def _export_accounts(repo, keys, path):
         sources[value] = owners[account_key(name)]
         return value
     corrections = {(r['snapshot_id'], r['security_key']): r['cost'] for r in repo.db.execute('SELECT * FROM cost_corrections ORDER BY id')}
-    daily_values = {(r['snapshot_id'], r['security_key']): dict(r)
-                    for r in repo.db.execute('SELECT * FROM wallet_daily_values')}
-    for row in repo.snapshots():
+    snapshot_rows = repo.snapshots()
+    from .wallet_valuation import daily_values_for_snapshots
+    daily_values = daily_values_for_snapshots(repo.db, (row['id'] for row in snapshot_rows
+        if owners.get(account_key(row['account'])) in keys))
+    for row in snapshot_rows:
         if owners.get(account_key(row['account'])) not in keys: continue
         data = json.loads(row['payload'])
         positions = [Position(**p) for p in data['positions']]

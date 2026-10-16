@@ -2,6 +2,19 @@ import json
 from decimal import Decimal
 
 
+def daily_values_for_snapshots(db, snapshot_ids):
+    """Load wallet values only for relevant snapshots, within SQLite limits."""
+    ids = sorted({int(value) for value in snapshot_ids})
+    values = {}
+    for start in range(0, len(ids), 900):
+        chunk = ids[start:start + 900]
+        placeholders = ','.join('?' for _ in chunk)
+        for row in db.execute(
+                f'SELECT * FROM wallet_daily_values WHERE snapshot_id IN ({placeholders})', chunk):
+            values[(row['snapshot_id'], row['security_key'])] = dict(row)
+    return values
+
+
 def save_daily_values(db, result):
     if result.get('status') != 'ok' or result.get('currency') != 'EUR':
         return 0
@@ -40,8 +53,7 @@ def save_daily_values(db, result):
 
 
 def apply_daily_values(db, positions):
-    values = {(r['snapshot_id'], r['security_key']): dict(r)
-              for r in db.execute('SELECT * FROM wallet_daily_values')}
+    values = daily_values_for_snapshots(db, (position['snapshot_id'] for position in positions))
     for position in positions:
         saved = values.get((position['snapshot_id'], position['key']))
         if saved and Decimal(position['quantity']) == Decimal(saved['quantity']):
