@@ -4,7 +4,9 @@ from decimal import Decimal
 
 def daily_values_for_snapshots(db, snapshot_ids):
     """Load wallet values only for relevant snapshots, within SQLite limits."""
-    ids = sorted({int(value) for value in snapshot_ids})
+    # Synthetic positions derived purely from transactions have no backing
+    # snapshot and therefore cannot have a frozen snapshot valuation.
+    ids = sorted({int(value) for value in snapshot_ids if value is not None})
     values = {}
     for start in range(0, len(ids), 900):
         chunk = ids[start:start + 900]

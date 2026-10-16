@@ -12,7 +12,7 @@ def test_daily_value_lookup_only_returns_requested_snapshots():
     db.execute('CREATE TABLE wallet_daily_values(snapshot_id INTEGER, security_key TEXT, value TEXT)')
     db.executemany('INSERT INTO wallet_daily_values VALUES(?,?,?)',
                    [(1, 'A', '10'), (2, 'A', '20'), (1000, 'B', '30')])
-    values = daily_values_for_snapshots(db, [1, 2])
+    values = daily_values_for_snapshots(db, [1, None, 2])
     assert set(values) == {(1, 'A'), (2, 'A')}
 
 
