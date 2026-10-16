@@ -60,8 +60,11 @@ def infer_security_booking(store, tx, context=None):
     if prepared is None:
         records = {r['account_key']: r for r in store.account_records() if r['active']}
         by_name = {account_key(r['name']): r['account_key'] for r in records.values()}
-        cash_by_depot = {key: json.loads(record['details']).get('cash_account_key')
-                         for key, record in records.items()}
+        cash_by_depot = {}
+        for key, record in records.items():
+            details = json.loads(record['details'])
+            cash_by_depot[key] = {value for value in
+                (details.get('cash_account_key'), *(details.get('cash_account_keys') or [])) if value}
         positions_by_depot = {}
         for snapshot in store.snapshots():
             depot_key = by_name.get(account_key(snapshot['account']))
@@ -92,7 +95,7 @@ def infer_security_booking(store, tx, context=None):
     name_matches, global_name_matches = set(), set()
     normalized_text = re.sub(r'\s+', ' ', text)
     for depot_key, position in positions:
-        linked = depot_key == cash_key or cash_by_depot[depot_key] == cash_key
+        linked = depot_key == cash_key or cash_key in cash_by_depot[depot_key]
         position_ids = {value for value in (
             position.get('isin'),
             'WKN:' + position['wkn'] if position.get('wkn') else '',
@@ -178,7 +181,13 @@ def depot_candidates(store, tx, owners=None):
     records = [r for r in store.account_records() if r['active']]
     by_name = {account_key(r['name']): r['account_key'] for r in records}
     cash_key = by_name.get(account_key(tx['account']), account_key(tx['account']))
-    candidates = [r for r in records if json.loads(r['details']).get('cash_account_key') == cash_key]
+    candidates = []
+    for record in records:
+        details = json.loads(record['details'])
+        cash_keys = {value for value in
+            (details.get('cash_account_key'), *(details.get('cash_account_keys') or [])) if value}
+        if cash_key in cash_keys:
+            candidates.append(record)
     # A shared settlement account alone cannot identify the earning depot.
     if len(candidates) > 1 and tx.get('security'):
         security = tx['security'].removeprefix('ISIN:')
@@ -273,8 +282,24 @@ def performance_transactions(store, transactions, account=None):
     depot_names = {s['account'] for s in store.snapshots()}
     depot_names.update(r['name'] for r in records.values() if json.loads(r['details']).get('kind') == 'Depot')
     result = []
+    # A settlement link describes two records of one economic event.  Prefer
+    # the depot-side record for performance and keep the bank-side record only
+    # as evidence.  The raw records remain untouched and visible in histories.
+    def tx_ref(tx):
+        return json.dumps([tx['import_id'], tx.get('depot', tx['account']), tx['external_id']],
+                          ensure_ascii=False, separators=(',', ':'))
+    active_refs = {tx_ref(tx) for tx in transactions}
+    suppressed_cash_refs = set()
+    try:
+        suppressed_cash_refs = {row['cash_ref'] for row in store.db.execute(
+            "SELECT depot_ref,cash_ref FROM transaction_reconciliations WHERE status IN ('matched','manual')")
+                                if row['depot_ref'] in active_refs and row['cash_ref'] in active_refs}
+    except Exception:
+        pass  # Older repositories without the additive reconciliation table.
     owners = None
     for original in transactions:
+        if tx_ref(original) in suppressed_cash_refs:
+            continue
         tx = dict(original, kind=kind_of(original))
         if tx['kind'] in ('BUY', 'SELL') and tx.get('performance_depot_key'):
             target = records.get(tx['performance_depot_key'])

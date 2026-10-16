@@ -29,6 +29,7 @@ def migrate(db):
     if version > 9: raise ValueError('Nicht unterstützte Datenbankversion.')
     if version == 9:
         _ensure_transaction_review(db)
+        _ensure_booking_reconciliation(db)
         return
     from .schema_previous import migrate as migrate_previous
     migrate_previous(db)
@@ -75,6 +76,29 @@ def migrate(db):
         db.execute('INSERT INTO schema_migrations VALUES(9,?)', (datetime.now(timezone.utc).isoformat(),))
         db.execute('PRAGMA user_version=9')
     _ensure_transaction_review(db)
+    _ensure_booking_reconciliation(db)
+
+
+def _ensure_booking_reconciliation(db):
+    """Install additive V09 tables without changing historical transactions."""
+    with db:
+        db.execute('''CREATE TABLE IF NOT EXISTS transaction_reconciliations(
+            id INTEGER PRIMARY KEY,
+            depot_ref TEXT NOT NULL,
+            cash_ref TEXT NOT NULL,
+            allocated_amount TEXT NOT NULL,
+            currency TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('matched','manual')),
+            reason TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(depot_ref,cash_ref))''')
+        db.execute('CREATE INDEX IF NOT EXISTS reconciliation_depot_ref ON transaction_reconciliations(depot_ref)')
+        db.execute('CREATE INDEX IF NOT EXISTS reconciliation_cash_ref ON transaction_reconciliations(cash_ref)')
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='v09_revision'").fetchone():
+            for operation in ('INSERT', 'UPDATE', 'DELETE'):
+                db.execute(f'''CREATE TRIGGER IF NOT EXISTS revision09_transaction_reconciliations_{operation}
+                    AFTER {operation} ON transaction_reconciliations BEGIN
+                    UPDATE v09_revision SET value=value+1 WHERE id=1; END''')
 
 
 def _ensure_transaction_review(db):
