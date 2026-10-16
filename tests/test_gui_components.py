@@ -65,6 +65,8 @@ def test_v09_window_initializes_menus_preferences_and_layout(tmp_path, monkeypat
                 editor.assert_called_once()
         assert window.positions_model.columnCount() == 16
         assert len(window.visualizations_board.charts) == 4
+        assert window.visualizations_board.charts[0].canvas is not None
+        assert all(chart.canvas is None for chart in window.visualizations_board.charts[1:])
         assert window.visualizations_board.mode.currentData() == 4
         window.visualizations_board.mode.setCurrentIndex(1)
         assert sum(not chart.isHidden() for chart in window.visualizations_board.charts) == 2
