@@ -5,7 +5,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from PySide6.QtWidgets import QApplication
 
-from portfolio_v5.models import ImportBatch, Transaction
+from portfolio_v5.models import ImportBatch, TaxEvent, Transaction
 from portman.accounts_widget import AccountsWidget
 from portman.repository import PortfolioRepository
 from portman.tax_overview import TaxOverviewDialog, automatic_tax_values, tax_overview
@@ -114,6 +114,30 @@ def test_tax_records_are_saved_per_institution_and_year(tmp_path):
     repository.close()
 
 
+def test_imported_vorabpauschale_consumes_only_taxable_exemption_amount(tmp_path):
+    repository = PortfolioRepository(tmp_path / 'advance-tax.sqlite')
+    repository.save_account('comdirect Depot', {'institution': 'comdirect', 'kind': 'Depot', 'exemption': '300'})
+    repository.store.import_batch(ImportBatch('tax.pdf', 'tax-hash', account_names=['comdirect Depot'], tax_events=[
+        TaxEvent('advance-1', 'comdirect Depot', 'vorabpauschale_ausland', '2020-01-02',
+                 tax_year='2020', security_ref='IE00BKM4GZ66', currency='EUR', taxable_income='8.77',
+                 advance_tax_base='12.54', partial_exemption_amount='3.77', used_exemption='8.77',
+                 after_partial_exemption='8.77',
+                 partial_exemption_rate='30')]))
+
+    values = automatic_tax_values(repository, 2020)['comdirect depot']
+    assert values['capital_income'] == Decimal('12.54')
+    assert values['advance_tax_base'] == Decimal('12.54')
+    assert values['advance_tax_taxable'] == Decimal('8.77')
+    assert values['advance_tax_count'] == 1
+    assert values['partial_exemption'] == Decimal('3.77')
+    assert values['used_exemption'] == Decimal('8.77')
+    _, institutions = tax_overview(repository, 2020)
+    assert institutions['comdirect']['used_exemption'] == Decimal('8.77')
+    assert institutions['comdirect']['remaining_exemption'] == Decimal('291.23')
+    assert institutions['comdirect']['advance_tax_base'] == Decimal('12.54')
+    repository.close()
+
+
 def test_institution_tax_record_follows_institution_rename(tmp_path):
     repository = PortfolioRepository(tmp_path / 'rename.sqlite')
     repository.save_account('Tagesgeld', {'institution': 'Alte Bank'})
@@ -134,12 +158,12 @@ def test_tax_overview_dialog_saves_edited_account_values(tmp_path):
     dialog = TaxOverviewDialog(repository)
     dialog.year.setValue(2026)
     dialog.institutions.item(0, 2).setText('750,00')
-    dialog.institutions.item(0, 5).setText('42,50')
-    dialog.institutions.item(0, 7).setText('8,25')
-    dialog.institutions.item(0, 9).setText('0,45')
-    dialog.institutions.item(0, 10).setText('5,00')
-    dialog.institutions.item(0, 11).setText('37,50')
-    dialog.institutions.item(0, 14).setText('Steuerbescheinigung')
+    dialog.institutions.item(0, 7).setText('42,50')
+    dialog.institutions.item(0, 9).setText('8,25')
+    dialog.institutions.item(0, 11).setText('0,45')
+    dialog.institutions.item(0, 12).setText('5,00')
+    dialog.institutions.item(0, 13).setText('37,50')
+    dialog.institutions.item(0, 16).setText('Steuerbescheinigung')
 
     dialog.save()
 

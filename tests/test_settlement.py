@@ -356,6 +356,7 @@ Gesamtbetrag zu Ihren Gunsten EUR 300,00
 
     def test_pdf_wording_recognizes_security_cash_kinds_conservatively(self):
         self.assertEqual(portfolio_cash_kind({'kind': 'BANK_BOOKING', 'purpose': 'Kapitalertragsteuer Apple'}), 'TAX')
+        self.assertEqual(portfolio_cash_kind({'kind': 'BANK_BOOKING', 'purpose': 'Vorabpauschale Fonds'}), 'TAX')
         self.assertEqual(portfolio_cash_kind({'kind': 'BANK_BOOKING', 'purpose': 'Orderprovision Kauf'}), 'FEE')
         self.assertEqual(portfolio_cash_kind({'kind': 'BANK_BOOKING', 'purpose': 'Ertragsgutschrift Apple'}), 'DIVIDEND')
         self.assertEqual(portfolio_cash_kind({'kind': 'BANK_BOOKING', 'purpose': 'Allgemeine Gutschrift'}), 'BANK_BOOKING')

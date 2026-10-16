@@ -185,6 +185,9 @@ class TaxEvent:
     quantity: str | None = None
     currency: str = 'EUR'
     taxable_income: str | None = None
+    advance_tax_base: str | None = None
+    partial_exemption_amount: str | None = None
+    used_exemption: str | None = None
     allowance_before: str | None = None
     allowance_after: str | None = None
     withholding_pot_before: str | None = None
@@ -350,6 +353,9 @@ class Transaction:
     withholding_tax_rate: str | None = None
     tax_rate: str | None = None
     transaction_reference: str = ''
+    # Tax basis documented by the bank. This is not the debited tax amount.
+    advance_tax_base: str | None = None
+    advance_tax_currency: str = ''
 
     def __post_init__(self):
         if self.tax_items and self.taxes is None:
@@ -362,6 +368,7 @@ class Transaction:
         if self.fee_items and self.fees is None:
             self.fees = money(sum((Decimal(item.amount) for item in self.fee_items), Decimal(0)))
         enrich_tax_details(self)
+        enrich_advance_tax_details(self)
 
 
 @dataclass
@@ -418,6 +425,27 @@ def enrich_tax_details(tx):
             tx.field_sources['tax_rate'] = 'Berechnet: Steuern gesamt ÷ Bruttobetrag × 100'
     if not tx.transaction_reference:
         tx.transaction_reference = getattr(tx, 'bank_reference', '') or tx.document_reference
+
+
+def enrich_advance_tax_details(tx):
+    """Extract an explicitly labelled Vorabpauschale without treating it as tax paid."""
+    if tx.advance_tax_base is not None:
+        tx.advance_tax_base = money(tx.advance_tax_base)
+        tx.advance_tax_currency = (tx.advance_tax_currency or tx.currency).upper()
+        return
+    text = ' '.join(str(getattr(tx, field, '') or '') for field in
+                    ('purpose', 'booking_text', 'operation', 'raw_text'))
+    amount = r'(?P<amount>\d{1,3}(?:\.\d{3})*,\d{2}|\d+,\d{2})'
+    currency = r'(?P<currency>EUR|USD|GBP|CHF)'
+    patterns = (
+        re.compile(r'Vorabpauschale\b.{0,80}?' + amount + r'\s*' + currency, re.I),
+        re.compile(currency + r'\s*' + amount + r'.{0,80}?\bVorabpauschale\b', re.I),
+    )
+    match = next((pattern.search(text) for pattern in patterns if pattern.search(text)), None)
+    if match:
+        tx.advance_tax_base = money(match.group('amount'))
+        tx.advance_tax_currency = match.group('currency').upper()
+        tx.field_sources['advance_tax_base'] = 'Vorabpauschale im Importbeleg'
 
 
 @dataclass

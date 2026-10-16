@@ -16,6 +16,16 @@ def parse_export_formats(checked, extras_text):
     return checked + [fmt for fmt in extra if fmt not in checked]
 
 
+class ChartSettingsMixin:
+    """Shared "Diagramme …" entry point for widgets that live in a main window."""
+
+    def open_chart_settings(self):
+        window = self.window()
+        if window is None or not hasattr(window, 'refresh_charts_after_style'):
+            return
+        open_chart_settings_dialog(window)
+
+
 def open_chart_settings_dialog(window):
     dialog = QDialog(window)
     dialog.setWindowTitle('Diagramm-Einstellungen')

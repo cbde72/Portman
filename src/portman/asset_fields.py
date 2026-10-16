@@ -44,6 +44,9 @@ FIELDS = {
         'partial_exemption': ('Teilfreistellung (%) laut Beleg', 'percent'),
         'withholding_credit': ('Anrechenbare Quellensteuer', 'nonnegative'),
         'advance_tax_base': ('Vorabpauschale laut Beleg', 'nonnegative'),
+        'partial_exemption_amount': ('Teilfreistellungsbetrag laut Beleg', 'nonnegative'),
+        'taxable_income': ('Steuerbemessungsgrundlage laut Beleg', 'nonnegative'),
+        'used_exemption': ('Verbrauchter Freistellungsauftrag laut Beleg', 'nonnegative'),
         'loss_category': ('Verlustverrechnungskategorie laut Beleg', 'text'),
         'notes': ('Steuerliche Erläuterung', 'text'),
     },
@@ -80,6 +83,7 @@ def validate(scope, values):
         result[field] = value
     if scope == 'trade' and bool(result.get('fx_rate')) != bool(result.get('base_currency')):
         raise ValueError('Wechselkurs und Basiswährung gemeinsam angeben.')
-    if scope == 'tax' and any(k in result for k in ('tax_cost', 'withholding_credit', 'advance_tax_base')) and not result.get('currency'):
+    if scope == 'tax' and any(k in result for k in ('tax_cost', 'withholding_credit', 'advance_tax_base',
+            'partial_exemption_amount', 'taxable_income', 'used_exemption')) and not result.get('currency'):
         raise ValueError('Währung der Steuerbeträge fehlt.')
     return result

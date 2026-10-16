@@ -10,9 +10,10 @@ from .chart_rendering import draw_wealth, draw_accounts, draw_depot_value, draw_
 from .chart_specs import chart_spec, chart_views
 from .chart_config import ChartConfig
 from .dynamic_renderer import render_chart
+from .gui.chart_settings import ChartSettingsMixin
 
 
-class VisualizationsWidget(QWidget):
+class VisualizationsWidget(ChartSettingsMixin, QWidget):
     VIEWS = chart_views()
 
     def __init__(self, repo, scope_getter, parent=None, *, compact=False, initial_view=0, custom_charts=None):
@@ -88,13 +89,6 @@ class VisualizationsWidget(QWidget):
             else:
                 path += '.png'
         save_figure(self.fig, path, dpi=CHART_STYLE['export_dpi'])
-
-    def open_chart_settings(self):
-        window = self.window()
-        if window is None or not hasattr(window, 'refresh_charts_after_style'):
-            return
-        from .gui.chart_settings import open_chart_settings_dialog
-        open_chart_settings_dialog(window)
 
     def open_custom_charts(self):
         """Öffnet den Dialog zur Verwaltung benutzerdefinierter Diagramme."""

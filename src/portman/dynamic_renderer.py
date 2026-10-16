@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date
 from decimal import Decimal
+from importlib.util import find_spec
 
 import matplotlib.dates as mdates
 import numpy as np
@@ -21,17 +22,11 @@ from matplotlib.patches import Rectangle
 from matplotlib.ticker import FuncFormatter, MaxNLocator
 from typing import Any
 
-try:
-    from scipy.interpolate import PchipInterpolator
-    SCIPY_AVAILABLE = True
-except ImportError:  # pragma: no cover - optionale Abhängigkeit
-    SCIPY_AVAILABLE = False
-
-try:
-    import squarify  # noqa: F401 - nur Verfügbarkeit prüfen, Layout ist eingebaut
-    SQUARIFY_AVAILABLE = True
-except ImportError:  # pragma: no cover - optionale Abhängigkeit
-    SQUARIFY_AVAILABLE = False
+# SciPy und Squarify sind optionale Abhängigkeiten.  Hier wird nur ihre
+# Verfügbarkeit geprüft; importiert werden sie erst bei Bedarf, damit der
+# Programmstart nicht durch schwere Importe verzögert wird.
+SCIPY_AVAILABLE = find_spec("scipy") is not None
+SQUARIFY_AVAILABLE = find_spec("squarify") is not None
 
 from .chart_config import ChartConfig, DEFAULT_STYLING, ALL_ACCOUNTS
 from .chart_style import (
@@ -300,6 +295,7 @@ def _smooth_series(x, y, samples: int | None = None):
         return x, y
     if np.any(np.diff(x) <= 0):
         return x, y
+    from scipy.interpolate import PchipInterpolator
     samples = samples or max(len(x) * 12, 60)
     xi = np.linspace(x[0], x[-1], samples)
     yi = PchipInterpolator(x, y)(xi)

@@ -7,7 +7,7 @@ from PySide6.QtWidgets import QApplication, QDialogButtonBox, QTabWidget
 
 from test_comdirect_pdf import report, legacy_report, parsed
 from portfolio_v5.accounts import account_key
-from portfolio_v5.comdirect_pdf import parse_finanzreport
+from pdf_plugins._comdirect_finanzreport_core import parse_finanzreport
 from portfolio_v5.models import ImportBatch
 from portman.comdirect_pdf_preview import ComdirectPdfPreviewDialog
 from portman.repository_v09 import RepositoryV09
@@ -224,7 +224,7 @@ def test_fast_reader_uses_native_text_and_preserves_values(tmp_path, monkeypatch
 
 def test_fast_reader_defers_image_page_with_selectable_letterhead():
     import pymupdf
-    from portfolio_v5.comdirect_fast_pdf import try_fast_finanzreport
+    from pdf_plugins._comdirect_fast import try_fast_finanzreport
     with pymupdf.open() as document:
         page = document.new_page()
         page.insert_text((30, 30), 'comdirect Finanzreport Nr. 1 per 01.02.2021')

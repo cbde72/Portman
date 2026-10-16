@@ -4,7 +4,7 @@ import pytest
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from portfolio_v5.models import ImportBatch, Position, Snapshot, BankTransaction
-from portfolio_v5.baader_pdf import parse_baader_portfolio
+from pdf_plugins._baader_core import parse_baader_portfolio
 from portman.repository_v09 import RepositoryV09
 
 ACCOUNT = 'Baader Depot 1234567890'

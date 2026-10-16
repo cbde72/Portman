@@ -37,9 +37,15 @@ def initialize(db):
 
 def install_revision_triggers(db):
     if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='v09_revision'").fetchone(): return
+    try:
+        if db.execute("SELECT value FROM meta WHERE key='asset_revision_triggers_ready'").fetchone() == ('1',):
+            return
+    except Exception:
+        pass
     with db:
         for table in TABLES:
             for operation in ('INSERT', 'UPDATE', 'DELETE'):
                 db.execute(f'''CREATE TRIGGER IF NOT EXISTS revision09_{table}_{operation}
                     AFTER {operation} ON {table}
                     BEGIN UPDATE v09_revision SET value=value+1 WHERE id=1; END''')
+        db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('asset_revision_triggers_ready','1')")

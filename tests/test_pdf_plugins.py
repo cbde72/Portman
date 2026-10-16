@@ -139,6 +139,37 @@ DE89370400440532013000 EUR 31.12.2025 EUR 10,00
     assert tx.document_reference == 'ABC-123 / 9'
 
 
+def test_comdirect_vorabpauschale_creates_tax_event_without_cash_booking():
+    import importlib.util
+    path = Path(__file__).resolve().parents[1] / 'pdf_plugins' / 'comdirect_ertraege.py'
+    spec = importlib.util.spec_from_file_location('comdirect_advance_tax_test', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    text = '''comdirect bank AG
+Datum: 14.01.2020
+Referenz-Nummer: 1CIFLCBQ8IZ00FSX
+Depotnummer: 4764924 00
+Steuerliche Behandlung: Vorabpauschale Ausland vom 02.01.2020
+Stk. 155,857 IS C.MSCI EMIMI U.ETF DLA , WKN / ISIN: A111X9 / IE00BKM4GZ66
+in Anspruch genommener Freistellungsauftrag EUR 8,77
+Vorabpauschale EUR 12,54
+Teilfreistellung (30%) EUR -3,77
+Steuerbemessungsgrundlage vor Verlustverrechnung EUR 8,77
+'''
+    parsed_document = document(text)
+    detection = module.plugin.detect(parsed_document)[0]
+    batch = module.plugin.parse(
+        parsed_document, detection, ParseContext(ImportBatch('tax.pdf', 'hash', source_sheet='PDF')))
+
+    event = batch.tax_events[0]
+    assert detection.handler_id == 'vorabpauschale'
+    assert batch.transactions == []
+    assert (event.advance_tax_base, event.taxable_income, event.used_exemption) == ('12.54', '8.77', '8.77')
+    assert event.partial_exemption_amount == '3.77'
+    assert (event.partial_exemption_rate, event.security_ref, event.quantity) == ('30', 'IE00BKM4GZ66', '155.857')
+    assert event.account == 'Depot 476492400'
+
+
 def test_comdirect_trade_extracts_provision_and_settlement_identity():
     import importlib.util
     path = Path(__file__).resolve().parents[1] / 'pdf_plugins' / 'comdirect_ertraege.py'

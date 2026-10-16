@@ -3,7 +3,7 @@ from decimal import Decimal
 import pytest
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from portfolio_v5.models import BankTransaction, ImportBatch
-from portfolio_v5.comdirect_pdf import parse_finanzreport, is_finanzreport
+from pdf_plugins._comdirect_finanzreport_core import parse_finanzreport, is_finanzreport
 from portman.repository import PortfolioRepository
 
 
@@ -326,7 +326,7 @@ def test_failed_pdf_report_keeps_text_but_no_partial_records(tmp_path, monkeypat
 
 @pytest.mark.parametrize('stamp', ['32.01.2021', ''])
 def test_missing_or_invalid_report_date_is_rejected(stamp):
-    from portfolio_v5.finanzreport_help import report_date
+    from pdf_plugins._finanzreport_help import report_date
     with pytest.raises(ValueError, match='Lösung:'):
         report_date('Finanzreport Nr. 1 per ' + stamp)
 
@@ -344,7 +344,7 @@ def test_missing_opening_balance_has_specific_solution():
     ('Finanzreport: Kontoübersicht und Endsaldo widersprechen sich.', 'zusammengehörige Seiten'),
 ])
 def test_report_solutions_match_the_problem(message, expected):
-    from portfolio_v5.finanzreport_help import solution_for
+    from pdf_plugins._finanzreport_help import solution_for
     result = solution_for(message)
     assert result.startswith(message)
     assert 'Lösung:' in result and expected in result

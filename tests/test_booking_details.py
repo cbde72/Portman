@@ -8,7 +8,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 from portfolio_v5.models import BankTransaction, ImportBatch
 from portfolio_v5.storage import Store
-from portfolio_v5.pdf_bookings import parse_bookings
+from pdf_plugins._statement_bookings import parse_bookings
 from portfolio_v5.pdf_importer import analyse_pages
 from portfolio_v5.booking_details import enrich_details
 

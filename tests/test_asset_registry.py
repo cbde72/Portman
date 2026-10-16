@@ -1,5 +1,5 @@
 import pytest
-from portfolio_v5.models import ImportBatch, Snapshot, Position, Transaction
+from portfolio_v5.models import BankTransaction, ImportBatch, Snapshot, Position, TaxEvent, Transaction
 from portman.repository_v09 import RepositoryV09
 
 
@@ -91,6 +91,40 @@ def test_dated_facts_survive_reimport_and_reopen(repo):
         assert other.assets.facts(KEY, 'security')['values']['issuer_name'] == 'Apple Inc.'
         assert len(other.assets.audit(KEY)) == 1
     finally: other.close()
+
+
+def test_imported_vorabpauschale_is_visible_as_transaction_tax_fact(tmp_path):
+    r = RepositoryV09(tmp_path / 'advance-tax.sqlite', backups=False)
+    try:
+        r.commit_batches([ImportBatch('tax-notice.pdf', 'tax-source', transactions=[
+            BankTransaction('Depot A', 'tax-1', '2026-01-15', 'BANK_BOOKING', '-7.91', 'EUR',
+                security=KEY, purpose='Vorabpauschale 31,64 EUR; Steuerbelastung 7,91 EUR')])])
+        tx = r.assets.transactions(KEY)[0]
+        fact = r.assets.facts(KEY, 'tax', tx['reference'])
+        assert fact['values'] == {'advance_tax_base': '31.64', 'currency': 'EUR'}
+        assert fact['valid_from'] == '2026-01-15'
+        assert fact['source'].startswith('Automatisch aus Importbeleg:')
+    finally:
+        r.close()
+
+
+def test_imported_tax_notice_is_visible_on_depot_position(tmp_path):
+    r = RepositoryV09(tmp_path / 'tax-notice.sqlite', backups=False)
+    try:
+        r.commit_batches([ImportBatch('tax-notice.pdf', 'notice-source', account_names=['Depot A'], snapshots=[
+            Snapshot('Depot A', '2020-01', '2020-01-02', 'Test', [
+                Position(KEY, 'Apple', isin=KEY, quantity='1', value='100')])], tax_events=[
+            TaxEvent('advance-1', 'Depot A', 'vorabpauschale_ausland', '2020-01-02', tax_year='2020',
+                     security_ref=KEY, currency='EUR', advance_tax_base='12.54', taxable_income='8.77',
+                     partial_exemption_amount='3.77', used_exemption='8.77', partial_exemption_rate='30')])])
+        position = r.assets.positions(KEY)[0]
+        fact = r.assets.facts(KEY, 'tax', position['uuid'])
+        assert fact['values'] == {'advance_tax_base': '12.54', 'currency': 'EUR',
+            'partial_exemption': '30', 'partial_exemption_amount': '3.77',
+            'taxable_income': '8.77', 'used_exemption': '8.77'}
+        assert fact['valid_from'] == '2020-01-02'
+    finally:
+        r.close()
 
 
 def test_extended_schema_is_in_database_backup(repo, tmp_path):

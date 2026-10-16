@@ -4,9 +4,10 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboB
 
 from .visualizations import VisualizationsWidget
 from .chart_config import default_manager
+from .gui.chart_settings import ChartSettingsMixin
 
 
-class VisualizationBoard(QWidget):
+class VisualizationBoard(ChartSettingsMixin, QWidget):
     MODES = [('Ein Diagramm', 1), ('Zwei nebeneinander', 2), ('Vier als 2 × 2', 4)]
 
     def __init__(self, repo, scope_getter, settings=None, save=None, parent=None):
@@ -75,13 +76,6 @@ class VisualizationBoard(QWidget):
     def refresh(self):
         for chart in self.charts:
             if chart.isVisible(): chart.refresh()
-
-    def open_chart_settings(self):
-        window = self.window()
-        if window is None or not hasattr(window, 'refresh_charts_after_style'):
-            return
-        from .gui.chart_settings import open_chart_settings_dialog
-        open_chart_settings_dialog(window)
 
     def open_custom_charts(self):
         """Öffnet den Dialog zur Verwaltung benutzerdefinierter Diagramme."""

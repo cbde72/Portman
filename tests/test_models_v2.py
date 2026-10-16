@@ -28,6 +28,15 @@ def test_withholding_metadata_is_promoted_and_rate_is_calculated():
     assert calculated.field_sources['withholding_tax_rate'].startswith('Berechnet:')
 
 
+def test_vorabpauschale_is_extracted_as_tax_basis_not_tax_paid():
+    tx = BankTransaction('Cash', 'advance-tax', '2026-01-15', Kind.BANK_BOOKING, '-7.91', 'EUR',
+        security='DE000A0F5UH1', purpose='Abrechnung Vorabpauschale 31,64 EUR; Kapitalertragsteuer 7,91 EUR')
+    assert tx.advance_tax_base == '31.64'
+    assert tx.advance_tax_currency == 'EUR'
+    assert tx.taxes is None
+    assert tx.field_sources['advance_tax_base'] == 'Vorabpauschale im Importbeleg'
+
+
 def test_extended_model_is_compatible_and_decodes_nested_values():
     tx = BankTransaction('Cash', 'tx', '2026-10-11', Kind.DIVIDEND, '8.50', 'EUR',
         gross_amount='10', tax_items=[TaxItem('kapst', '1')], fee_items=[FeeItem('fee', '.5')],

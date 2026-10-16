@@ -22,7 +22,8 @@ def portfolio_cash_kind(tx):
     text = ' '.join(str(tx.get(key) or '') for key in ('purpose','booking_text','operation','raw_text')).casefold()
     if any(word in text for word in ('dividende', 'ausschüttung', 'ausschuettung', 'ertragsgutschrift')):
         return 'DIVIDEND'
-    if any(word in text for word in ('quellensteuer', 'kapitalertragsteuer', 'kirchensteuer', 'solidaritätszuschlag')):
+    if any(word in text for word in ('quellensteuer', 'kapitalertragsteuer', 'kirchensteuer',
+                                     'solidaritätszuschlag', 'vorabpauschale')):
         return 'TAX'
     if any(word in text for word in ('ordergebühr', 'ordergebuehr', 'transaktionsgebühr', 'transaktionsgebuehr', 'orderprovision')):
         return 'FEE'

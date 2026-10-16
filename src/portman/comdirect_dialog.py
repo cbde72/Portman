@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QCheckBox, QDateEdit, QDialog, QDialogButtonBox,
 
 from .comdirect_banking import fetch_comdirect, BankingError, Cancelled
 from .comdirect_credentials import ComdirectCredentialStore, CredentialError
+from .worker_dialog import WorkerDialogMixin
 
 
 class ComdirectWorker(QThread):
@@ -89,7 +90,7 @@ class TANDialog(QDialog):
         layout.addWidget(buttons)
 
 
-class ComdirectDialog(QDialog):
+class ComdirectDialog(WorkerDialogMixin, QDialog):
     def __init__(self, source_root, parent=None, *, credential_store=None):
         super().__init__(parent)
         self.source_root = Path(source_root)
@@ -268,10 +269,3 @@ class ComdirectDialog(QDialog):
             self.status.setText('Abruf wird abgebrochen. Eine laufende Serverantwort wird noch abgewartet …')
             return
         super().reject()
-
-    def closeEvent(self, event):
-        self.reject()
-        if self.worker and self.worker.isRunning():
-            event.ignore()
-        else:
-            event.accept()

@@ -3,7 +3,7 @@ import os
 import pytest
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
-from portfolio_v5.pdf_bookings import parse_bookings
+from pdf_plugins._statement_bookings import parse_bookings
 from portfolio_v5.pdf_importer import analyse_pages
 
 

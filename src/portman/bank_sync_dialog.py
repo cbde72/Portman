@@ -13,9 +13,10 @@ from .baader_credentials import BaaderCredentialStore
 from .baader_dialog import BaaderWorker, BaaderTANDialog
 from .renault_credentials import RenaultCredentialStore
 from .renault_dialog import RenaultWorker, RenaultTANDialog
+from .worker_dialog import WorkerDialogMixin
 
 
-class BankSyncDialog(QDialog):
+class BankSyncDialog(WorkerDialogMixin, QDialog):
     status_message = Signal(str)
 
     def __init__(self, source_root, parent=None, *, auto_continue=False):
@@ -175,10 +176,3 @@ class BankSyncDialog(QDialog):
             self.set_status('Synchronisation wird abgebrochen. Die laufende Serverantwort wird abgewartet …')
             return
         super().reject()
-
-    def closeEvent(self, event):
-        self.reject()
-        if self.worker and self.worker.isRunning():
-            event.ignore()
-        else:
-            event.accept()

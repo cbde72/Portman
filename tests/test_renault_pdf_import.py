@@ -5,7 +5,7 @@ import pytest
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from portfolio_v5.models import ImportBatch, BankTransaction
 from portfolio_v5.pdf_importer import analyse_pages
-from portfolio_v5.pdf_bookings import parse_bookings
+from pdf_plugins._statement_bookings import parse_bookings
 from portman.repository import PortfolioRepository
 from portman.renault_pdf_import import import_renault_batches
 from portman.renault_pdf_import import is_renault_statement

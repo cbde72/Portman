@@ -113,7 +113,53 @@ class AssetRegistry:
     def facts(self, key, scope, context='', as_of='9999-12-31'):
         row = self.db.execute('''SELECT * FROM asset_facts WHERE asset_uuid=? AND scope=? AND context=?
             AND valid_from<=? ORDER BY valid_from DESC LIMIT 1''', (self.identity(key), scope, context, as_of)).fetchone()
-        return {**dict(row), 'values': json.loads(row['payload'])} if row else {'values': {}, 'source': '', 'valid_from': ''}
+        saved = ({**dict(row), 'values': json.loads(row['payload'])}
+                 if row else {'values': {}, 'source': '', 'valid_from': ''})
+        if scope != 'tax' or not context:
+            return saved
+        transaction = next((item for item in self.transactions(key) if item['reference'] == context), None)
+        imported, imported_source, imported_date = {}, '', ''
+        if transaction and transaction.get('advance_tax_base') not in (None, ''):
+            imported = {
+                'advance_tax_base': str(transaction['advance_tax_base']),
+                'currency': transaction.get('advance_tax_currency') or transaction.get('currency', ''),
+            }
+            imported_source = str(transaction.get('source') or '')
+            imported_date = transaction.get('date', '')
+        position = self.db.execute('SELECT depot_key FROM asset_positions WHERE uuid=?', (context,)).fetchone()
+        if position:
+            uid = self.identity(key)
+            keys = {r[0].removeprefix('ISIN:') for r in self.db.execute(
+                'SELECT security_key FROM asset_keys WHERE asset_uuid=?', (uid,))}
+            links, mappings = self.repo.store._import_links(), self.repo.store._depot_mappings()
+            candidates = []
+            for record in self.repo.store.model_records(kind='tax_events'):
+                event = record['payload']
+                source_key = account_key(event.get('account', ''))
+                depot_key = links.get((record['import_id'], source_key), mappings.get(source_key, source_key))
+                if (event.get('type') == 'vorabpauschale_ausland'
+                        and event.get('security_ref', '').removeprefix('ISIN:') in keys
+                        and depot_key == position['depot_key'] and event.get('date', '') <= as_of):
+                    candidates.append((event.get('date', ''), record['import_id'], event))
+            if candidates:
+                imported_date, import_id, event = max(candidates, key=lambda item: item[0])
+                imported = {
+                    'advance_tax_base': str(event['advance_tax_base']),
+                    'currency': event.get('currency', ''),
+                    'partial_exemption': str(event.get('partial_exemption_rate') or ''),
+                    'partial_exemption_amount': str(event.get('partial_exemption_amount') or ''),
+                    'taxable_income': str(event.get('taxable_income') or ''),
+                    'used_exemption': str(event.get('used_exemption') or ''),
+                }
+                source_row = self.db.execute('SELECT path FROM imports WHERE id=?', (import_id,)).fetchone()
+                imported_source = source_row['path'] if source_row else ''
+        if not imported:
+            return saved
+        saved['values'] = {**imported, **saved['values']}
+        if not row:
+            saved['source'] = 'Automatisch aus Importbeleg: ' + imported_source
+            saved['valid_from'] = imported_date
+        return saved
 
     def save_facts(self, key, scope, context, valid_from, values, source):
         values = validate(scope, values)

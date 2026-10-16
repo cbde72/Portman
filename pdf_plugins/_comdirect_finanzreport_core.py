@@ -104,6 +104,23 @@ def is_finanzreport(pages):
     return bool(re.search(r'Finanzreport\s+Nr\.', text, re.I) and re.search(r'comdirect', text, re.I))
 
 
+def flush_pending(pending, batch, occurrences):
+    """Append the staged cash booking and return the cleared pending slot."""
+    if pending is None:
+        return None
+    tx, page, row = pending
+    enrich_interest_closing(tx, batch)
+    enrich_details(tx)
+    identity = digest([tx.account, tx.date, tx.value_date, tx.amount, tx.purpose])
+    occurrences[identity] += 1
+    tx.external_id = f'comdirect-pdf-{identity}-{occurrences[identity]}'
+    batch.transactions.append(tx)
+    batch.pdf_booking_evidence.append({'page': page, 'line': row, 'text': tx.purpose,
+                                       'ocr': False,
+                                       'review_required': 'interest_reconciliation' in tx.field_sources})
+    return None
+
+
 def parse_finanzreport(batch, pages, content, *, bookings_only=False):
     batch = _parse_cash_report(batch, pages, content)
     if not bookings_only:
@@ -150,18 +167,7 @@ def _parse_cash_report(batch, pages, content):
     occurrences = Counter()
     def flush():
         nonlocal pending
-        if pending is None: return
-        tx, page, row = pending
-        enrich_interest_closing(tx, batch)
-        enrich_details(tx)
-        identity = digest([tx.account, tx.date, tx.value_date, tx.amount, tx.purpose])
-        occurrences[identity] += 1
-        tx.external_id = f'comdirect-pdf-{identity}-{occurrences[identity]}'
-        batch.transactions.append(tx)
-        batch.pdf_booking_evidence.append({'page': page, 'line': row, 'text': tx.purpose,
-                                          'ocr': False,
-                                          'review_required': 'interest_reconciliation' in tx.field_sources})
-        pending = None
+        pending = flush_pending(pending, batch, occurrences)
     depot_mode = False
     for index, (page, row, line) in enumerate(lines):
         if line.startswith(('Finanzreport ', 'Kundennummer', 'comdirect', '25449 Quickborn')):

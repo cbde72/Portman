@@ -3,10 +3,9 @@ import base64
 import re
 from collections import Counter
 from pdf_plugins._finanzreport_help import report_date, balance_error
-from portfolio_v5.booking_details import enrich_details
 from decimal import Decimal
-from portfolio_v5.models import Balance, BankDocument, BankTransaction, digest, money, parse_date
-from pdf_plugins._comdirect_finanzreport_core import DATE, NUM, enrich_interest_closing
+from portfolio_v5.models import Balance, BankDocument, BankTransaction, money, parse_date
+from pdf_plugins._comdirect_finanzreport_core import DATE, NUM, flush_pending
 
 
 def parse_legacy_finanzreport(batch, pages, content, *, bookings_only=False):
@@ -69,18 +68,7 @@ def parse_legacy_finanzreport(batch, pages, content, *, bookings_only=False):
         start_count = len(batch.transactions)
         def flush():
             nonlocal pending
-            if pending is None: return
-            tx, page, row = pending
-            enrich_interest_closing(tx, batch)
-            enrich_details(tx)
-            identity = digest([tx.account, tx.date, tx.value_date, tx.amount, tx.purpose])
-            occurrences[identity] += 1
-            tx.external_id = f'comdirect-pdf-{identity}-{occurrences[identity]}'
-            batch.transactions.append(tx)
-            batch.pdf_booking_evidence.append({'page': page, 'line': row, 'text': tx.purpose,
-                                              'ocr': False,
-                                              'review_required': 'interest_reconciliation' in tx.field_sources})
-            pending = None
+            pending = flush_pending(pending, batch, occurrences)
         for page, row, line in rows:
             balance = re.fullmatch(r'(Alter|Neuer) Saldo (?:' + DATE + r' )?([+-]?' + NUM + ')', line)
             if balance:

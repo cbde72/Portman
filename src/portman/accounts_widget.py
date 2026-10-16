@@ -131,12 +131,28 @@ class AccountsWidget(QWidget):
             groups[key] = group
             self.tree.addTopLevelItem(group)
         from .performance_service import PerformanceService
-        perf_service = PerformanceService(self.repo)
+        perf_service = getattr(self, '_perf_service', None)
+        repo_revision = getattr(self.repo, '_v8_cache_revision', None) or (self.repo.db.total_changes, self.repo.db.execute('PRAGMA data_version').fetchone()[0])
+        cached_revision = getattr(self, '_perf_revision', None)
+        if perf_service is None or cached_revision != repo_revision:
+            perf_service = PerformanceService(self.repo)
+            self._perf_service = perf_service
+            self._perf_revision = repo_revision
+            self._perf_cache = {}
         perf_by_account = {}
         for account_name in self.repo.accounts():
             try:
-                perf_1y = perf_service.analyze(account_name, *perf_service.preset_ranges(account_name).get('1 Jahr', ('9999-12-31', '9999-12-31')))
-                perf_3y = perf_service.analyze(account_name, *perf_service.preset_ranges(account_name).get('3 Jahre', ('9999-12-31', '9999-12-31')))
+                ranges = perf_service.preset_ranges(account_name)
+                r1 = ranges.get('1 Jahr', ('9999-12-31', '9999-12-31'))
+                r3 = ranges.get('3 Jahre', ('9999-12-31', '9999-12-31'))
+                key1 = ('analyze', account_name, r1[0], r1[1], '1y')
+                key3 = ('analyze', account_name, r3[0], r3[1], '3y')
+                if key1 not in self._perf_cache:
+                    self._perf_cache[key1] = perf_service.analyze(account_name, *r1)
+                if key3 not in self._perf_cache:
+                    self._perf_cache[key3] = perf_service.analyze(account_name, *r3)
+                perf_1y = self._perf_cache[key1]
+                perf_3y = self._perf_cache[key3]
                 perf_by_account[account_name] = {
                     'twr_1y': perf_1y.get('twr_annualized'),
                     'twr_3y': perf_3y.get('twr_annualized'),

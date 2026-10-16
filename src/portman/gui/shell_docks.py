@@ -6,11 +6,6 @@ from PySide6.QtWidgets import (
     QTabWidget, QTableWidget, QTreeWidget, QVBoxLayout, QWidget,
 )
 
-try:
-    from PySide6.QtWebEngineWidgets import QWebEngineView
-except ImportError:
-    QWebEngineView = None
-
 from portman.accounts_widget import AccountsWidget
 from portman.data_quality_widget import DataQualityWidget
 from portman.date_display import display_dates
@@ -231,6 +226,9 @@ class ShellDocksMixin:
 
         self.current_isin_loaded = None
         if webengine_available():
+            # Imported lazily: loading QtWebEngine pulls in the full Chromium
+            # stack and is only needed when the browser dock is actually shown.
+            from PySide6.QtWebEngineWidgets import QWebEngineView
             self.web_view = QWebEngineView()
             browser_layout.addWidget(self.web_view)
         else:

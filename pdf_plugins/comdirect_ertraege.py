@@ -4,7 +4,7 @@ import re
 from decimal import Decimal
 
 from portfolio_v5.models import (BankDocument, BankTransaction, FeeItem, Kind, SecurityInfo,
-                                 correction_number, digest, money, parse_date)
+                                 TaxEvent, correction_number, digest, money, parse_date)
 from portfolio_v5.pdf_plugins import Detection
 
 DIVIDEND_KIND = Kind.DIVIDEND      # Dividenden und Fonds-Ausschüttungen
@@ -75,6 +75,21 @@ RATE = (re.compile(r'Einl[öo]sung\s+zum\s+Kurs\s+von\s+(?P<r>[0-9.]+,\d+)\s+[A-
 BASE = (re.compile(r'Kurswert\s*Einl[öo]sung\s+[A-Z]{3}\s+(?P<a>' + AMOUNT + ')'),
         re.compile(r'Bruttobetrag:\s*[A-Z]{3}\s+(?P<a>' + AMOUNT + ')'))
 
+ADVANCE_TAX_TITLE = re.compile(
+    r'Steuerliche\s+Behandlung:\s*Vorabpauschale\s+Ausland\s+vom\s+(?P<date>\d{2}\.\d{2}\.\d{4})', re.I)
+ADVANCE_TAX_SECURITY = re.compile(
+    r'Stk\.\s*(?P<qty>\d[\d.]*(?:,\d+)?)\s+(?P<name>.+?)\s*,\s*WKN\s*/\s*ISIN:\s*'
+    r'(?P<wkn>[A-Z0-9]{6})\s*/\s*(?P<isin>[A-Z]{2}[A-Z0-9]{9}\d)', re.I)
+ADVANCE_TAX_BASE = re.compile(r'Vorabpauschale\s+EUR\s+(?P<a>' + AMOUNT + r')', re.I)
+ADVANCE_TAX_PARTIAL = re.compile(
+    r'Teilfreistellung\s*\((?P<rate>[\d,.]+)%\)\s+EUR\s*-\s*(?P<a>' + AMOUNT + r')', re.I)
+ADVANCE_TAX_TAXABLE = re.compile(
+    r'Steuerbemessungsgrundlage\s+vor\s+Verlustverrechnung(?:\s*\(\d+\))?\s+EUR\s+(?P<a>' + AMOUNT + r')', re.I)
+ADVANCE_TAX_USED = re.compile(
+    r'in\s+Anspruch\s+genommener\s+Freistellungsauftrag\s+EUR\s+(?P<a>' + AMOUNT + r')', re.I)
+ADVANCE_TAX_DEPOT = re.compile(r'Depotnummer:\s*(?P<n>\d+(?:\s+\d+)?)', re.I)
+ADVANCE_TAX_REFERENCE = re.compile(r'Referenz-Nummer:\s*(?P<r>[A-Z0-9\s]+?)(?=Depotnummer:|\n\s*\n)', re.I)
+
 
 def ocr_holding(document, page, options):
     """Ergänzt ISIN und Stückzahl per lokaler OCR (portfolio_v5.pdf_ocr), nur bei Bedarf.
@@ -133,14 +148,18 @@ def split_name_wkn(rest):
 class ComdirectErtraegePlugin:
     plugin_id = 'user.comdirect-ertraege'
     bank_name = 'comdirect'
-    version = '1.0'
-    document_types = 'Dividendengutschrift, Ertragsgutschrift, Einlösung, Wertpapierabrechnung Kauf'
+    version = '1.1'
+    document_types = ('Dividendengutschrift, Ertragsgutschrift, Einlösung, Wertpapierabrechnung Kauf, '
+                      'Steuermitteilung Vorabpauschale')
 
     def detect(self, document):
         text = document.text
         if not re.search(r'comdirect', text, re.I):
             return []
         result = []
+        if ADVANCE_TAX_TITLE.search(text) and ADVANCE_TAX_SECURITY.search(text):
+            result.append(Detection(0.99, 'comdirect Steuermitteilung Vorabpauschale', 'vorabpauschale',
+                                    'comdirect, Vorabpauschale und Wertpapierkennung erkannt'))
         if TRADE_MARKER.search(text) and TRADE_FEE.search(text):
             result.append(Detection(0.97, 'comdirect Wertpapierabrechnung Kauf', 'wertpapierkauf',
                                     'comdirect, Wertpapierkauf und Provision erkannt'))
@@ -152,6 +171,8 @@ class ComdirectErtraegePlugin:
         return result
 
     def parse(self, document, detection, context):
+        if detection.handler_id == 'vorabpauschale':
+            return self._advance_tax(document, context.batch)
         if detection.handler_id == 'wertpapierkauf':
             return self._trade(document, context.batch)
         handler = HANDLERS.get(detection.handler_id)
@@ -276,6 +297,55 @@ class ComdirectErtraegePlugin:
                                   + ' in diesem PDF nicht lesbar; übrige Felder wurden übernommen. Bitte am Original prüfen.')
         if page.used_ocr:
             batch.warnings.append('Seite per OCR gelesen; Betrag, Stückzahl und ISIN bitte am Original prüfen.')
+        return batch
+
+    def _advance_tax(self, document, batch):
+        text = document.text
+        title, security = ADVANCE_TAX_TITLE.search(text), ADVANCE_TAX_SECURITY.search(text)
+        base, partial = ADVANCE_TAX_BASE.search(text), ADVANCE_TAX_PARTIAL.search(text)
+        taxable, used = ADVANCE_TAX_TAXABLE.search(text), ADVANCE_TAX_USED.search(text)
+        if not all((title, security, base, partial, taxable, used)):
+            raise ValueError('Vorabpauschale, Teilfreistellung, Steuerbemessungsgrundlage oder Freistellungsnutzung nicht erkannt.')
+        treatment_date = parse_date(title.group('date'))
+        values = {name: money(match.group('a')) for name, match in
+                  (('base', base), ('partial', partial), ('taxable', taxable), ('used', used))}
+        if not treatment_date or any(value is None for value in values.values()):
+            raise ValueError('Datum oder Steuerbetrag der Vorabpauschale ist ungültig.')
+        if abs(Decimal(values['base']) - Decimal(values['partial']) - Decimal(values['taxable'])) > Decimal('0.01'):
+            raise ValueError('Vorabpauschale minus Teilfreistellung passt nicht zur Steuerbemessungsgrundlage.')
+        if Decimal(values['used']) > Decimal(values['taxable']):
+            raise ValueError('Der verbrauchte Freistellungsauftrag übersteigt die Steuerbemessungsgrundlage.')
+
+        isin, wkn = security.group('isin').upper(), security.group('wkn').upper()
+        qty = correction_number(security.group('qty'))
+        name = ' '.join(security.group('name').split())
+        depot_match = ADVANCE_TAX_DEPOT.search(text)
+        depot_number = re.sub(r'\s+', '', depot_match.group('n')) if depot_match else ''
+        account = 'Depot ' + depot_number if depot_number else 'comdirect Depot'
+        reference_match = ADVANCE_TAX_REFERENCE.search(text)
+        reference = re.sub(r'\s+', '', reference_match.group('r')) if reference_match else ''
+        external_id = 'pdf-comdirect-advance-tax-' + digest(
+            [account, isin, treatment_date, values['base'], values['taxable'], reference])
+        batch.tax_events.append(TaxEvent(
+            external_id=external_id, account=account, type='vorabpauschale_ausland',
+            date=treatment_date, tax_year=treatment_date[:4], security_ref=isin, quantity=qty,
+            currency='EUR', taxable_income=values['taxable'], advance_tax_base=values['base'],
+            partial_exemption_amount=values['partial'], used_exemption=values['used'],
+            after_partial_exemption=values['taxable'],
+            partial_exemption_rate=correction_number(partial.group('rate')),
+            reference_no=reference))
+        batch.securities.append(SecurityInfo(key=isin, isin=isin, wkn=wkn, name=name))
+        document_date = re.search(r'Datum:\s*(\d{2}\.\d{2}\.\d{4})', text, re.I)
+        batch.documents.append(BankDocument(
+            account, batch.file_hash + ':' + account, document.path.name,
+            parse_date(document_date.group(1)) if document_date else treatment_date,
+            base64.b64encode(document.content).decode('ascii'),
+            document_type='Steuermitteilung Vorabpauschale', bank_name='comdirect',
+            document_no=reference, page_count=len(document.pages), extraction_method='PDF-Text'))
+        batch.account_names.append(account)
+        batch.warnings.append(
+            f"Vorabpauschale {values['base']} EUR erkannt; nach {partial.group('rate')} % Teilfreistellung "
+            f"wurden {values['used']} EUR Freistellungsauftrag verbraucht. Keine Kontobuchung erzeugt.")
         return batch
 
     def _trade(self, document, batch):

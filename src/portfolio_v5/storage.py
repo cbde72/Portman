@@ -117,6 +117,9 @@ CREATE INDEX IF NOT EXISTS document_import ON bank_documents(import_id);
 CREATE INDEX IF NOT EXISTS snapshot_revision ON snapshots(account,effective_date,complete,id DESC);
 '''
 
+# Bump when ``SCHEMA`` gains tables/columns/indexes so the DDL script runs again.
+CORE_SCHEMA_VERSION = '1'
+
 
 class Store:
     def __init__(self, path):
@@ -128,17 +131,31 @@ class Store:
         self.db.execute('PRAGMA synchronous=NORMAL')
         self.db.execute('PRAGMA temp_store=MEMORY')
         self.db.execute('PRAGMA busy_timeout=30000')
-        self.db.executescript(SCHEMA)
+        # ``foreign_keys`` is a per-connection pragma; set it explicitly since the
+        # schema script (which used to carry it) is skipped when already applied.
+        self.db.execute('PRAGMA foreign_keys=ON')
+        # Apply the DDL script only when this code version has not built the
+        # schema yet; re-running ~30 CREATE/INDEX statements on every start is
+        # pure overhead.
+        if not self._schema_ready():
+            self.db.executescript(SCHEMA)
+            self.db.execute('INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)',
+                            ('core_schema_version', CORE_SCHEMA_VERSION))
         version = self.db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0]
         if version != '1':
             raise ValueError(f'Unbekanntes Datenbankschema {version}')
+        # The passes below are defensive repairs for imported/legacy data.
+        # Imports register their own accounts and depots, so each repair only
+        # has to run once per database.
         with self.db:
-            links = self._import_links()
-            for row in self.db.execute('''SELECT account,import_id FROM snapshots UNION SELECT account,import_id FROM balances
-                                         UNION SELECT account,import_id FROM transactions
-                                         UNION SELECT account,import_id FROM bank_documents''').fetchall():
-                if row['account'] != 'Archiv' and (row['import_id'], account_key(row['account'])) not in links:
-                    self._register_account(row['account'])
+            if not self.db.execute("SELECT 1 FROM meta WHERE key='account_links_ready_v1'").fetchone():
+                links = self._import_links()
+                for row in self.db.execute('''SELECT account,import_id FROM snapshots UNION SELECT account,import_id FROM balances
+                                             UNION SELECT account,import_id FROM transactions
+                                             UNION SELECT account,import_id FROM bank_documents''').fetchall():
+                    if row['account'] != 'Archiv' and (row['import_id'], account_key(row['account'])) not in links:
+                        self._register_account(row['account'])
+                self.db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('account_links_ready_v1','1')")
         columns = {r['name'] for r in self.db.execute('PRAGMA table_info(accounts)')}
         for column, declaration in [('parent_key', 'TEXT'), ('details', "TEXT NOT NULL DEFAULT '{}'")]:
             if column not in columns:
@@ -149,9 +166,19 @@ class Store:
           effective_date TEXT NOT NULL, value TEXT NOT NULL, note TEXT NOT NULL,
           created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
         """)
-        self.sync_depots()
+        if not self.db.execute("SELECT 1 FROM meta WHERE key='depots_synced_v1'").fetchone():
+            self.sync_depots()
+            self.db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('depots_synced_v1','1')")
         self._separate_zero_crypto()
         self._exclude_legacy_deka_duplicates()
+
+    def _schema_ready(self):
+        """True if the current code version already applied ``SCHEMA`` to this file."""
+        try:
+            row = self.db.execute("SELECT value FROM meta WHERE key='core_schema_version'").fetchone()
+        except sqlite3.OperationalError:
+            return False
+        return bool(row) and row[0] == CORE_SCHEMA_VERSION
 
     def _separate_zero_crypto(self):
         """Repair legacy ZERO wallet source identities, retaining chosen targets."""

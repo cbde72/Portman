@@ -8,8 +8,6 @@ import tempfile
 import urllib.parse
 import urllib.request
 
-from pypdf import PdfReader
-from pypdf.errors import PyPdfError
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +40,7 @@ def factsheet_path(folder, isin):
 
 @lru_cache(maxsize=128)
 def _extract_text_cached(path, modified_ns, size):
+    from pypdf import PdfReader
     reader = PdfReader(str(path))
     return "\n".join(page.extract_text() or "" for page in reader.pages).replace("ﬀ", "ff")
 
@@ -103,6 +102,7 @@ def parse_holdings_text(text, source="Factsheet"):
 
 def parse_factsheet(path, isin=""):
     path = Path(path)
+    from pypdf.errors import PyPdfError
     try:
         text = extract_text(path)
         if isin and isin not in text.replace(" ", ""):

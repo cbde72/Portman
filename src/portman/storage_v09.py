@@ -79,6 +79,8 @@ def migrate(db):
 
 def _ensure_transaction_review(db):
     """Add auditable booking corrections to existing V09 databases."""
+    if _marker(db, 'v09_transaction_review_ready'):
+        return
     with db:
         db.execute('''CREATE TABLE IF NOT EXISTS transaction_edits(
             ref TEXT PRIMARY KEY, payload TEXT NOT NULL, reason TEXT NOT NULL,
@@ -100,6 +102,17 @@ def _ensure_transaction_review(db):
                     db.execute(f'''CREATE TRIGGER IF NOT EXISTS revision09_{table}_{operation}
                         AFTER {operation} ON {table} BEGIN
                         UPDATE v09_revision SET value=value+1 WHERE id=1; END''')
+            # Only mark as done once the revision triggers could be installed;
+            # otherwise a later migration run has to try again.
+            db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('v09_transaction_review_ready','1')")
+
+
+def _marker(db, key):
+    """True if ``key`` was recorded in the ``meta`` table (missing table = False)."""
+    try:
+        return db.execute('SELECT value FROM meta WHERE key=?', (key,)).fetchone() == ('1',)
+    except sqlite3.OperationalError:
+        return False
 
 
 def initialize(root):

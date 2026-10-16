@@ -1,4 +1,5 @@
 """Shared application shell (docks, menus, workspace, positions) for the GUI."""
+from importlib.util import find_spec
 from pathlib import Path
 
 from PySide6.QtWidgets import (
@@ -8,12 +9,10 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 
-HAS_WEBENGINE = False
-try:
-    from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: F401 - import probes availability
-    HAS_WEBENGINE = True
-except ImportError:
-    HAS_WEBENGINE = False
+# Probe for QtWebEngine without importing it.  The real import loads the whole
+# Chromium stack (and QtWebEngineCore) even though the web view is only an
+# optional dock feature, which would delay application startup.
+HAS_WEBENGINE = find_spec("PySide6.QtWebEngineWidgets") is not None
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]

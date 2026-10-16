@@ -2,6 +2,7 @@
 from portman.busy_indicator import busy_operation
 from portman.date_display import display_dates
 from portman.holding import Holding
+from PySide6.QtCore import QTimer, QDate
 
 
 class DateScopeMixin:
@@ -59,6 +60,9 @@ class DateScopeMixin:
 
     @busy_operation
     def reload_portfolio(self, refresh=True, visible_only=False):
+        self._reload_pending = False
+        if getattr(self, '_refresh_timer', None) is not None and self._refresh_timer.isActive():
+            self._refresh_timer.stop()
         selected_accounts = self.selected_accounts()
         rows = self.repository.current(self.selected_date(), self.selected_account())
         if selected_accounts:
@@ -91,16 +95,26 @@ class DateScopeMixin:
             if hasattr(self, 'market_widget'): self.market_widget.refresh()
             self._scope_dirty = set()
 
+    def _schedule_reload(self, refresh=True, visible_only=False):
+        self._reload_pending = True
+        if getattr(self, '_refresh_timer', None) is None:
+            self._refresh_timer = QTimer(self)
+            self._refresh_timer.setSingleShot(True)
+            self._refresh_timer.setInterval(200)
+            self._refresh_timer.timeout.connect(lambda r=refresh, v=visible_only: self.reload_portfolio(refresh=r, visible_only=v))
+        elif self._refresh_timer.isActive():
+            return
+        self._refresh_timer.start()
+
     def on_portfolio_scope_changed(self):
         if hasattr(self, 'date_selector'):
-            from PySide6.QtCore import QDate
             stamp = self.combo_snapshot.currentData()
             value = QDate.currentDate() if stamp == '9999-12-31' else QDate.fromString(stamp or '', 'yyyy-MM-dd')
             if value.isValid():
                 self.date_selector.blockSignals(True)
                 self.date_selector.setDate(value)
                 self.date_selector.blockSignals(False)
-        self.reload_portfolio(visible_only=hasattr(self, '_scope_refreshers'))
+        self._schedule_reload(visible_only=hasattr(self, '_scope_refreshers'))
 
     def refresh_scope_choices(self):
         account = self.selected_account()
