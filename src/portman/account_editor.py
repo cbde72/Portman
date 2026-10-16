@@ -1,10 +1,10 @@
 from .date_display import display_dates
 from .date_edit import DateLineEdit
 import json
-from PySide6.QtCore import QDate
+from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QVBoxLayout, QFormLayout,
     QLineEdit, QComboBox, QTabWidget, QWidget, QLabel, QDateEdit, QTableWidget,
-    QTableWidgetItem, QAbstractItemView, QMessageBox)
+    QTableWidgetItem, QAbstractItemView, QMessageBox, QListWidget, QListWidgetItem)
 
 TYPES = ['Girokonto', 'Tagesgeld', 'Festgeld', 'Sparkonto', 'Riester', 'Direktversicherung',
          'Depot', 'Krypto Wallet', 'Verrechnungskonto', 'Bausparvertrag', 'Kreditkonto', 'Sonstiges']
@@ -50,7 +50,19 @@ class AccountEditor(QDialog):
                 self.cash_account.setCurrentIndex(max(0, self.cash_account.findData(details.get('cash_account_key', ''))))
                 self.cash_account.setEnabled(self.kind.currentText() == 'Depot')
                 self.kind.currentTextChanged.connect(lambda kind: self.cash_account.setEnabled(kind == 'Depot'))
-                form.addRow('Verrechnungskonto', self.cash_account)
+                form.addRow('Standard-Verrechnungskonto', self.cash_account)
+                self.payment_accounts = QListWidget(); self.payment_accounts.setMaximumHeight(110)
+                selected_payment = set(details.get('cash_account_keys') or [])
+                for index in range(1, self.cash_account.count()):
+                    item = QListWidgetItem(self.cash_account.itemText(index))
+                    item.setData(Qt.ItemDataRole.UserRole, self.cash_account.itemData(index))
+                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                    item.setCheckState(Qt.CheckState.Checked if item.data(Qt.ItemDataRole.UserRole) in selected_payment
+                                       else Qt.CheckState.Unchecked)
+                    self.payment_accounts.addItem(item)
+                self.payment_accounts.setEnabled(self.kind.currentText() == 'Depot')
+                self.kind.currentTextChanged.connect(lambda kind: self.payment_accounts.setEnabled(kind == 'Depot'))
+                form.addRow('Weitere Zahlungskonten', self.payment_accounts)
             for key, label in fields:
                 edit = (DateLineEdit if key in ('start', 'end') else QLineEdit)(record['name'] if key == 'name' and record else details.get(key, ''))
                 self.fields[key] = edit; form.addRow(label, edit)
@@ -88,9 +100,14 @@ class AccountEditor(QDialog):
         name = values.pop('name'); values['kind'] = self.kind.currentText()
         values = {**self.original_details, **values}
         values['cash_account_key'] = self.cash_account.currentData() if values['kind'] == 'Depot' else ''
+        values['cash_account_keys'] = ([self.payment_accounts.item(index).data(Qt.ItemDataRole.UserRole)
+            for index in range(self.payment_accounts.count())
+            if self.payment_accounts.item(index).checkState() == Qt.CheckState.Checked
+            and self.payment_accounts.item(index).data(Qt.ItemDataRole.UserRole) != values['cash_account_key']]
+            if values['kind'] == 'Depot' else [])
         try:
             if values['kind'] == 'Depot' and not values['cash_account_key']:
-                raise ValueError('Jedes Depot benötigt genau ein festes Giro- oder Verrechnungskonto.')
+                raise ValueError('Jedes Depot benötigt ein Standard-Giro- oder Verrechnungskonto.')
             if values['kind'] == 'Krypto Wallet' and not self.record and self.crypto_import.path:
                 if self.crypto_import.error or not self.crypto_import.batch:
                     raise ValueError(self.crypto_import.error or 'Bitte eine gültige CSV auswählen.')

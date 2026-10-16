@@ -150,10 +150,15 @@ class AccountBookingsDialog(QDialog):
     def __init__(self, repository, account, parent=None):
         super().__init__(parent)
         self.repository, self.account = repository, account
-        self.setWindowTitle(f'Alle Buchungen · {account}')
+        record = next((row for row in repository.account_records() if row['name'] == account), None)
+        import json
+        self.depot_key = (record['account_key'] if record and
+                          json.loads(record['details']).get('kind') == 'Depot' else '')
+        self.setWindowTitle(f"{'Depotbuchungen' if self.depot_key else 'Alle Buchungen'} · {account}")
         self.resize(1200, 720)
         layout = QVBoxLayout(self)
-        note = QLabel(f'{account} · Alle gespeicherten Buchungen über den gesamten Zeitraum')
+        note = QLabel(f"{account} · " + ('wirtschaftlich zugehörige Depotbuchungen unabhängig vom Zahlungskonto'
+            if self.depot_key else 'Alle gespeicherten Buchungen über den gesamten Zeitraum'))
         note.setTextFormat(Qt.TextFormat.PlainText)
         layout.addWidget(note)
         start_bar = QHBoxLayout()
@@ -207,10 +212,14 @@ class AccountBookingsDialog(QDialog):
         self.dividend_button = QPushButton('Depotposition zuordnen')
         self.duplicate_button = QPushButton('Dubletten auflösen')
         self.delete_button = QPushButton('Buchung löschen')
+        self.reconcile_button = QPushButton('Geldbuchung zuordnen')
         self.delete_button.setProperty('destructive', True)
         for button, callback in ((self.edit_button, self.edit_selected), (self.dividend_button, self.assign_dividend),
-                                 (self.duplicate_button, self.resolve_duplicate), (self.delete_button, self.delete_selected)):
+                                 (self.duplicate_button, self.resolve_duplicate),
+                                 (self.reconcile_button, self.reconcile_selected),
+                                 (self.delete_button, self.delete_selected)):
             button.clicked.connect(callback); action_bar.addWidget(button)
+        self.reconcile_button.setVisible(bool(self.depot_key))
         action_bar.addStretch(1); layout.addLayout(action_bar)
         editable = hasattr(repository, 'edit_transaction')
         for button in (self.edit_button, self.dividend_button, self.duplicate_button, self.delete_button):
@@ -228,7 +237,13 @@ class AccountBookingsDialog(QDialog):
     def load_transactions(self):
         with busy_cursor():
             self.model.removeRows(0, self.model.rowCount())
-            self.transactions = sorted(self.repository.transactions(self.account), key=lambda tx: tx['date'])
+            reconciliation = (self.repository.reconcile_depot_bookings(self.depot_key)
+                              if self.depot_key and hasattr(self.repository, 'reconcile_depot_bookings') else [])
+            self.reconciliation_rows = {reference(row['transaction']): row for row in reconciliation}
+            reconciliation_status = {reference(row['transaction']): row['status'] for row in reconciliation}
+            source = ([row['transaction'] for row in reconciliation] if reconciliation
+                      else self.repository.transactions(self.account))
+            self.transactions = sorted(source, key=lambda tx: tx['date'])
             reviewed = self.repository.reviewed_duplicates() if hasattr(self.repository, 'reviewed_duplicates') else set()
             self.wallet = any(p.get('asset_type') == 'Krypto' for p in self.repository.holdings(account=self.account)) or any(
                 tx.get('external_id', '').startswith('crypto-csv-') for tx in self.transactions)
@@ -236,8 +251,10 @@ class AccountBookingsDialog(QDialog):
             for tx in self.transactions:
                 sources = tx.get('booking_sources', [])
                 duplicate = len(sources) > 1
-                status = ('DUBLETTE · geprüft und zusammengeführt' if reference(tx) in reviewed else
+                status = reconciliation_status.get(reference(tx), '')
+                duplicate_status = ('DUBLETTE · geprüft und zusammengeführt' if reference(tx) in reviewed else
                           f'DUBLETTE · {len(sources)} Quellen zusammengeführt') if duplicate else ('Bearbeitet' if tx.get('edited') else '')
+                status = ' · '.join(value for value in (status, duplicate_status) if value)
                 values = [tx['date'], tx.get('value_date', ''), tx['kind'] if tx.get('affects_cash', True) else tx['kind'] + ' · nur Depot',
                     format(Decimal(tx['amount']), '.2f').replace('.', ','), tx['currency'], '', tx.get('counterparty', ''),
                     tx.get('purpose', ''), tx.get('security') or '', Path(tx.get('source', '')).name, tx['external_id'],
@@ -302,6 +319,35 @@ class AccountBookingsDialog(QDialog):
         if not ok: return
         try: self.repository.resolve_duplicate(reference(tx), reason)
         except ValueError as error: QMessageBox.warning(self, 'Dubletten prüfen', str(error)); return
+        self.refresh_after_change()
+
+    def reconcile_selected(self):
+        try: tx = self.selected_transaction()
+        except ValueError as error: QMessageBox.information(self, 'Buchung auswählen', str(error)); return
+        row = getattr(self, 'reconciliation_rows', {}).get(reference(tx), {})
+        candidates = row.get('candidates') or []
+        if not candidates:
+            QMessageBox.information(self, 'Kein Gegenbeleg',
+                'Für diese Depotbuchung wurde keine passende Geldbuchung gefunden.'); return
+        transactions = {reference(item): item for item in self.repository.transactions()}
+        labels = []
+        refs = []
+        for candidate_ref in candidates:
+            candidate = transactions.get(candidate_ref)
+            if not candidate: continue
+            labels.append(f"{candidate['date']} · {candidate['account']} · {candidate['amount']} {candidate['currency']} · "
+                          f"{candidate.get('purpose') or candidate.get('bank_reference') or candidate['external_id']}")
+            refs.append(candidate_ref)
+        if not labels:
+            return
+        selected, ok = QInputDialog.getItem(self, 'Geldbuchung zuordnen', 'Gegenbeleg:', labels, 0, False)
+        if not ok: return
+        reason, ok = QInputDialog.getText(self, 'Zuordnung bestätigen', 'Prüfgrund / Beleg:')
+        if not ok: return
+        try:
+            self.repository.confirm_booking_link(reference(tx), refs[labels.index(selected)], reason)
+        except ValueError as error:
+            QMessageBox.warning(self, 'Zuordnung prüfen', str(error)); return
         self.refresh_after_change()
 
     def delete_selected(self):
