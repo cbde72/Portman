@@ -8,6 +8,8 @@ import math
 from datetime import date
 from decimal import Decimal
 
+from .accounts import canonical_depot
+
 
 def xirr(flows):
     combined = {}
@@ -62,10 +64,12 @@ def security_performance(store, account, start, end, after_taxes=False):
     if not store.has_coverage(account, start, end):
         return {'error': 'Vollständigkeit der Transaktionen für dieses Depot und diesen Zeitraum noch nicht bestätigt.'}
     snapshots = store.snapshots(account)
-    depots = {s.get('depot', s['account']) for s in snapshots if s['effective_date'] <= end}
+    depots = {canonical_depot(s.get('depot', s['account']))
+              for s in snapshots if s['effective_date'] <= end}
     for boundary in (start, end):
         candidates = [s for s in snapshots if s['as_of'] == boundary and s['complete']]
-        if not candidates or {s.get('depot', s['account']) for s in candidates} != depots:
+        if not candidates or {canonical_depot(s.get('depot', s['account']))
+                              for s in candidates} != depots:
             return {'error': f'Vollständiger, tagesgenauer Depotbestand am {boundary} fehlt.'}
     opening = sum(Decimal(p['value']) for p in store.holdings(start, account))
     closing = sum(Decimal(p['value']) for p in store.holdings(end, account))

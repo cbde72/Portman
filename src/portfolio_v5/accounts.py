@@ -13,6 +13,12 @@ def account_key(value):
     return account_name(value).casefold()
 
 
+def canonical_depot(name):
+    """Return the physical depot name encoded in a portfolio-transfer alias."""
+    transferred = name.split(' / ', 2)
+    return transferred[2] if len(transferred) == 3 else name
+
+
 def overview_accounts(rows):
     # Anything after the first total belongs to allocation/planning tables.
     end = next((i for i, row in enumerate(rows)

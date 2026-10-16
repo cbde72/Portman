@@ -60,8 +60,8 @@ class PerformanceWidget(QWidget):
         self.labels = {}
         cards = [
             ("value_change", "Depotwert-Veränderung"),
-            ("twr", "Rendite · Modified Dietz (Näherung)"),
-            ("annualized", "Dietz-Näherung annualisiert"),
+            ("twr", "Gesamtrendite · täglich verkettet"),
+            ("annualized", "Gesamtrendite annualisiert"),
             ("xirr", "XIRR mit Zahlungsströmen"),
             ("profit", "Gewinn nach Zahlungsströmen"),
             ("contributions", "Netto-Zukäufe"),
@@ -76,8 +76,8 @@ class PerformanceWidget(QWidget):
         ]
         explanations = {
             'value_change': 'Endwert geteilt durch Anfangswert minus 1. Ein- und Auszahlungen sind darin nicht bereinigt.',
-            'twr': 'Verkettete Modified-Dietz-Näherung. Zahlungsströme werden innerhalb jeder Teilperiode zeitlich gewichtet.',
-            'annualized': 'Modified-Dietz-Rendite auf 365 Tage hochgerechnet.',
+            'twr': 'Zeitgewichtete Gesamtrendite aus der täglichen, cashflow-neutralen Bewertungsserie.',
+            'annualized': 'Täglich verkettete Gesamtrendite auf 365 Tage hochgerechnet.',
             'xirr': 'Geldgewichtete annualisierte Rendite anhand aller datierten Zahlungsströme.',
             'profit': 'Endwert minus Anfangswert plus Verkäufe und Erträge minus Käufe, Gebühren und Steuern.',
             'contributions': 'Käufe und sonstige Netto-Zuflüsse in das Depot abzüglich Verkäufen und Ausschüttungen.',
@@ -114,7 +114,7 @@ class PerformanceWidget(QWidget):
         self.comparison = QTableWidget(0, 9)
         self.comparison.setHorizontalHeaderLabels([
             "Zeitraum", "Von", "Bis", "Endwert", "Ergebnis", "Wertänderung",
-            "Dietz (Näherung)", "Dietz p.a.", "XIRR",
+            "Gesamtrendite", "Gesamtrendite p.a.", "XIRR",
         ])
         self.comparison.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.comparison.horizontalHeader().setStretchLastSection(True)
@@ -126,7 +126,7 @@ class PerformanceWidget(QWidget):
         for key, title, checked in (
             ("value", "Depotwert", True), ("capital", "Investiertes Kapital", True),
             ("profit", "Gewinn/Verlust", True), ("twr", "Dietz-Index (Näherung)", True),
-            ("daily", "Tagesindex (Bewertung)", False),
+            ("daily", "Tägliche Gesamtrendite", False),
             ("transactions", "Transaktionen", True),
         ):
             checkbox = QCheckBox(title); checkbox.setChecked(checked)
@@ -215,8 +215,8 @@ class PerformanceWidget(QWidget):
             else:
                 values = [
                     result["label"], result["start"], result["end"], euro(result["closing"]),
-                    euro(result["profit"]), percent(result["value_change"]), percent(result["twr"]),
-                    percent(result["twr_annualized"], True), percent(result["xirr"], True),
+                    euro(result["profit"]), percent(result["value_change"]), percent(result["total_return"]),
+                    percent(result["total_return_annualized"], True), percent(result["xirr"], True),
                 ]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(display_dates(str(value)))
@@ -244,8 +244,8 @@ class PerformanceWidget(QWidget):
             self.draw_chart()
             return
         self.labels["value_change"].setText(display_dates(percent(result["value_change"])))
-        self.labels["twr"].setText(display_dates(percent(result["twr"])))
-        self.labels["annualized"].setText(display_dates(percent(result["twr_annualized"], True)))
+        self.labels["twr"].setText(display_dates(percent(result["total_return"])))
+        self.labels["annualized"].setText(display_dates(percent(result["total_return_annualized"], True)))
         self.labels["xirr"].setText(display_dates(percent(result["xirr"], True)))
         self.labels["profit"].setText(display_dates(euro(result["profit"])))
         self.labels["contributions"].setText(display_dates(euro(result["net_contributions"])))
@@ -292,14 +292,12 @@ class PerformanceWidget(QWidget):
                 self.labels[key].setText('–')
                 self.labels[key].setStyleSheet('font-size:18px;font-weight:700;color:%s' % COLORS["text"])
         for key in ('value_change', 'twr', 'annualized', 'xirr', 'profit', 'contributions'):
-            value = result.get({'value_change':'value_change','twr':'twr','annualized':'twr_annualized',
+            value = result.get({'value_change':'value_change','twr':'total_return','annualized':'total_return_annualized',
                 'xirr':'xirr','profit':'profit','contributions':'net_contributions'}[key])
             color = (COLORS['text'] if key == 'contributions' else
                      COLORS['green'] if value is not None and value > 0 else
                      COLORS['red'] if value is not None and value < 0 else COLORS['text'])
             self.labels[key].setStyleSheet(f'font-size:18px;font-weight:700;color:{color}')
-        self.labels['twr'].setText(display_dates('≈ ' + self.labels['twr'].text()))
-        self.labels['annualized'].setText(display_dates('≈ ' + self.labels['annualized'].text()))
         if not result['coverage_confirmed'] or not result.get('valuation_confirmed'):
             for key in ('xirr', 'profit', 'contributions'):
                 self.labels[key].setText(display_dates('≈ ' + self.labels[key].text()))
@@ -319,7 +317,7 @@ class PerformanceWidget(QWidget):
                        f"im gemeinsamen Zeitraum {comparison['common_start']} bis {comparison['common_end']}, "
                        f"aktiv {percent(comparison['active_return'])}, Tracking Error {percent(comparison['tracking_error_annualized'])} p.a.")
         self.show_quality(result.get('issues', []))
-        self.note.setText(display_dates(detail + " · Modified Dietz misst die zeitgewichtete Entwicklung näherungsweise. XIRR ist die geldgewichtete annualisierte Rendite. Der Tagesindex verteilt die Teilperiodenrenditen geometrisch auf alle Kalendertage."))
+        self.note.setText(display_dates(detail + " · Die Gesamtrendite wird aus der täglichen cashflow-neutralen Bewertungsserie verkettet. Modified Dietz bleibt als Näherungsreihe im Diagramm verfügbar. XIRR ist die geldgewichtete annualisierte Rendite."))
         self.draw_chart()
 
     def show_quality(self, issues):
@@ -371,7 +369,7 @@ class PerformanceWidget(QWidget):
             if self.chart_checks["daily"].isChecked() and result.get("daily_index"):
                 daily_dates = [date.fromisoformat(point["date"]) for point in result["daily_index"]]
                 daily_values = [float(point["index"]) for point in result["daily_index"]]
-                twr_axis.plot(daily_dates, daily_values, label="Tagesindex (Bewertung)",
+                twr_axis.plot(daily_dates, daily_values, label="Tägliche Gesamtrendite",
                               color=COLORS["amber"], linewidth=1.0, alpha=.55)
             benchmark = result.get("benchmark")
             if benchmark and benchmark.get("index"):

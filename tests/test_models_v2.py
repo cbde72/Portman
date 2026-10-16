@@ -4,7 +4,7 @@ from unittest.mock import Mock, patch
 
 from portfolio_v5.models import (AccountInfo, AccountStatement, BankTransaction, CorporateEvent,
     CostItem, CostReport, FeeItem, ImportBatch, Kind, SecurityInfo, TaxEvent, TaxItem,
-    check_transaction, number)
+    Transaction, check_transaction, number)
 from portman.import_v09 import decode_batch
 from portman.repository_v09 import RepositoryV09
 
@@ -12,19 +12,19 @@ from portman.repository_v09 import RepositoryV09
 def test_withholding_metadata_is_promoted_and_rate_is_calculated():
     documented = BankTransaction('Cash', 'tax-1', '2026-10-11', Kind.DIVIDEND, '85', 'EUR',
         security='US0378331005', gross_amount='100', document_reference='REF-42',
-        tax_items=[TaxItem('quellensteuer', '15', rate='15')])
+        tax_items=[TaxItem('quellensteuer', '15', rate='15', country='US')])
     assert documented.withholding_tax == '15.00'
     assert documented.withholding_tax_rate == '15'
     assert documented.withholding_country == 'US'
     assert documented.tax_rate == '15.00'
     assert documented.transaction_reference == 'REF-42'
     assert documented.field_sources['withholding_tax_rate'] == 'Steuersatz im Beleg'
-    assert documented.field_sources['withholding_country'] == 'Aus ISIN-Ländercode abgeleitet'
+    assert documented.field_sources['withholding_country'] == 'Quellenstaat im Beleg'
 
     calculated = BankTransaction('Cash', 'tax-2', '2026-10-11', Kind.DIVIDEND, '80', 'EUR',
         security='CA135087D457', gross_amount='100', withholding_tax='20')
     assert calculated.withholding_tax_rate == '20.00'
-    assert calculated.withholding_country == 'CA'
+    assert calculated.withholding_country == ''
     assert calculated.field_sources['withholding_tax_rate'].startswith('Berechnet:')
 
 
@@ -35,6 +35,60 @@ def test_vorabpauschale_is_extracted_as_tax_basis_not_tax_paid():
     assert tx.advance_tax_currency == 'EUR'
     assert tx.taxes is None
     assert tx.field_sources['advance_tax_base'] == 'Vorabpauschale im Importbeleg'
+
+
+def test_gross_net_validation_covers_trades_refunds_and_reversals():
+    cases = [
+        Transaction('Depot', 'buy', '2026-01-01', Kind.BUY, '-112', 'EUR',
+                    gross_amount='100', fees='2', taxes='10'),
+        Transaction('Depot', 'sell', '2026-01-01', Kind.SELL, '88', 'EUR',
+                    gross_amount='100', fees='2', taxes='10'),
+        Transaction('Depot', 'refund', '2026-01-01', Kind.TAX_REFUND, '10', 'EUR',
+                    gross_amount='10'),
+        Transaction('Depot', 'reversal', '2026-01-01', Kind.DIVIDEND, '-85', 'EUR',
+                    gross_amount='100', taxes='15', is_reversal=True),
+        Transaction('Depot', 'signed-reversal', '2026-01-01', Kind.DIVIDEND, '-85', 'EUR',
+                    gross_amount='-100', taxes='-15', is_reversal=True),
+        Transaction('Depot', 'generic-reversal', '2026-01-01', Kind.REVERSAL, '112', 'EUR',
+                    gross_amount='100', fees='2', taxes='10'),
+        Transaction('Depot', 'tax-refund-components', '2026-01-01', Kind.TAX_REFUND, '10', 'EUR',
+                    gross_amount='0', taxes='-10'),
+    ]
+    assert all(check_transaction(tx) == [] for tx in cases)
+    wrong_buy = Transaction('Depot', 'wrong', '2026-01-01', Kind.BUY, '-102', 'EUR',
+                            gross_amount='100', fees='2', taxes='10')
+    assert any('Brutto/Netto' in problem for problem in check_transaction(wrong_buy))
+
+
+def test_dates_and_exchange_rates_are_strictly_validated():
+    invalid_date = Transaction('Depot', 'date', '2026-02-30', Kind.SELL, '100', 'EUR')
+    assert any('gültiges ISO-Datum' in problem for problem in check_transaction(invalid_date))
+    for rate in ('0', '-1', 'NaN', 'Infinity'):
+        tx = Transaction('Depot', 'fx-' + rate, '2026-01-01', Kind.DIVIDEND, '90', 'EUR',
+                         gross_amount='90', original_amount='100', original_currency='USD', fx_rate=rate)
+        assert check_transaction(tx)
+    ambiguous = Transaction('Depot', 'ambiguous', '2026-01-01', Kind.DIVIDEND, '90', 'EUR',
+                            gross_amount='90', original_amount='100', fx_rate='1.111111')
+    assert any('ohne Fremdwährung' in problem for problem in check_transaction(ambiguous))
+
+
+def test_legacy_number_ambiguity_is_not_reinterpreted_silently():
+    # Historical text imports treat a single three-digit dot group as German
+    # thousands notation. Changing this would alter existing import results.
+    assert number('1.234') == '1234'
+    assert number('1,234') == '1.234'
+
+
+def test_advance_lump_sum_is_informational_not_cash_or_paid_tax():
+    valid = BankTransaction('Cash', 'advance', '2026-01-01', Kind.ADVANCE_LUMP_SUM,
+                            '0', 'EUR', advance_tax_base='31.64', affects_cash=False)
+    assert check_transaction(valid) == []
+    invalid = BankTransaction('Cash', 'advance-paid', '2026-01-01', Kind.ADVANCE_LUMP_SUM,
+                              '-7.91', 'EUR', taxes='7.91', advance_tax_base='31.64')
+    problems = check_transaction(invalid)
+    assert any('keine zusätzliche Geldbuchung' in problem for problem in problems)
+    assert any('nicht als tatsächlich gezahlte Steuer' in problem for problem in problems)
+    assert any('Geldbestand nicht verändern' in problem for problem in problems)
 
 
 def test_extended_model_is_compatible_and_decodes_nested_values():

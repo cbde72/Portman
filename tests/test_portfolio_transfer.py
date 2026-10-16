@@ -266,3 +266,32 @@ def test_import_reports_visible_progress(tmp_path):
         assert any('Historie' in text for _, _, text in updates)
     finally:
         source.close(); target.close()
+
+
+def test_wallet_frozen_values_survive_portfolio_transfer(tmp_path):
+    from test_crypto_wallet_import import write_csv
+    from portman.crypto_wallet_import import read_wallet_csv, save_wallet
+    from portman.performance_service import PerformanceService
+
+    source = RepositoryV09(tmp_path / 'source.sqlite', backups=False)
+    target = RepositoryV09(tmp_path / 'target.sqlite', backups=False)
+    try:
+        batch = read_wallet_csv(write_csv(tmp_path, [
+            {'Handelsdatum': '01.10.2026', 'Nominale_num': '2'},
+            {'Handelsdatum': '02.10.2026', 'Nominale_num': '1'},
+        ]), 'Wallet')
+        save_wallet(source, 'Wallet', {'kind': 'Krypto Wallet'}, None, batch)
+        key = source.holdings()[0]['key']
+        source.market.save_result(dict(
+            security_key=key, status='ok', currency='EUR', provider='Test',
+            attempted_at='2026-10-03T12:00:00+00:00', symbol='BTC-EUR', message='ok',
+            prices=[{'date': '2026-10-01', 'close': 10},
+                    {'date': '2026-10-02', 'close': 20}]))
+        expected = PerformanceService(source).valuation_series('Wallet')
+        package = export_accounts(source, {'wallet'}, tmp_path / 'wallet.json')
+        assert import_accounts(target, package, {'wallet': 'Wallet Copy'})['status'] == 'imported'
+        actual = PerformanceService(target).valuation_series('Wallet Copy')
+        assert [(r['date'], r['value'], r['currencies']) for r in actual] == [
+            (r['date'], r['value'], r['currencies']) for r in expected]
+    finally:
+        source.close(); target.close()

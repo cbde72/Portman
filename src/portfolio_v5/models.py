@@ -411,11 +411,6 @@ def enrich_tax_details(tx):
         if len(set(countries)) == 1:
             tx.withholding_country = countries[0]
             tx.field_sources['withholding_country'] = 'Quellenstaat im Beleg'
-        elif tx.withholding_tax is not None and len(tx.security) >= 2:
-            country = tx.security[:2].upper()
-            if country.isalpha() and country not in ('XS', 'EU'):
-                tx.withholding_country = country
-                tx.field_sources['withholding_country'] = 'Aus ISIN-Ländercode abgeleitet'
     if tx.tax_rate is None and tx.taxes is not None:
         gross = tx.gross_amount
         if gross in (None, '') and hasattr(tx, 'gross_income') and tx.gross_currency == tx.currency:
@@ -488,34 +483,90 @@ def check_transaction(tx):
             problems.append(f'{name}: Exponentschreibweise {value!r}')
     for name in ('date', 'trade_date', 'value_date', 'pay_date', 'ex_date'):
         value = getattr(tx, name, '')
-        if value and not re.fullmatch(r'\d{4}-\d{2}-\d{2}', value):
-            problems.append(f'{name}: kein ISO-Datum {value!r}')
+        if value:
+            try:
+                parsed_date = date.fromisoformat(value)
+                if parsed_date.isoformat() != value:
+                    raise ValueError
+            except (TypeError, ValueError):
+                problems.append(f'{name}: kein gültiges ISO-Datum {value!r}')
     if tx.review_state not in REVIEW_STATES:
         problems.append(f'Unbekannter Prüfstatus: {tx.review_state!r}')
+    values = {}
+    for name in ('amount', 'quantity', 'fees', 'taxes', 'solidarity_tax', 'withholding_tax',
+                 'withholding_tax_rate', 'tax_rate', 'gross_amount', 'original_amount',
+                 'price', 'fx_rate', 'advance_tax_base'):
+        value = getattr(tx, name, None)
+        if value is None:
+            continue
+        try:
+            parsed = Decimal(value)
+            if not parsed.is_finite():
+                raise InvalidOperation
+            values[name] = parsed
+        except (InvalidOperation, TypeError, ValueError):
+            problems.append(f'{name}: ungültige oder nicht endliche Dezimalzahl {value!r}')
     try:
-        amount = Decimal(tx.amount)
+        amount = values['amount']
         if tx.kind in OUTFLOW_KINDS and amount > 0:
             problems.append('Kauf mit positivem Betrag (Abfluss muss negativ sein)')
         if tx.kind in INCOME_KINDS and amount < 0 and not tx.is_reversal:
             problems.append('Ertrag mit negativem Betrag (nur bei Storno zulässig)')
         for name in ('fees', 'taxes', 'solidarity_tax'):
-            value = getattr(tx, name)
-            if value is not None and Decimal(value) < 0:
+            value = values.get(name)
+            if value is not None and value < 0 and not (tx.is_reversal or tx.kind == Kind.TAX_REFUND):
                 problems.append(f'{name} muss ein positiver Abzugsbetrag sein')
-        if tx.gross_amount is not None:
-            gross = Decimal(tx.gross_amount)
-            taxes, fees = Decimal(tx.taxes or 0), Decimal(tx.fees or 0)
-            expected = -(gross + fees) if tx.kind in OUTFLOW_KINDS else gross - taxes - fees
-            if abs(expected - amount) > Decimal('0.011'):
-                problems.append(f'Brutto/Netto passt nicht: erwartet {expected:.2f}, Betrag {amount}')
-        if tx.original_amount is not None and tx.fx_rate is not None and tx.gross_amount is not None:
-            if abs(Decimal(tx.original_amount) / Decimal(tx.fx_rate) - Decimal(tx.gross_amount)) > Decimal('0.011'):
+        if 'gross_amount' in values:
+            gross = values['gross_amount']
+            taxes, fees = values.get('taxes', Decimal(0)), values.get('fees', Decimal(0))
+            if tx.kind == Kind.BUY:
+                expected = -(gross + taxes + fees)
+            elif tx.kind in INCOME_KINDS | {Kind.SELL, Kind.TAX_REFUND}:
+                expected = gross - taxes - fees
+            elif tx.kind == Kind.REVERSAL:
+                # A generic reversal can refer to either an inflow or an
+                # outflow. Accept only one of those two documented identities.
+                expected = gross - taxes - fees
+            else:
+                expected = None
+            if expected is not None:
+                candidates = [expected]
+                # Historical cancellation documents occur both with signed
+                # gross/components and with the original positive components.
+                if tx.is_reversal or tx.kind == Kind.REVERSAL:
+                    candidates.append(-expected)
+                if tx.kind == Kind.REVERSAL:
+                    purchase = -(gross + taxes + fees)
+                    candidates.extend((purchase, -purchase))
+                if all(abs(candidate - amount) > Decimal('0.011') for candidate in candidates):
+                    rendered = ' oder '.join(f'{candidate:.2f}' for candidate in candidates)
+                    problems.append(f'Brutto/Netto passt nicht: erwartet {rendered}, Betrag {amount}')
+        rate = values.get('fx_rate')
+        if rate is not None:
+            if rate <= 0:
+                problems.append('Devisenkurs muss endlich und größer als null sein')
+            if tx.original_amount is None:
+                problems.append('Devisenkurs ohne Fremdwährungsbetrag ist nicht eindeutig')
+            if not tx.original_currency:
+                problems.append('Devisenkurs ohne Fremdwährung ist nicht eindeutig')
+            elif tx.original_currency.upper() == tx.currency.upper() and rate != 1:
+                problems.append('Devisenkurs für identische Währungen muss 1 sein')
+        if {'original_amount', 'fx_rate', 'gross_amount'} <= values.keys() and rate > 0:
+            if abs(values['original_amount'] / rate - values['gross_amount']) > Decimal('0.011'):
                 problems.append('Fremdwährungsbetrag / Devisenkurs passt nicht zum Bruttobetrag')
-        if tx.price is not None and tx.quantity is not None and tx.gross_amount is not None and tx.kind in (Kind.BUY, Kind.SELL):
-            if abs(Decimal(tx.price) * Decimal(tx.quantity) - Decimal(tx.gross_amount)) > Decimal('0.011'):
+        if {'price', 'quantity', 'gross_amount'} <= values.keys() and tx.kind in (Kind.BUY, Kind.SELL):
+            if abs(values['price'] * values['quantity'] - values['gross_amount']) > Decimal('0.011'):
                 problems.append('Kurs x Stückzahl passt nicht zum Kurswert')
-    except (InvalidOperation, ZeroDivisionError):
-        problems.append('Buchung enthält eine ungültige Dezimalzahl')
+        if tx.kind == Kind.ADVANCE_LUMP_SUM:
+            if amount:
+                problems.append('Vorabpauschale ist eine Steuerbasis und keine zusätzliche Geldbuchung')
+            if values.get('taxes', Decimal(0)):
+                problems.append('Vorabpauschale darf nicht als tatsächlich gezahlte Steuer gespeichert werden')
+            if getattr(tx, 'affects_cash', False):
+                problems.append('Vorabpauschale darf den Geldbestand nicht verändern')
+    except KeyError:
+        # The field-specific diagnostic above already identifies an invalid amount.
+        pass
     return problems
 
 

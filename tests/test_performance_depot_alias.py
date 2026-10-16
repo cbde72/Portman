@@ -23,5 +23,10 @@ def test_transferred_and_online_depot_alias_are_one_depot(tmp_path):
         result = PerformanceService(repo).analyze('comdirect Depot', '2025-10-01', '2025-11-01')
         assert not result.get('error')
         assert result['valuation_confirmed']
+        repo.confirm_coverage('comdirect Depot', '2025-10-01', '2025-11-01')
+        period = PerformanceService(repo).period('comdirect Depot', '2025-10-01', '2025-11-01')
+        assert not period.get('error')
+        assert period['opening'] == 100
+        assert period['closing'] == 110
     finally:
         repo.close()

@@ -72,6 +72,10 @@ def test_total_loss_can_be_annualized(repo):
     result = analyze(repo, [('2026-01-01', 100), ('2026-01-11', 0)])
     assert result['twr'] == -1
     assert result['twr_annualized'] == -1
+    assert result['total_return'] == -1
+    assert result['total_return_annualized'] == -1
+    assert result['daily_total_return_series'][-1]['index'] == 0
+    assert result['daily_total_return_series'][-1]['return'] == -1
 
 
 def test_changing_depot_coverage_is_not_profit(repo):
@@ -175,6 +179,8 @@ def test_daily_index_covers_every_day_and_matches_twr_series(repo):
     daily = result['daily_index']
     assert len(daily) == (end - start).days + 1
     assert daily[0]['date'] == result['start'] and daily[0]['index'] == Decimal(100)
+    assert daily[0]['return'] is None
+    assert daily[0]['flow'] == 0
     assert daily[0]['flows'] == 0
     assert daily[-1]['date'] == end.isoformat()
     expected = {point['date']: Decimal(point['index']) for point in result['twr_series']}
@@ -182,6 +188,28 @@ def test_daily_index_covers_every_day_and_matches_twr_series(repo):
         if point['date'] in expected:
             actual = Decimal(point['index'])
             assert abs(actual - expected[point['date']]) <= abs(expected[point['date']]) * Decimal('1e-9')
+
+
+def test_daily_total_return_series_is_canonical_and_internally_consistent(repo):
+    result = analyze(repo, [('2026-01-01', '100'), ('2026-01-06', '135'),
+                            ('2026-01-11', '128')], [
+        BankTransaction('A', 'buy', '2026-01-03', 'BUY', '-25', 'EUR'),
+        BankTransaction('A', 'dividend', '2026-01-09', 'DIVIDEND', '8', 'EUR')])
+    series = result['daily_total_return_series']
+    assert series is result['daily_index']
+    assert [point['date'] for point in series] == [
+        (date(2026, 1, 1) + timedelta(days=offset)).isoformat() for offset in range(11)]
+    product = Decimal(1)
+    for previous, point in zip(series, series[1:]):
+        assert point['return'] == Decimal(point['index']) / Decimal(previous['index']) - 1
+        product *= Decimal(1) + point['return']
+    assert abs(product - (Decimal(1) + result['total_return'])) < Decimal('1e-24')
+    assert result['total_return'] == result['ttwror']
+    assert result['total_return_annualized'] == result['ttwror_annualized']
+    assert result['daily_returns'] == [
+        {'date': point['date'], 'return': point['return']} for point in series[1:]]
+    assert {point['date']: point['flow'] for point in series if point['flow']} == {
+        '2026-01-03': Decimal('-25'), '2026-01-09': Decimal('8')}
 
 
 def test_daily_index_spreads_interval_return_geometrically(repo):
@@ -217,9 +245,10 @@ def test_analyze_error_has_no_daily_index_keys(repo):
 def test_ttwror_is_flow_independent_market_return(repo):
     # Single interval, one positive flow (SELL) mid-period. The true daily TWR
     # of the portfolio equals the market path (8 % daily compounding) alone:
-    # 1000*1.08^10 + 200*1.08^5 = 2905.95..., the observed end value.
+    # 1000*1.08^10 - 200*1.08^5 is the observed security value after proceeds
+    # have left the security portfolio.
     daily = Decimal('1.08')
-    end_value = 1000 * daily ** 10 + 200 * daily ** 5
+    end_value = 1000 * daily ** 10 - 200 * daily ** 5
     result = analyze(repo, [('2026-01-01', '1000'), ('2026-01-11', str(end_value))], [
         BankTransaction('A', 'sell', '2026-01-06', 'SELL', '200', 'EUR')])
     assert 'error' not in result
@@ -232,10 +261,10 @@ def test_ttwror_is_flow_independent_market_return(repo):
 
 def test_daily_index_neutralizes_flows_on_their_day(repo):
     # BUY of -500 at end of 2026-01-05 (6 days remaining in the
-    # 2026-01-01..2026-01-11 interval): the end value is 1000*1.05^10 - 500*1.05^6,
+    # 2026-01-01..2026-01-11 interval): the end value is 1000*1.05^10 + 500*1.05^6,
     # so the solved daily rate is exactly 5 % and the index does not jump by
     # the flow amount.
-    end_value = 1000 * Decimal('1.05') ** 10 - 500 * Decimal('1.05') ** 6
+    end_value = 1000 * Decimal('1.05') ** 10 + 500 * Decimal('1.05') ** 6
     result = analyze(repo, [('2026-01-01', '1000'), ('2026-01-11', str(end_value))], [
         BankTransaction('A', 'buy', '2026-01-05', 'BUY', '-500', 'EUR')])
     daily = result['daily_index']
@@ -247,13 +276,38 @@ def test_daily_index_neutralizes_flows_on_their_day(repo):
     assert all(abs(rate - Decimal('0.05')) < Decimal('1e-9') for rate in neighbors)
 
 
+@pytest.mark.parametrize('day', ['2026-01-02', '2026-01-06', '2026-01-11'])
+@pytest.mark.parametrize('kind,amount,closing', [
+    ('BUY', '-50', '150'),
+    ('SELL', '50', '50'),
+    ('DIVIDEND', '10', '90'),
+])
+def test_cashflow_neutrality_without_market_return(repo, day, kind, amount, closing):
+    result = analyze(repo, [('2026-01-01', '100'), ('2026-01-11', closing)], [
+        BankTransaction('A', kind.lower(), day, kind, amount, 'EUR')])
+    assert abs(result['twr']) < Decimal('1e-20')
+    assert abs(result['ttwror']) < Decimal('1e-20')
+    assert result['xirr'] is not None and abs(result['xirr']) < 1e-12
+
+
+def test_cashflow_neutrality_with_multiple_opposing_flows(repo):
+    result = analyze(repo, [('2026-01-01', '100'), ('2026-01-11', '130')], [
+        BankTransaction('A', 'buy', '2026-01-03', 'BUY', '-50', 'EUR'),
+        BankTransaction('A', 'sell', '2026-01-08', 'SELL', '20', 'EUR')])
+    assert abs(result['twr']) < Decimal('1e-20')
+    assert abs(result['ttwror']) < Decimal('1e-20')
+    assert result['xirr'] is not None and abs(result['xirr']) < 1e-12
+    assert result['profit'] == 0
+    assert result['net_contributions'] == 30
+
+
 def test_ttwror_chains_across_intervals_with_flows(repo):
     # Interval 1: 1000 -> 1320 with a 200 SELL on day 5 of 10.
     # Interval 2: 1320 -> 1760 with a 100 BUY on day 3 of 8.
     g1 = Decimal('1.06')
     g2 = Decimal('1.08')
-    v1 = 1000 * g1 ** 10 + 200 * g1 ** 5
-    v2 = v1 * g2 ** 8 - 100 * g2 ** 5
+    v1 = 1000 * g1 ** 10 - 200 * g1 ** 5
+    v2 = v1 * g2 ** 8 + 100 * g2 ** 5
     result = analyze(repo, [('2026-01-01', '1000'), ('2026-01-11', str(v1)), ('2026-01-19', str(v2))], [
         BankTransaction('A', 'sell', '2026-01-06', 'SELL', '200', 'EUR'),
         BankTransaction('A', 'buy', '2026-01-14', 'BUY', '-100', 'EUR')])

@@ -20,7 +20,8 @@ Dieser Ordner enthält alle PDF-Import-Plugin für PortmanNL.
 
 ## Dokumentation
 
-Die vollständige Dokumentation finden Sie in `docs/plugin-entwicklung.md`.
+- `docs/pdf-import.md` – Überblick über alle mitgelieferten PDF-Importer, den Import-Ablauf und das Datenmodell (`models.py`)
+- `docs/plugin-entwicklung.md` – eigene TOML-/Python-Plugins erstellen
 
 ## Plugin-Dialog
 

@@ -36,6 +36,7 @@ ENV/
 coverage.xml
 htmlcov/
 *.cover
+.test-tmp/
 
 # --- Laufzeitdaten des Programms (persoenlich!) -------------
 # Enthaelt Portfolio-SQLite, Einstellungen, Backups, Sessions.

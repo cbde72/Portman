@@ -66,13 +66,13 @@ def test_daily_index_overlay_follows_checkbox(qtbot, tmp_path):
         assert widget.chart_checks['daily'].isChecked() is False
         widget.draw_chart()
         labels = [line.get_label() for axis in widget.fig.axes for line in axis.get_lines()]
-        assert 'Tagesindex (Bewertung)' not in labels
+        assert 'Tägliche Gesamtrendite' not in labels
 
         widget.chart_checks['daily'].setChecked(True)
         widget.draw_chart()
         twr_axis = widget.fig.axes[1]
         daily_lines = [line for line in twr_axis.get_lines()
-                       if line.get_label() == 'Tagesindex (Bewertung)']
+                       if line.get_label() == 'Tägliche Gesamtrendite']
         assert len(daily_lines) == 1
         assert len(daily_lines[0].get_xdata()) == len(widget.current_result['daily_index'])
     finally:

@@ -4,15 +4,11 @@ from decimal import Decimal
 import json
 
 from portfolio_v5.performance import security_performance, xirr
+from portfolio_v5.accounts import canonical_depot
 from .chart_cache import cached_series
 
 ZERO = Decimal(0)
 PERFORMANCE_KINDS = {"BUY", "SELL", "DIVIDEND", "INTEREST", "FEE", "TAX"}
-
-
-def _canonical_depot(name):
-    transferred = name.split(' / ', 2)
-    return transferred[2] if len(transferred) == 3 else name
 
 
 def _minus_years(value, years):
@@ -26,7 +22,7 @@ def _interval_equation(previous_value, current_value, flows, days, g):
     """F(g) = previous*g**days + sum(amount*g**remaining) - current (Decimal)."""
     total = previous_value * (g ** days)
     for remaining, amount in flows:
-        total += amount * (g ** remaining)
+        total -= amount * (g ** remaining)
     return total - current_value
 
 
@@ -41,8 +37,10 @@ def _solve_daily_growth(previous_value, current_value, flows, days, guess):
     """
     days = int(days)
     if not flows:
-        if previous_value <= 0 or current_value <= 0:
+        if previous_value <= 0 or current_value < 0:
             return None
+        if current_value == 0:
+            return ZERO
         return (current_value / previous_value) ** (Decimal(1) / Decimal(days))
     if previous_value <= 0:
         return None
@@ -56,8 +54,8 @@ def _solve_daily_growth(previous_value, current_value, flows, days, guess):
         total = previous_value * (g ** days)
         derivative = previous_value * days * (g ** (days - 1))
         for remaining, amount in flows:
-            total += amount * (g ** remaining)
-            derivative += amount * remaining * (g ** (remaining - 1))
+            total -= amount * (g ** remaining)
+            derivative -= amount * remaining * (g ** (remaining - 1))
         error = total - current_value
         if error == 0 or derivative == 0:
             break
@@ -91,26 +89,37 @@ def _solve_daily_growth(previous_value, current_value, flows, days, guess):
 
 
 def _daily_valuation_index(interval_risks):
-    """Daily valuation index (start 100) from per-interval true-TWR growth factors.
+    """Canonical daily total-return series (start 100).
 
     Each ``(d0, d1, g, flows_by_day)`` entry advances the index by the daily
     growth factor ``g``. External flows are neutralized at their calendar day
-    (recorded in ``flows``, never a jump of the index). The origin point
-    (start date, 100) is included.
+    (recorded in ``flow``, never a jump of the index). Every point contains its
+    daily return; the origin point has no preceding return.
     """
     from datetime import timedelta
     daily_index = []
     for d0, d1, daily_growth, flows_by_day in interval_risks:
         days = (d1 - d0).days
-        if days <= 0 or daily_growth is None or daily_growth <= 0:
+        if days <= 0 or daily_growth is None or daily_growth < 0:
             continue
         if not daily_index:
-            daily_index.append({'date': d0.isoformat(), 'index': Decimal(100), 'flows': ZERO})
+            daily_index.append({'date': d0.isoformat(), 'index': Decimal(100),
+                                'return': None, 'flow': ZERO, 'flows': ZERO})
         base = Decimal(daily_index[-1]['index'])
         for offset in range(1, days + 1):
-            base *= daily_growth
+            previous_base = base
+            if daily_growth == 0:
+                if offset == days:
+                    base = ZERO
+            else:
+                base *= daily_growth
             day = (d0 + timedelta(days=offset)).isoformat()
-            daily_index.append({'date': day, 'index': base, 'flows': flows_by_day.get(day, ZERO)})
+            flow = flows_by_day.get(day, ZERO)
+            daily_return = (ZERO if previous_base == 0 else
+                            base / previous_base - Decimal(1))
+            daily_index.append({'date': day, 'index': base,
+                                'return': daily_return,
+                                'flow': flow, 'flows': flow})
     return daily_index
 
 
@@ -119,15 +128,17 @@ def _index_risk(daily_index):
     if len(daily_index) < 2:
         return {'volatility_annualized': None, 'semivolatility_annualized': None,
                 'max_drawdown': None, 'current_drawdown': None, 'longest_drawdown_days': 0}
-    returns = [Decimal(point['index']) / Decimal(previous['index']) - Decimal(1)
-               for previous, point in zip(daily_index, daily_index[1:])]
-    mean = sum(returns, ZERO) / Decimal(len(returns))
-    variance = sum((value - mean) ** 2 for value in returns) / Decimal(len(returns))
-    volatility = variance.sqrt() * Decimal(365).sqrt() if variance >= 0 else None
-    downside = [min(value, ZERO) for value in returns]
-    downside_variance = sum((value * value for value in downside), ZERO) / Decimal(len(returns))
-    semivolatility = (downside_variance.sqrt() * Decimal(365).sqrt()
-                      if downside_variance >= 0 else None)
+    returns = [point['return'] for point in daily_index[1:]]
+    if returns:
+        mean = sum(returns, ZERO) / Decimal(len(returns))
+        variance = sum((value - mean) ** 2 for value in returns) / Decimal(len(returns))
+        volatility = variance.sqrt() * Decimal(365).sqrt() if variance >= 0 else None
+        downside = [min(value, ZERO) for value in returns]
+        downside_variance = sum((value * value for value in downside), ZERO) / Decimal(len(returns))
+        semivolatility = (downside_variance.sqrt() * Decimal(365).sqrt()
+                          if downside_variance >= 0 else None)
+    else:
+        volatility = semivolatility = None
     peak = Decimal(daily_index[0]['index'])
     max_drawdown = ZERO
     current_drawdown = ZERO
@@ -183,7 +194,7 @@ class PerformanceService:
             # Portfolio packages retain target, source account and original depot
             # in the source alias. Online refreshes later use only the original
             # depot name. Both describe the same physical depot.
-            account_name = _canonical_depot(account_name)
+            account_name = canonical_depot(account_name)
             if snap["complete"] or account_name not in states:
                 states[account_name] = {}
             for position in data["positions"]:
@@ -322,7 +333,8 @@ class PerformanceService:
                 true_flows.append((remaining, Decimal(t["amount"])))
             daily_growth = _solve_daily_growth(previous["value"], current["value"],
                                                true_flows, interval_days,
-                                               Decimal(1) + interval_return)
+                                               ((Decimal(1) + interval_return)
+                                                ** (Decimal(1) / Decimal(interval_days))))
             interval_risks.append((d0, d1, daily_growth, flows_by_day))
             cumulative_receipts += receipts
             capital_series.append({"date": current["date"],
@@ -365,9 +377,9 @@ class PerformanceService:
         latest_by_day = [{}, {}]
         for snap in snapshots:
             if snap['effective_date'] <= start:
-                latest_by_day[0][_canonical_depot(snap['depot'])] = snap
+                latest_by_day[0][canonical_depot(snap['depot'])] = snap
             if snap['effective_date'] <= end:
-                latest_by_day[1][_canonical_depot(snap['depot'])] = snap
+                latest_by_day[1][canonical_depot(snap['depot'])] = snap
         boundary_proofs = [
             bool(latest and all(s['complete'] and s['as_of'] == day for s in latest.values()))
             for latest, day in zip(latest_by_day, (start, end))]
@@ -398,12 +410,12 @@ class PerformanceService:
                                action='Für den gewünschten Randzeitraum zusätzliche Depotbewertungen importieren.'))
         daily_index = _daily_valuation_index(interval_risks)
         risk = _index_risk(daily_index)
-        daily_returns = [{'date': point['date'], 'return': Decimal(point['index']) / Decimal(previous['index']) - 1}
-                         for previous, point in zip(daily_index, daily_index[1:])]
+        daily_returns = [{'date': point['date'], 'return': point['return']}
+                         for point in daily_index[1:]]
         ttr_factor = Decimal(daily_index[-1]['index']) / Decimal(100) if daily_index else None
         ttwror = ttr_factor - 1 if ttr_factor is not None else None
         ttwror_annualized = (ttr_factor ** (Decimal(365) / Decimal(days)) - 1
-                             if ttr_factor is not None and days > 0 and ttr_factor > 0 else None)
+                             if ttr_factor is not None and days > 0 and ttr_factor >= 0 else None)
         benchmark_result = None
         if benchmark and daily_index:
             from .benchmark_service import benchmark_daily_index, compare_daily_indexes
@@ -426,6 +438,8 @@ class PerformanceService:
             "twr": twr, "twr_annualized": annualized, "xirr": xirr_rate,
             "xirr_error": xirr_error, "profit": profit, "net_contributions": -receipts,
             "ttwror": ttwror, "ttwror_annualized": ttwror_annualized,
+            "total_return": ttwror,
+            "total_return_annualized": ttwror_annualized,
             "dividends": dividends,
             "dividends_net_complete": dividend_net_complete,
             "gross_dividends": gross_dividends,
@@ -439,6 +453,7 @@ class PerformanceService:
             "valuation_series": points, "capital_series": capital_series,
             "twr_series": twr_series, "transactions": relevant,
             "daily_index": daily_index, "daily_returns": daily_returns,
+            "daily_total_return_series": daily_index,
             "benchmark": benchmark_result,
             "volatility_annualized": risk['volatility_annualized'],
             "semivolatility_annualized": risk['semivolatility_annualized'],

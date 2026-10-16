@@ -1,6 +1,7 @@
 """Portable selection of account data, independent of credentials and UI settings."""
 import json
 from dataclasses import asdict, fields
+from decimal import Decimal
 from pathlib import Path
 from portfolio_v5.accounts import account_key
 from portfolio_v5.models import ImportBatch, Snapshot, Position, Balance, BankTransaction, digest
@@ -50,12 +51,21 @@ def _export_accounts(repo, keys, path):
         sources[value] = owners[account_key(name)]
         return value
     corrections = {(r['snapshot_id'], r['security_key']): r['cost'] for r in repo.db.execute('SELECT * FROM cost_corrections ORDER BY id')}
+    daily_values = {(r['snapshot_id'], r['security_key']): dict(r)
+                    for r in repo.db.execute('SELECT * FROM wallet_daily_values')}
     for row in repo.snapshots():
         if owners.get(account_key(row['account'])) not in keys: continue
         data = json.loads(row['payload'])
         positions = [Position(**p) for p in data['positions']]
         for p in positions:
             p.cost = corrections.get((row['id'], p.key), p.cost)
+            saved = daily_values.get((row['id'], p.key))
+            if saved and Decimal(p.quantity) == Decimal(saved['quantity']):
+                # Materialize frozen historical values: snapshot ids are local to
+                # a portfolio and cannot be referenced by a portable package.
+                p.value = saved['value']
+                p.currency = saved['currency']
+                p.quote_date = saved['day']
         batch.snapshots.append(Snapshot(source(row['account'], row['depot']), row['period'], row['as_of'],
                                         data.get('sheet', 'Portfolio'), positions, bool(row['complete'])))
     allowed = {f.name for f in fields(BankTransaction)}

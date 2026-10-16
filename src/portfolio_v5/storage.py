@@ -13,7 +13,7 @@ from bisect import bisect_right
 
 from .models import digest
 from .importers import PARSER_VERSION
-from .accounts import account_key, account_name
+from .accounts import account_key, account_name, canonical_depot
 
 
 def balance_date(row):
@@ -885,12 +885,23 @@ class Store:
         pending = {}
         for row in self.snapshots(include_hidden=True):
             if row['effective_date'] > as_of: continue
-            key = account_key(row['depot'])
+            depot_parts = row['depot'].split(' / ', 2)
+            physical = account_key(canonical_depot(row['depot']))
+            assigned = account_key(row['account']) if row['account'] is not None else None
+            assigned_key = (assigned, physical)
+            # Portable-package aliases need the target account to keep two
+            # independently imported copies apart. A later online snapshot uses
+            # only the physical depot name and joins an existing alias. Ordinary
+            # raw sources remain target-independent so reassignment replaces the
+            # old target instead of leaving a stale holding behind.
+            key = (assigned_key if len(depot_parts) == 3 or assigned_key in pending
+                   else (None, physical))
+            row['_holding_key'] = key
             if row['complete'] or row['account'] is None: pending[key] = []
             pending.setdefault(key, []).append(row)
         for row in (r for rows in pending.values() for r in rows):
             data = json.loads(row['payload'])
-            key = account_key(row['depot'])
+            key = row['_holding_key']
             if row['account'] is None:
                 accounts.pop(key, None)
                 continue
