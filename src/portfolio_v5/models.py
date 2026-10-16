@@ -831,12 +831,15 @@ class ImportBatch:
 
     @property
     def quality_status(self):
-        """Stable completeness state for previews without changing serialization."""
+        """Validation quality independent from source completeness."""
         if self.errors:
             return 'invalid'
-        if self.warnings or any(not snapshot.complete for snapshot in self.snapshots):
-            return 'partial'
-        return 'complete'
+        return 'review' if self.warnings else 'valid'
+
+    @property
+    def completeness_status(self):
+        """Whether every supplied snapshot claims complete portfolio coverage."""
+        return 'partial' if any(not snapshot.complete for snapshot in self.snapshots) else 'complete'
 
     def summary(self):
         return {'path': self.path, 'snapshots': len(self.snapshots),

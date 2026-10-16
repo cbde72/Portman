@@ -95,10 +95,15 @@ def test_validation_issues_have_stable_codes_and_severities():
 
 
 def test_import_batch_reports_complete_partial_and_invalid_quality():
-    assert ImportBatch('complete', '1').quality_status == 'complete'
-    assert ImportBatch('partial', '2', snapshots=[
-        Snapshot('Depot', '2026-01', '2026-01-01', 'Test', complete=False)]).quality_status == 'partial'
-    assert ImportBatch('warning', '3', warnings=['prüfen']).quality_status == 'partial'
+    assert ImportBatch('complete', '1').quality_status == 'valid'
+    partial = ImportBatch('partial', '2', snapshots=[
+        Snapshot('Depot', '2026-01', '2026-01-01', 'Test', complete=False)])
+    assert partial.quality_status == 'valid'
+    assert partial.completeness_status == 'partial'
+    warning = ImportBatch('warning', '3', snapshots=[
+        Snapshot('Depot', '2026-01', '2026-01-01', 'Test', complete=True)], warnings=['prüfen'])
+    assert warning.quality_status == 'review'
+    assert warning.completeness_status == 'complete'
     assert ImportBatch('invalid', '4', errors=['kaputt']).quality_status == 'invalid'
 
 
