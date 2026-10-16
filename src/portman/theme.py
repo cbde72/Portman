@@ -13,6 +13,13 @@ DEFAULT_TABLE_FONT = {'family': 'Segoe UI', 'size': 9}
 TABLE_FONTS = {}
 
 
+def _ensure_base_style(app):
+    """Install Fusion only when another Qt base style is active."""
+    current = app.style()
+    if current is None or current.objectName().casefold() != 'fusion':
+        app.setStyle('Fusion')
+
+
 def row_height_for(size, compact=False):
     default = int(DEFAULT_TABLE_FONT['size'])
     return max(18, int(round(size or default)) + 21 - (6 if compact else 0))
@@ -36,7 +43,9 @@ def table_font_rules(fonts=None):
 
 def apply_theme(dark=False, table_fonts=None):
     app = QApplication.instance()
-    app.setStyle('Fusion')
+    # Reinstalling the same QStyle repolishes every widget in the application.
+    # That is expensive on the main window and does not change its appearance.
+    _ensure_base_style(app)
     app.setFont(QFont('Segoe UI', 9))
     style = dark if isinstance(dark, str) else ('dark' if dark else 'light')
     TABLE_FONTS.clear(); TABLE_FONTS.update(table_fonts or {})

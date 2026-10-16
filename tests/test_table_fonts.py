@@ -58,3 +58,43 @@ def test_apply_theme_adds_rules():
     theme.apply_theme('nord', fonts)
     assert theme.TABLE_FONTS == fonts
     assert 'QTableView[table_type="positions"] {' in app.styleSheet()
+
+
+def test_ensure_base_style_does_not_reinstall_fusion():
+    class Style:
+        def objectName(self):
+            return 'fusion'
+
+    class App:
+        def __init__(self):
+            self.calls = []
+
+        def style(self):
+            return Style()
+
+        def setStyle(self, name):
+            self.calls.append(name)
+
+    app = App()
+    theme._ensure_base_style(app)
+    assert app.calls == []
+
+
+def test_ensure_base_style_installs_fusion_when_needed():
+    class Style:
+        def objectName(self):
+            return 'windowsvista'
+
+    class App:
+        def __init__(self):
+            self.calls = []
+
+        def style(self):
+            return Style()
+
+        def setStyle(self, name):
+            self.calls.append(name)
+
+    app = App()
+    theme._ensure_base_style(app)
+    assert app.calls == ['Fusion']

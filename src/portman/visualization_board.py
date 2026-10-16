@@ -36,9 +36,12 @@ class VisualizationBoard(ChartSettingsMixin, QWidget):
         for row in self.rows: self.vertical.addWidget(row)
         root.addWidget(self.vertical, 1)
         defaults = (0, 3, 4, 5)
-        self.charts = [VisualizationsWidget(repo, scope_getter, self, compact=True, initial_view=view,
-                                            custom_charts=self.custom_charts)
-                       for view in defaults]
+        # Only the primary chart is immediately visible.  Matplotlib Qt
+        # canvases for the other cells are created on their first refresh.
+        self.charts = [VisualizationsWidget(
+            repo, scope_getter, self, compact=True, initial_view=view,
+            custom_charts=self.custom_charts, defer_canvas=index > 0,
+        ) for index, view in enumerate(defaults)]
         self.rows[0].addWidget(self.charts[0]); self.rows[0].addWidget(self.charts[1])
         self.rows[1].addWidget(self.charts[2]); self.rows[1].addWidget(self.charts[3])
         self.primary = self.charts[0]

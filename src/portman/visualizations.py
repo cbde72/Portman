@@ -16,7 +16,8 @@ from .gui.chart_settings import ChartSettingsMixin
 class VisualizationsWidget(ChartSettingsMixin, QWidget):
     VIEWS = chart_views()
 
-    def __init__(self, repo, scope_getter, parent=None, *, compact=False, initial_view=0, custom_charts=None):
+    def __init__(self, repo, scope_getter, parent=None, *, compact=False, initial_view=0,
+                 custom_charts=None, defer_canvas=False):
         super().__init__(parent)
         self.repo, self.scope_getter = repo, scope_getter
         self._render_key = None
@@ -61,9 +62,16 @@ class VisualizationsWidget(ChartSettingsMixin, QWidget):
         self.carry_prices.setToolTip('Fortgeschriebene Kurse sind keine neuen Beobachtungen. Standard: gemeinsame Handelstage.')
         self.carry_prices.toggled.connect(self.refresh); comparison.addWidget(self.carry_prices)
         layout.addWidget(self.comparison_bar); self.comparison_bar.hide()
-        self.fig = create_figure(); style_figure(self.fig)
-        self.canvas = SafeFigureCanvas(self.fig); self.canvas.setMinimumHeight(190 if compact else 250); layout.addWidget(self.canvas, 1)
+        self._layout = layout
+        self._canvas_minimum_height = 190 if compact else 250
+        self.fig = None
+        self.canvas = None
+        self._canvas_placeholder = QLabel('Diagramm wird beim Öffnen geladen …')
+        self._canvas_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._canvas_placeholder, 1)
         self.note = QLabel(); self.note.setObjectName('muted'); self.note.setWordWrap(True); layout.addWidget(self.note)
+        if not defer_canvas:
+            self._ensure_canvas()
         self.chart_loader.ready.connect(self.receive_data)
         self.chart_loader.failed.connect(self.receive_error)
         self.chart_loader.busy.connect(self.cancel_chart_button.setVisible)
@@ -71,10 +79,22 @@ class VisualizationsWidget(ChartSettingsMixin, QWidget):
         # Erst nach dem Aufbau aller Steuerelemente die Ausgangsansicht wählen,
         # damit der ausgelöste refresh() auf compare_a/compare_b zugreifen kann.
         self.view.setCurrentIndex(max(0, min(initial_view, self.view.count() - 1)))
+
+    def _ensure_canvas(self):
+        if self.canvas is not None:
+            return self.canvas
+        self.fig = create_figure()
+        style_figure(self.fig)
+        self.canvas = SafeFigureCanvas(self.fig)
+        self.canvas.setMinimumHeight(self._canvas_minimum_height)
+        self._layout.replaceWidget(self._canvas_placeholder, self.canvas)
+        self._canvas_placeholder.hide()
         from .chart_interaction import install_chart_tooltips
         install_chart_tooltips(self.canvas, self.note.text)
+        return self.canvas
 
     def export(self):
+        self._ensure_canvas()
         formats = [fmt.lower() for fmt in CHART_STYLE.get('export_formats', ['png'])]
         filters = ';;'.join(f'{fmt.upper()} (*.{fmt})' for fmt in formats)
         default_ext = formats[0] if formats else 'png'
@@ -193,6 +213,7 @@ class VisualizationsWidget(ChartSettingsMixin, QWidget):
         self.refresh_timer.start(0)
 
     def draw_data(self, data):
+        self._ensure_canvas()
         account, as_of = self.scope_getter()
         mode = self.view.currentIndex()
         self.fig.clear()
