@@ -125,7 +125,7 @@ def test_imported_vorabpauschale_consumes_only_taxable_exemption_amount(tmp_path
                  partial_exemption_rate='30')]))
 
     values = automatic_tax_values(repository, 2020)['comdirect depot']
-    assert values['capital_income'] == Decimal('12.54')
+    assert values['capital_income'] == Decimal('0')
     assert values['advance_tax_base'] == Decimal('12.54')
     assert values['advance_tax_taxable'] == Decimal('8.77')
     assert values['advance_tax_count'] == 1
@@ -134,6 +134,7 @@ def test_imported_vorabpauschale_consumes_only_taxable_exemption_amount(tmp_path
     _, institutions = tax_overview(repository, 2020)
     assert institutions['comdirect']['used_exemption'] == Decimal('8.77')
     assert institutions['comdirect']['remaining_exemption'] == Decimal('291.23')
+    assert institutions['comdirect']['capital_income'] == Decimal('0')
     assert institutions['comdirect']['advance_tax_base'] == Decimal('12.54')
     repository.close()
 

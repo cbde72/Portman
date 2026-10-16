@@ -95,7 +95,10 @@ def automatic_tax_values(repository, year):
         values[key]['advance_tax_base'] += base
         values[key]['advance_tax_taxable'] += taxable
         values[key]['advance_tax_count'] += 1
-        values[key]['capital_income'] += base
+        # The advance-tax base is a deemed tax event, not booked investment
+        # income or an additional cash transaction.  Keep it in its dedicated
+        # columns; only the documented taxable/used amount consumes the
+        # exemption allowance below.
         partial = abs(_number(event.get('partial_exemption_amount')))
         values[key]['partial_exemption'] += partial if partial else max(Decimal(), base - taxable)
         values[key]['used_exemption'] += abs(_number(event.get('used_exemption')))
