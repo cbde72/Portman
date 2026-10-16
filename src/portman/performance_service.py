@@ -172,8 +172,8 @@ class PerformanceService:
     def _valuation_series(self, account=None):
         rows = [s for s in self.repo.snapshots(account) if s["as_of"]]
         states, out, current_date = {}, [], None
-        daily_values = {(r['snapshot_id'], r['security_key']): dict(r)
-                        for r in self.repo.db.execute('SELECT * FROM wallet_daily_values')}
+        from .wallet_valuation import daily_values_for_snapshots
+        daily_values = daily_values_for_snapshots(self.repo.db, (row['id'] for row in rows))
 
         def emit(day):
             if day is not None:

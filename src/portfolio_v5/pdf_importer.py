@@ -7,7 +7,7 @@ from pathlib import Path
 
 from pypdf import PdfReader
 
-from .models import ImportBatch, check_transaction, valid_isin
+from .models import ImportBatch, transaction_validation, valid_isin
 from pdf_plugins._generic_document import analyse_pages as analyse_pages  # re-exported for tests
 from pdf_plugins._generic_document import parse_generic_document
 
@@ -24,14 +24,10 @@ def _validate_plugin_batch(batch, document):
             if not amount.is_finite(): raise InvalidOperation
         except (InvalidOperation, TypeError, ValueError):
             raise ValueError(f'Plugin erzeugte eine Buchung mit ungültigem Datum oder Betrag: {tx.external_id}.') from None
-        problems = check_transaction(tx)
-        hard_problems = [problem for problem in problems if
-            'ungültige oder nicht endliche Dezimalzahl' in problem or
-            'Exponentschreibweise' in problem or
-            (tx.kind == 'ADVANCE_LUMP_SUM' and problem.startswith('Vorabpauschale'))]
+        hard_problems, advisory = transaction_validation(tx)
         if hard_problems:
             raise ValueError(f'Buchung {tx.external_id}: ' + '; '.join(hard_problems))
-        batch.warnings.extend(f'Buchung {tx.external_id}: {problem}' for problem in problems)
+        batch.warnings.extend(f'Buchung {tx.external_id}: {problem}' for problem in advisory)
     for snapshot in batch.snapshots:
         if not snapshot.account or not snapshot.as_of:
             raise ValueError('Plugin erzeugte einen Depotstand ohne Depot oder Stichtag.')

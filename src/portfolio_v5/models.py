@@ -205,6 +205,14 @@ TRANSACTION_KINDS = {value for name, value in vars(Kind).items() if not name.sta
 REVIEW_STATES = ('offen', 'geprueft', 'verworfen')
 
 
+class ValidationIssue(str):
+    """Backward-compatible validation text with stable machine metadata."""
+    def __new__(cls, code, severity, message, field=None):
+        instance = super().__new__(cls, message)
+        instance.code, instance.severity, instance.field = code, severity, field
+        return instance
+
+
 @dataclass
 class TaxItem:
     kind: str
@@ -600,15 +608,17 @@ def valid_isin(value):
 
 
 def check_transaction(tx):
-    """Return convention violations without changing imported data."""
+    """Return string-compatible issues carrying stable code and severity."""
     problems = []
+    def add(code, severity, message, field=None):
+        problems.append(ValidationIssue(code, severity, message, field))
     if tx.kind not in TRANSACTION_KINDS:
-        problems.append(f'Unbekannte Buchungsart: {tx.kind!r}')
+        add('TX_KIND_UNKNOWN', 'warning', f'Unbekannte Buchungsart: {tx.kind!r}', 'kind')
     for name in ('amount', 'quantity', 'fees', 'taxes', 'solidarity_tax', 'withholding_tax',
                  'withholding_tax_rate', 'tax_rate', 'gross_amount', 'price', 'fx_rate'):
         value = getattr(tx, name, None)
         if value is not None and re.search(r'[eE]', str(value)):
-            problems.append(f'{name}: Exponentschreibweise {value!r}')
+            add('NUMBER_EXPONENT_NOTATION', 'error', f'{name}: Exponentschreibweise {value!r}', name)
     for name in ('date', 'trade_date', 'value_date', 'pay_date', 'ex_date'):
         value = getattr(tx, name, '')
         if value:
@@ -617,9 +627,9 @@ def check_transaction(tx):
                 if parsed_date.isoformat() != value:
                     raise ValueError
             except (TypeError, ValueError):
-                problems.append(f'{name}: kein gültiges ISO-Datum {value!r}')
+                add('DATE_INVALID', 'warning', f'{name}: kein gültiges ISO-Datum {value!r}', name)
     if tx.review_state not in REVIEW_STATES:
-        problems.append(f'Unbekannter Prüfstatus: {tx.review_state!r}')
+        add('REVIEW_STATE_UNKNOWN', 'warning', f'Unbekannter Prüfstatus: {tx.review_state!r}', 'review_state')
     values = {}
     for name in ('amount', 'quantity', 'fees', 'taxes', 'solidarity_tax', 'withholding_tax',
                  'withholding_tax_rate', 'tax_rate', 'gross_amount', 'original_amount',
@@ -633,7 +643,7 @@ def check_transaction(tx):
                 raise InvalidOperation
             values[name] = parsed
         except (InvalidOperation, TypeError, ValueError):
-            problems.append(f'{name}: ungültige oder nicht endliche Dezimalzahl {value!r}')
+            add('NUMBER_INVALID', 'error', f'{name}: ungültige oder nicht endliche Dezimalzahl {value!r}', name)
 
     def component_total(items, field_name):
         total = Decimal(0)
@@ -645,41 +655,46 @@ def check_transaction(tx):
                 if not parsed.is_finite():
                     raise InvalidOperation
             except (InvalidOperation, TypeError, ValueError):
-                problems.append(
-                    f'{field_name}[{index}].amount: ungültige oder nicht endliche Dezimalzahl {raw!r}')
+                add('COMPONENT_AMOUNT_INVALID', 'error',
+                    f'{field_name}[{index}].amount: ungültige oder nicht endliche Dezimalzahl {raw!r}',
+                    f'{field_name}[{index}].amount')
                 valid = False
                 continue
             if re.search(r'[eE]', str(raw)):
-                problems.append(f'{field_name}[{index}].amount: Exponentschreibweise {raw!r}')
+                add('NUMBER_EXPONENT_NOTATION', 'error',
+                    f'{field_name}[{index}].amount: Exponentschreibweise {raw!r}',
+                    f'{field_name}[{index}].amount')
             total += parsed
         return total if valid else None
 
     component_total(getattr(tx, 'tax_items', ()), 'tax_items')
     component_total(getattr(tx, 'fee_items', ()), 'fee_items')
     tolerance = Decimal('0.011')
-    problems.extend(_component_consistency_problems(tx))
+    for message in _component_consistency_problems(tx):
+        add('COMPONENT_TOTAL_MISMATCH', 'warning', message)
     try:
         amount = values['amount']
         if tx.kind in OUTFLOW_KINDS and amount > 0:
-            problems.append('Kauf mit positivem Betrag (Abfluss muss negativ sein)')
+            add('CASHFLOW_SIGN_INVALID', 'warning', 'Kauf mit positivem Betrag (Abfluss muss negativ sein)', 'amount')
         if tx.kind in INCOME_KINDS and amount < 0 and not tx.is_reversal:
-            problems.append('Ertrag mit negativem Betrag (nur bei Storno zulässig)')
+            add('CASHFLOW_SIGN_INVALID', 'warning', 'Ertrag mit negativem Betrag (nur bei Storno zulässig)', 'amount')
         for name in ('fees', 'taxes', 'solidarity_tax'):
             value = values.get(name)
             if value is not None and value < 0 and not (tx.is_reversal or tx.kind == Kind.TAX_REFUND):
-                problems.append(f'{name} muss ein positiver Abzugsbetrag sein')
+                add('DEDUCTION_SIGN_INVALID', 'warning', f'{name} muss ein positiver Abzugsbetrag sein', name)
         if tx.kind == Kind.TAX and amount > 0 and not tx.is_reversal:
-            problems.append('Steuerzahlung muss als negativer Geldbetrag gebucht werden')
+            add('CASHFLOW_SIGN_INVALID', 'warning', 'Steuerzahlung muss als negativer Geldbetrag gebucht werden', 'amount')
         if tx.kind == Kind.TAX_REFUND and amount < 0 and not tx.is_reversal:
-            problems.append('Steuererstattung muss als positiver Geldbetrag gebucht werden')
+            add('CASHFLOW_SIGN_INVALID', 'warning', 'Steuererstattung muss als positiver Geldbetrag gebucht werden', 'amount')
         if tx.kind == Kind.FEE and amount > 0 and not tx.is_reversal:
-            problems.append('Gebührenbuchung muss als negativer Geldbetrag gebucht werden')
+            add('CASHFLOW_SIGN_INVALID', 'warning', 'Gebührenbuchung muss als negativer Geldbetrag gebucht werden', 'amount')
         taxes = values.get('taxes')
         if taxes is not None and taxes >= 0 and not (tx.is_reversal or tx.kind == Kind.TAX_REFUND):
             for name, label in (('withholding_tax', 'Quellensteuer'), ('solidarity_tax', 'Solidaritätszuschlag')):
                 component = values.get(name)
                 if component is not None and component > taxes + tolerance:
-                    problems.append(f'{label} übersteigt die ausgewiesene Gesamtsteuer')
+                    add('TAX_COMPONENT_EXCEEDS_TOTAL', 'warning',
+                        f'{label} übersteigt die ausgewiesene Gesamtsteuer', name)
         if 'gross_amount' in values:
             gross = values['gross_amount']
             taxes, fees = values.get('taxes', Decimal(0)), values.get('fees', Decimal(0))
@@ -704,64 +719,80 @@ def check_transaction(tx):
                     candidates.extend((purchase, -purchase))
                 if all(abs(candidate - amount) > tolerance for candidate in candidates):
                     rendered = ' oder '.join(f'{candidate:.2f}' for candidate in candidates)
-                    problems.append(f'Brutto/Netto passt nicht: erwartet {rendered}, Betrag {amount}')
+                    add('GROSS_NET_MISMATCH', 'warning',
+                        f'Brutto/Netto passt nicht: erwartet {rendered}, Betrag {amount}')
         rate = values.get('fx_rate')
         fx_from = text(getattr(tx, 'fx_from_currency', '')).upper()
         fx_to = text(getattr(tx, 'fx_to_currency', '')).upper()
         explicit_fx = bool(fx_from or fx_to)
         if explicit_fx:
             if not fx_from or not fx_to:
-                problems.append('Explizites Währungspaar benötigt Ausgangs- und Zielwährung')
+                add('FX_PAIR_INCOMPLETE', 'warning', 'Explizites Währungspaar benötigt Ausgangs- und Zielwährung')
             if rate is None:
-                problems.append('Explizites Währungspaar benötigt einen Devisenkurs')
+                add('FX_RATE_MISSING', 'warning', 'Explizites Währungspaar benötigt einen Devisenkurs', 'fx_rate')
             if fx_from and not re.fullmatch(r'[A-Z]{3}', fx_from):
-                problems.append(f'Ungültige FX-Ausgangswährung: {fx_from!r}')
+                add('FX_CURRENCY_INVALID', 'warning', f'Ungültige FX-Ausgangswährung: {fx_from!r}', 'fx_from_currency')
             if fx_to and not re.fullmatch(r'[A-Z]{3}', fx_to):
-                problems.append(f'Ungültige FX-Zielwährung: {fx_to!r}')
+                add('FX_CURRENCY_INVALID', 'warning', f'Ungültige FX-Zielwährung: {fx_to!r}', 'fx_to_currency')
             if fx_from and tx.original_currency and fx_from != tx.original_currency.upper():
-                problems.append('FX-Ausgangswährung widerspricht der Währung des Originalbetrags')
+                add('FX_PAIR_CONFLICT', 'warning',
+                    'FX-Ausgangswährung widerspricht der Währung des Originalbetrags', 'fx_from_currency')
             if fx_to and tx.currency and fx_to != tx.currency.upper():
-                problems.append('FX-Zielwährung widerspricht der Buchungswährung')
+                add('FX_PAIR_CONFLICT', 'warning',
+                    'FX-Zielwährung widerspricht der Buchungswährung', 'fx_to_currency')
         if rate is not None:
             if rate <= 0:
-                problems.append('Devisenkurs muss endlich und größer als null sein')
+                add('FX_RATE_INVALID', 'warning', 'Devisenkurs muss endlich und größer als null sein', 'fx_rate')
             if tx.original_amount is None:
-                problems.append('Devisenkurs ohne Fremdwährungsbetrag ist nicht eindeutig')
+                add('FX_AMOUNT_MISSING', 'warning', 'Devisenkurs ohne Fremdwährungsbetrag ist nicht eindeutig', 'original_amount')
             if not tx.original_currency:
-                problems.append('Devisenkurs ohne Fremdwährung ist nicht eindeutig')
+                add('FX_CURRENCY_MISSING', 'warning', 'Devisenkurs ohne Fremdwährung ist nicht eindeutig', 'original_currency')
             elif tx.original_currency.upper() == tx.currency.upper() and rate != 1:
-                problems.append('Devisenkurs für identische Währungen muss 1 sein')
+                add('FX_SAME_CURRENCY_RATE', 'warning', 'Devisenkurs für identische Währungen muss 1 sein', 'fx_rate')
         if {'original_amount', 'fx_rate', 'gross_amount'} <= values.keys() and rate > 0:
             original, gross = values['original_amount'], values['gross_amount']
             if explicit_fx:
                 if abs(original * rate - gross) > tolerance:
-                    problems.append(
+                    add('FX_AMOUNT_MISMATCH', 'warning',
                         'Expliziter Devisenkurs passt nicht: Originalbetrag × Kurs ergibt nicht den Bruttobetrag')
             elif abs(original / rate - gross) > tolerance:
-                problems.append(
+                add('FX_AMOUNT_MISMATCH', 'warning',
                     'Historischer Devisenkurs passt nicht: Originalbetrag ÷ Kurs ergibt nicht den Bruttobetrag')
         if {'price', 'quantity', 'gross_amount'} <= values.keys() and tx.kind in (Kind.BUY, Kind.SELL):
             if abs(values['price'] * values['quantity'] - values['gross_amount']) > tolerance:
-                problems.append('Kurs x Stückzahl passt nicht zum Kurswert')
+                add('PRICE_QUANTITY_MISMATCH', 'warning', 'Kurs x Stückzahl passt nicht zum Kurswert')
         advance_base = getattr(tx, 'advance_tax_base', None)
         advance_currency = text(getattr(tx, 'advance_tax_currency', '')).upper()
         if advance_base is not None and not advance_currency:
-            problems.append('Vorabpauschale benötigt eine explizite Währung aus der Importquelle')
+            add('ADVANCE_TAX_CURRENCY_MISSING', 'warning',
+                'Vorabpauschale benötigt eine explizite Währung aus der Importquelle', 'advance_tax_currency')
         elif advance_currency and not re.fullmatch(r'[A-Z]{3}', advance_currency):
-            problems.append(f'Ungültige Währung der Vorabpauschale: {advance_currency!r}')
+            add('ADVANCE_TAX_CURRENCY_INVALID', 'warning',
+                f'Ungültige Währung der Vorabpauschale: {advance_currency!r}', 'advance_tax_currency')
         if advance_currency and advance_base is None:
-            problems.append('Währung der Vorabpauschale ohne strukturierte Steuerbasis')
+            add('ADVANCE_TAX_BASE_MISSING', 'warning',
+                'Währung der Vorabpauschale ohne strukturierte Steuerbasis', 'advance_tax_base')
         if tx.kind == Kind.ADVANCE_LUMP_SUM:
             if amount:
-                problems.append('Vorabpauschale ist eine Steuerbasis und keine zusätzliche Geldbuchung')
+                add('ADVANCE_TAX_CASH_AMOUNT', 'error',
+                    'Vorabpauschale ist eine Steuerbasis und keine zusätzliche Geldbuchung', 'amount')
             if values.get('taxes', Decimal(0)):
-                problems.append('Vorabpauschale darf nicht als tatsächlich gezahlte Steuer gespeichert werden')
+                add('ADVANCE_TAX_PAID_TAX', 'error',
+                    'Vorabpauschale darf nicht als tatsächlich gezahlte Steuer gespeichert werden', 'taxes')
             if getattr(tx, 'affects_cash', False):
-                problems.append('Vorabpauschale darf den Geldbestand nicht verändern')
+                add('ADVANCE_TAX_AFFECTS_CASH', 'error',
+                    'Vorabpauschale darf den Geldbestand nicht verändern', 'affects_cash')
     except KeyError:
         # The field-specific diagnostic above already identifies an invalid amount.
         pass
     return problems
+
+
+def transaction_validation(tx):
+    """Return blocking and advisory issues without inspecting message text."""
+    issues = check_transaction(tx)
+    return ([issue for issue in issues if issue.severity == 'error'],
+            [issue for issue in issues if issue.severity != 'error'])
 
 
 @dataclass
@@ -797,6 +828,18 @@ class ImportBatch:
     tax_events: list[TaxEvent] = field(default_factory=list)
     cost_reports: list[CostReport] = field(default_factory=list)
     events: list[CorporateEvent] = field(default_factory=list)
+
+    @property
+    def quality_status(self):
+        """Validation quality independent from source completeness."""
+        if self.errors:
+            return 'invalid'
+        return 'review' if self.warnings else 'valid'
+
+    @property
+    def completeness_status(self):
+        """Whether every supplied snapshot claims complete portfolio coverage."""
+        return 'partial' if any(not snapshot.complete for snapshot in self.snapshots) else 'complete'
 
     def summary(self):
         return {'path': self.path, 'snapshots': len(self.snapshots),
