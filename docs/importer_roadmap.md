@@ -56,11 +56,16 @@ dieses Layout teilweise unterstützt.
 
 ## Phase C – Baader, FNZ/ebase und Deka
 
-Geplant: Baader-Ertrag/Steuer/Kapitalmaßnahme, eigener FNZ-/ebase-Importer mit
-getrennten historischen Layoutfamilien und erweiterter Deka-Lebenszyklus.
-Ausschüttung plus Wiederanlage sind Ertrag plus Kauf; Fondswechsel werden ohne
-eindeutigen Beleg nicht steuerlich interpretiert. Bei ausreichendem Umfang wird
-die Phase in bankweise PRs geteilt.
+Umgesetzt auf `codex/importers-baader-fnz-deka`: Baader-Dividende,
+Vorabpauschale, Depotübertrag und vollständiger Jahresdepotauszug; eigener
+FNZ-/finvesto-Importer für belegte Umsatz- und Depotabrechnungen; Deka-
+Ausschüttung plus Wiederanlage sowie historische Jahresdepotauszug-Erkennung.
+
+Bewusst offen bleiben Vorgänge ohne belastbaren Beleg: FNZ-Verkauf,
+Vorabpauschale, Übertrag und historische ebase-Kontoumsätze; Baader-
+Steuerkorrektur, Managergebühr, Zins, Storno und weitere Kapitalmaßnahmen;
+Deka-Verkauf, Fondswechsel, Steuererstattung und Übertrag. Diese Varianten
+werden nicht spekulativ interpretiert.
 
 ## Phase D – Renault Bank und Bank of Scotland
 

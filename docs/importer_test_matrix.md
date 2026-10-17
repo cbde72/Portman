@@ -77,3 +77,31 @@ Abweisung nicht lesbarer comdirect-Stückzahlen.
 Die vom Nutzer lokal unter `history/comdirect` und `history/ing`
 bereitgestellten Originale bleiben außerhalb des Repositories. Es werden weder
 Dateinamen noch Personen-, Konto-, Depot- oder Dokumentnummern committed.
+
+## Phase-C-Regressionsmatrix
+
+| Fall | Fixture / Test | Invariante |
+|---|---|---|
+| Baader Dividende | `test_baader_dividend_keeps_net_gross_and_tax_components_consistent` | Netto plus Steuer = Brutto; PDF cash-neutral |
+| Baader Vorabpauschale | `test_baader_advance_tax_separates_basis_and_debit` | Bemessungsgrundlage und tatsächliche Belastung getrennt |
+| Baader Depotbestand | `test_baader_annual_statement_requires_matching_depot_total` | vollständig nur bei passendem Depotwert |
+| Baader Übertrag | `test_baader_delivery_is_quantity_only_transfer` | Menge ohne erfundenen Geldfluss |
+| FNZ Ausschüttung/Wiederanlage | `fnz/umsatzabrechnung/fnz-current-v1`; `test_distribution_reinvestment_and_purchase_are_three_economic_events` | Ertrag und Kauf getrennt, eindeutige IDs |
+| FNZ Teilbestand | derselbe Test | Umsatzabrechnung bleibt `complete=False` |
+| FNZ Depotbestand | `fnz/depotauszug/fnz-current-v1`; zwei Summenkontrolltests | vollständig nur bei abgestimmter Gesamtsumme |
+| Deka Wiederanlage | `test_deka_distribution_and_reinvestment_are_linked_and_cash_neutral` | verknüpfter DIVIDEND/BUY, Summe null |
+| Deka Altformat | `test_deka_historical_annual_statement_layout_is_detected` | Jahresdepotauszug trotz historischer Textersetzung erkannt |
+
+Lokale, nicht eingecheckte Verifikation: 12 FNZ-PDFs, 37 Deka-PDFs sowie je
+drei repräsentative Baader-Belege für Kauf/Verkauf, Dividende,
+Vorabpauschale, Jahresdepotauszug und Depotübertrag. Sämtliche Originale
+bleiben außerhalb des Repositories; Dateinamen und personenbezogene Referenzen
+werden nicht dokumentiert. Portfolio Performance wurde am Commit
+`805c20dff5d999e987675181b4f1d82f81df10c0` nur als fachliche Referenz genutzt.
+
+Phase-C-Abschlusslauf (Python 3.14, 17.10.2026): **981 bestanden, 9
+übersprungen, 5 Subtests bestanden, 0 fehlgeschlagen** in 306,44 Sekunden.
+Der gezielte Importer-/Settlement-/Performance-Lauf ergab 45 bestandene Tests
+und 2 bestandene Subtests. Ruff, `py_compile` und `git diff --check` waren
+erfolgreich. Es wurde keine Performanceverbesserung behauptet; Phase C ändert
+keinen gemessenen Massenschreibpfad.
