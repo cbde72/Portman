@@ -342,10 +342,15 @@ class AccountBookingsDialog(QDialog):
             return
         selected, ok = QInputDialog.getItem(self, 'Geldbuchung zuordnen', 'Gegenbeleg:', labels, 0, False)
         if not ok: return
+        candidate = transactions[refs[labels.index(selected)]]
+        maximum = min(abs(Decimal(tx['amount'])), abs(Decimal(candidate['amount'])))
+        allocated, ok = QInputDialog.getText(self, 'Zuordnungsbetrag',
+            f'Teilbetrag in {tx["currency"]} (maximal {maximum}):', text=str(maximum))
+        if not ok: return
         reason, ok = QInputDialog.getText(self, 'Zuordnung bestätigen', 'Prüfgrund / Beleg:')
         if not ok: return
         try:
-            self.repository.confirm_booking_link(reference(tx), refs[labels.index(selected)], reason)
+            self.repository.confirm_booking_link(reference(tx), refs[labels.index(selected)], reason, allocated)
         except ValueError as error:
             QMessageBox.warning(self, 'Zuordnung prüfen', str(error)); return
         self.refresh_after_change()

@@ -17,6 +17,17 @@ def reference(tx):
     return json.dumps([tx['import_id'], tx.get('depot', tx['account']), tx['external_id']], ensure_ascii=False, separators=(',', ':'))
 
 
+def booking_direction_matches(depot_tx, cash_tx):
+    """Return whether both records describe the same economic cash direction."""
+    expected = {'BUY': -1, 'SELL': 1, 'DIVIDEND': 1, 'TAX': -1, 'FEE': -1}
+    direction = expected.get(depot_tx.get('kind'))
+    if direction is None:
+        return False
+    depot_amount = Decimal(str(depot_tx['amount']))
+    cash_amount = Decimal(str(cash_tx['amount']))
+    return depot_amount * direction > 0 and cash_amount * direction > 0
+
+
 def valid_cash_transfer(a,b):
     kinds={'BANK_BOOKING','DEPOSIT','WITHDRAWAL','TRANSFER_IN','TRANSFER_OUT'}
     return bool(a and b and a['kind'] in kinds and b['kind'] in kinds
@@ -201,11 +212,24 @@ class RepositoryV09(RepositoryV07):
             raise ValueError('Das Geldkonto ist für dieses Depot nicht als Zahlungsquelle zugelassen.')
         if depot_tx['currency'] != cash_tx['currency']:
             raise ValueError('Währungen stimmen nicht überein.')
-        amount = abs(Decimal(str(allocated_amount if allocated_amount is not None else cash_tx['amount'])))
-        if not amount or amount > abs(Decimal(cash_tx['amount'])):
+        try:
+            amount = abs(Decimal(str(allocated_amount if allocated_amount is not None else cash_tx['amount'])))
+        except Exception:
+            raise ValueError('Ungültiger Zuordnungsbetrag.') from None
+        if not amount.is_finite() or not amount:
             raise ValueError('Ungültiger Zuordnungsbetrag.')
         if not reason.strip():
             raise ValueError('Prüfgrund fehlt.')
+        existing = [row for row in self.booking_links() if not (
+            row['depot_ref'] == depot_ref and row['cash_ref'] == cash_ref)]
+        depot_allocated = sum((Decimal(row['allocated_amount']) for row in existing
+                               if row['depot_ref'] == depot_ref), Decimal())
+        cash_allocated = sum((Decimal(row['allocated_amount']) for row in existing
+                              if row['cash_ref'] == cash_ref), Decimal())
+        if depot_allocated + amount > abs(Decimal(depot_tx['amount'])):
+            raise ValueError('Der Zuordnungsbetrag überschreitet den verfügbaren Betrag der Depotbuchung.')
+        if cash_allocated + amount > abs(Decimal(cash_tx['amount'])):
+            raise ValueError('Der Zuordnungsbetrag überschreitet den verfügbaren Betrag der Geldkontobuchung.')
         with self.db:
             self.db.execute('''INSERT INTO transaction_reconciliations
                 (depot_ref,cash_ref,allocated_amount,currency,status,reason)
@@ -217,20 +241,65 @@ class RepositoryV09(RepositoryV07):
     def reconcile_depot_bookings(self, depot_key, persist=False):
         """Find only unique amount/date/reference matches; ambiguity is explicit."""
         transactions = self.transactions()
-        by_ref = {reference(tx): tx for tx in transactions}
         links = self.booking_links()
         linked = {}
         for link in links:
             linked.setdefault(link['depot_ref'], []).append(link)
+        allocated_by_cash = {}
+        for link in links:
+            allocated_by_cash[link['cash_ref']] = allocated_by_cash.get(link['cash_ref'], Decimal()) + Decimal(link['allocated_amount'])
         payment_keys = {row['account_key'] for row in self.depot_payment_accounts(depot_key)}
         names = {account_key(r['name']): r['account_key'] for r in self.account_records() if r['active']}
         cash = [(reference(tx), tx) for tx in transactions
                 if names.get(account_key(tx['account']), account_key(tx['account'])) in payment_keys
                 and not tx.get('security')]
-        result = []
-        for tx in transactions:
-            if tx.get('performance_depot_key') != depot_key:
+        depot_transactions = [tx for tx in transactions if tx.get('performance_depot_key') == depot_key]
+        matches = {}
+        for tx in depot_transactions:
+            ref = reference(tx)
+            if linked.get(ref):
                 continue
+            own_key = names.get(account_key(tx['account']), account_key(tx['account']))
+            if tx.get('affects_cash', True) and own_key in payment_keys:
+                continue
+            amount = abs(Decimal(tx['amount']))
+            refs = {str(tx.get(field) or '').strip().casefold() for field in
+                    ('transaction_reference','order_id','execution_ref','bank_reference') if tx.get(field)}
+            candidates = []
+            for cash_ref, candidate in cash:
+                if cash_ref == ref:
+                    continue
+                remaining = abs(Decimal(candidate['amount'])) - allocated_by_cash.get(cash_ref, Decimal())
+                if (candidate['currency'] != tx['currency'] or remaining < amount
+                        or abs(Decimal(candidate['amount'])) != amount
+                        or not booking_direction_matches(tx, candidate)):
+                    continue
+                days = abs((date.fromisoformat(candidate.get('value_date') or candidate['date']) -
+                            date.fromisoformat(tx.get('pay_date') or tx['date'])).days)
+                if days > 3:
+                    continue
+                other_refs = {str(candidate.get(field) or '').strip().casefold() for field in
+                              ('transaction_reference','order_id','execution_ref','bank_reference') if candidate.get(field)}
+                candidates.append((cash_ref, candidate, bool(refs & other_refs)))
+            strong = [candidate for candidate in candidates if candidate[2]]
+            matches[ref] = strong or candidates
+
+        # A candidate must be unique from both directions.  This prevents two
+        # equal trades from independently consuming the same bank booking.
+        strong_cash_refs = {cash_ref for candidates in matches.values()
+                            for cash_ref, _, strong in candidates if strong}
+        eligible_edges = set()
+        cash_usage = {}
+        for depot_ref, candidates in matches.items():
+            for cash_ref, _, strong in candidates:
+                if cash_ref in strong_cash_refs and not strong:
+                    continue
+                eligible_edges.add((depot_ref, cash_ref))
+                cash_usage.setdefault(cash_ref, set()).add(depot_ref)
+
+        result = []
+        reserved_cash = set()
+        for tx in depot_transactions:
             ref = reference(tx)
             if linked.get(ref):
                 result.append({'transaction': tx, 'status': ('Manuell bestätigt' if any(
@@ -242,25 +311,14 @@ class RepositoryV09(RepositoryV07):
                 result.append({'transaction': tx, 'status': 'Abgeglichen', 'links': []})
                 continue
             amount = abs(Decimal(tx['amount']))
-            refs = {str(tx.get(field) or '').strip().casefold() for field in
-                    ('transaction_reference','order_id','execution_ref','bank_reference') if tx.get(field)}
-            candidates = []
-            for cash_ref, candidate in cash:
-                if candidate['currency'] != tx['currency'] or abs(Decimal(candidate['amount'])) != amount:
-                    continue
-                days = abs((date.fromisoformat(candidate.get('value_date') or candidate['date']) -
-                            date.fromisoformat(tx.get('pay_date') or tx['date'])).days)
-                if days > 3:
-                    continue
-                other_refs = {str(candidate.get(field) or '').strip().casefold() for field in
-                              ('transaction_reference','order_id','execution_ref','bank_reference') if candidate.get(field)}
-                candidates.append((cash_ref, candidate, bool(refs & other_refs)))
-            strong = [candidate for candidate in candidates if candidate[2]]
-            candidates = strong or candidates
-            status = 'Offen' if not candidates else 'Konflikt' if len(candidates) != 1 else 'Abgeglichen'
+            candidates = matches.get(ref, [])
+            exclusive = [item for item in candidates if (ref, item[0]) in eligible_edges
+                         and len(cash_usage[item[0]]) == 1 and item[0] not in reserved_cash]
+            status = 'Offen' if not candidates else 'Konflikt' if len(exclusive) != 1 else 'Abgeglichen'
             new_links = []
-            if len(candidates) == 1:
-                cash_ref, _, _ = candidates[0]
+            if len(exclusive) == 1:
+                cash_ref, _, _ = exclusive[0]
+                reserved_cash.add(cash_ref)
                 new_links = [dict(depot_ref=ref, cash_ref=cash_ref, allocated_amount=str(amount),
                                   currency=tx['currency'], status='matched',
                                   reason='Eindeutiger Betrag, Währung und Datumsabstand')]

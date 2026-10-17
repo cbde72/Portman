@@ -43,11 +43,19 @@ Automatisch wird nur bei genau einem Kandidaten abgeglichen. Kriterien sind:
 - Buchungs-/Valuta- beziehungsweise Zahltermin höchstens drei Tage auseinander;
 - vorhandene gemeinsame Order-, Ausführungs-, Transaktions- oder Bankreferenz
   hat Vorrang.
+- die wirtschaftliche Richtung muss stimmen: Kauf, Steuer und Gebühr sind
+  Belastungen; Verkauf und Dividende sind Gutschriften;
+- ein Geldbeleg darf innerhalb eines Laufs und über bereits gespeicherte
+  Zuordnungen hinweg nur bis zu seinem verfügbaren Betrag verwendet werden.
 
 Kein Kandidat ergibt **Offen**, mehrere Kandidaten ergeben **Konflikt**. Eine
 Auswahl in der GUI wird als **Manuell bestätigt** gespeichert. Bereits direkte,
 geldwirksame Depotbuchungen auf einem erlaubten Konto gelten als
 **Abgeglichen**.
+
+Manuelle Zuordnungen dürfen begründete Teilbeträge enthalten. Die Summe aller
+aktiven Zuordnungen wird dabei sowohl gegen den Depotbeleg als auch gegen den
+Geldbeleg geprüft; eine Überzuordnung wird abgewiesen.
 
 ## Datenintegrität und Performance
 
@@ -89,3 +97,12 @@ und mehrdeutigen Abgleich, Persistenz manueller Zuordnung bei Wiederholungsimpor
 und die einmalige Performancewirkung. Die vorhandene Settlement-Suite deckt
 Dividenden, Steuern, Gebühren, Transfers, Stornos, Cashflow-Neutralität und
 Renditegrenzen ab.
+
+Abschlussprüfung am 17. Oktober 2026:
+
+- gezielte Abgleichsregressionen: **13 bestanden**;
+- vollständige Testsuite: **940 bestanden, 9 übersprungen**;
+- Ruff-Prüfung für `src` und `tests`: **ohne Befund**;
+- Depotbestände und Kontosalden blieben vor/nach dem Abgleich identisch;
+  TWR und XIRR blieben ebenfalls identisch, und der verknüpfte Geldgegenbeleg
+  erschien nicht als zweiter Performance-Zahlungsstrom.
