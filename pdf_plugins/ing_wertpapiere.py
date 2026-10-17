@@ -23,6 +23,8 @@ DIVIDEND_TITLE = re.compile(r'(?m)^[ \t]*Dividendengutschrift[ \t]*$')
 DIVIDEND_TOTAL = re.compile(r'Gesamtbetrag\s+zu\s+Ihren\s+Gunsten\s+(?P<currency>[A-Z]{3})\s+(?P<amount>' + AMOUNT + ')')
 BUY_TITLE = re.compile(r'Wertpapierabrechnung[ \t]+(?P<type>Kauf[^\n]*?)[ \t]*\n')
 BUY_TOTAL = re.compile(r'Endbetrag\s+zu\s+Ihren\s+Lasten\s+(?P<currency>[A-Z]{3})\s+(?P<amount>' + AMOUNT + ')')
+SELL_TITLE = re.compile(r'Wertpapierabrechnung[ \t]+(?P<type>Verkauf[^\n]*?)[ \t]*\n')
+SELL_TOTAL = re.compile(r'Endbetrag\s+zu\s+Ihren\s+Gunsten\s+(?P<currency>[A-Z]{3})\s+(?P<amount>' + AMOUNT + ')')
 
 SECURITY = re.compile(r'ISIN\s*\(WKN\)\s+(?P<isin>[A-Z]{2}[A-Z0-9]{9}\d)\s*\((?P<wkn>[A-Z0-9]{6})\)')
 NAME = re.compile(r'Wertpapierbezeichnung\s+(?P<name>.+?)\s*(?=Nominale)', re.S)
@@ -54,6 +56,7 @@ TAX_PAGE = {
 REINVEST = re.compile(r'automatisch\s+wieder\s+an')
 ORDER = re.compile(r'Ordernummer\s+(?P<order>[0-9.]+)')
 EXECUTION = re.compile(r'Ausführungstag\s*/\s*-zeit\s+(?P<date>' + DATE + r')\s+um\s+(?P<time>\d{2}:\d{2}:\d{2})')
+EXECUTION_DAY = re.compile(r'Ausführungstag(?:\s*/\s*-zeit)?\s+(?P<date>' + DATE + r')(?:\s+um\s+(?P<time>\d{2}:\d{2}:\d{2}))?')
 MARKET_VALUE = re.compile(r'Kurswert\s+(?P<currency>[A-Z]{3})\s+(?P<amount>' + AMOUNT + ')')
 PRICE = re.compile(r'\bKurs(?:[ \t]*\([^)\n]*\))?\s+(?P<currency>[A-Z]{3})\s+(?P<amount>' + AMOUNT + ')')
 
@@ -68,12 +71,27 @@ GRAND_TOTAL = re.compile(r'Gesamtkurswert\s+(?P<amount>' + AMOUNT + r')\s+EUR')
 POSITION_COUNT = re.compile(r'Anzahl\s+Posten:\s*(?P<count>\d+)')
 CUSTODY = re.compile(r'^[ \t]*(?P<label>Verwahrart|Lagerland):\s*(?P<value>\S.*?)[ \t]*$')
 
+ADVANCE_TITLE = re.compile(r'(?m)^[ \t]*Vorabpauschale[ \t]*$')
+ADVANCE_TOTAL = re.compile(r'Gesamtbetrag\s+zu\s+Ihren\s+Lasten\s+(?P<currency>[A-Z]{3})\s*-?\s*(?P<amount>' + AMOUNT + ')')
+ADVANCE_PER_UNIT = re.compile(r'Vorabpauschale\s+pro\s+Stück\s+(?P<currency>[A-Z]{3})\s+(?P<amount>[0-9.]+,\d+)')
+ADVANCE_TAXABLE = re.compile(r'KapSt-pflichtiger\s+Kapitalertrag\s+(?P<amount>' + AMOUNT + r')\s+EUR')
+ADVANCE_PARTIAL = re.compile(r'Teilfreistellung[^\n]*?(?P<amount>' + AMOUNT + r')\s+EUR')
+TAX_COMPONENTS = {
+    'kapitalertragsteuer': re.compile(r'Kapitalertragsteuer[^\n]*?EUR\s*-?\s*(?P<amount>' + AMOUNT + ')'),
+    'solidaritaetszuschlag': re.compile(r'Solidaritätszuschlag[^\n]*?EUR\s*-?\s*(?P<amount>' + AMOUNT + ')'),
+    'kirchensteuer': re.compile(r'Kirchensteuer[^\n]*?EUR\s*-?\s*(?P<amount>' + AMOUNT + ')'),
+}
+TAX_SETTLEMENT_TITLE = re.compile(r'(?:nachträgliche\s+)?Verlustverrechnung', re.I)
+TAX_SETTLEMENT_TOTAL = re.compile(r'Erstattung/Belastung\s*\(-\)\s+(?P<sign>-)?\s*(?P<amount>' + AMOUNT + ')')
+TAX_SETTLEMENT_IBAN = re.compile(r'(?:Gegenkonto|Abrechnungs-IBAN)\s+(?P<iban>DE(?:[ \t]*\d){20})')
+
 
 class IngWertpapierePlugin:
     plugin_id = 'user.ing-wertpapiere'
     bank_name = 'ING'
     version = '1.2'
-    document_types = 'Dividendengutschrift, Wertpapierabrechnung Kauf, Jahresdepotauszug'
+    document_types = ('Dividendengutschrift, Wertpapierabrechnung Kauf/Verkauf, Vorabpauschale, '
+                      'nachträgliche Verlustverrechnung, Jahresdepotauszug')
 
     def detect(self, document):
         text = document.text
@@ -86,6 +104,15 @@ class IngWertpapierePlugin:
         if BUY_TITLE.search(text) and BUY_TOTAL.search(text):
             result.append(Detection(0.95, 'ING Wertpapierabrechnung Kauf', 'kauf',
                                     'ING-DiBa, Wertpapierabrechnung Kauf und Endbetrag erkannt'))
+        if SELL_TITLE.search(text) and SELL_TOTAL.search(text):
+            result.append(Detection(0.95, 'ING Wertpapierabrechnung Verkauf', 'verkauf',
+                                    'ING-DiBa, Wertpapierabrechnung Verkauf und Endbetrag erkannt'))
+        if ADVANCE_TITLE.search(text) and ADVANCE_TOTAL.search(text):
+            result.append(Detection(0.98, 'ING Vorabpauschale', 'vorabpauschale',
+                                    'ING-DiBa, Vorabpauschale und Kontobelastung erkannt'))
+        if TAX_SETTLEMENT_TITLE.search(text) and TAX_SETTLEMENT_TOTAL.search(text):
+            result.append(Detection(0.96, 'ING nachträgliche Verlustverrechnung', 'steuerverrechnung',
+                                    'ING-DiBa, Verlustverrechnung und Steuerbetrag erkannt'))
         if STATEMENT_TITLE.search(text) and GRAND_TOTAL.search(text) and STATEMENT_DATE.search(text):
             result.append(Detection(0.95, 'ING Jahresdepotauszug', 'jahresdepotauszug',
                                     'ING-DiBa, Jahresdepotauszug und Gesamtkurswert erkannt'))
@@ -128,7 +155,13 @@ class IngWertpapierePlugin:
         if detection.handler_id == 'dividendengutschrift':
             return self._dividend(document, context.batch)
         if detection.handler_id == 'kauf':
-            return self._buy(document, context.batch)
+            return self._trade(document, context.batch, Kind.BUY)
+        if detection.handler_id == 'verkauf':
+            return self._trade(document, context.batch, Kind.SELL)
+        if detection.handler_id == 'vorabpauschale':
+            return self._advance_tax(document, context.batch)
+        if detection.handler_id == 'steuerverrechnung':
+            return self._tax_settlement(document, context.batch)
         if detection.handler_id == 'jahresdepotauszug':
             return self._statement(document, context.batch)
         raise ValueError('Nicht unterstützter Dokumenttyp: ' + detection.handler_id)
@@ -212,11 +245,16 @@ class IngWertpapierePlugin:
         return self._finish(batch, document, c, account)
 
     def _buy(self, document, batch):
-        c = self._common(document, BUY_TOTAL)
+        return self._trade(document, batch, Kind.BUY)
+
+    def _trade(self, document, batch, kind):
+        total_pattern = BUY_TOTAL if kind == Kind.BUY else SELL_TOTAL
+        title_pattern = BUY_TITLE if kind == Kind.BUY else SELL_TITLE
+        c = self._common(document, total_pattern)
         text, security = c['text'], c['security']
         reference = extract_bank_reference(text)
         nominal, depot = NOMINAL_BUY.search(text), DEPOT.search(text)
-        order, execution = ORDER.search(text), EXECUTION.search(text)
+        order, execution = ORDER.search(text), EXECUTION_DAY.search(text)
         if not (nominal and depot and order and execution):
             raise ValueError('Stückzahl, Depotnummer, Ordernummer oder Ausführungstag nicht erkannt.')
         total = money(c['total'].group('amount'))
@@ -229,7 +267,10 @@ class IngWertpapierePlugin:
         market = MARKET_VALUE.search(text)
         fees = None
         if market:
-            diff = float(total) - float(money(market.group('amount')))
+            diff = ((Decimal(total) - Decimal(money(market.group('amount')))) if kind == Kind.BUY
+                    else (Decimal(money(market.group('amount'))) - Decimal(total)))
+            if diff < Decimal('-0.004'):
+                raise ValueError('Endbetrag und Kurswert widersprechen der wirtschaftlichen Zahlungsrichtung.')
             fees = f'{diff:.2f}' if abs(diff) > 0.004 else None
             price = PRICE.search(text)
             if price and abs(float(correction_number(price.group('amount'))) * float(qty)
@@ -241,29 +282,96 @@ class IngWertpapierePlugin:
             batch.warnings.append(f'Endbetrag weicht vom Kurswert um {fees} EUR ab; als Entgelt übernommen.')
 
         account = 'Depot ' + depot.group('id')
-        amount = f'{BUY_AMOUNT_SIGN * float(total):.2f}'
+        amount = ('-' if kind == Kind.BUY else '') + total
         isin = security.group('isin')
         price = PRICE.search(text)
         venue = VENUE.search(text)
-        kind_text = BUY_TITLE.search(text).group('type')
+        kind_text = title_pattern.search(text).group('type')
         batch.transactions.append(Transaction(
             account=account,
             external_id='pdf-ing-order-' + digest([account, order.group('order'), isin, executed, qty]),
-            date=executed, kind=BUY_KIND, amount=amount, currency='EUR',
+            date=executed, kind=kind, amount=amount, currency='EUR',
             security=isin, quantity=qty, fees=fees, row=c['row'],
             gross_amount=money(market.group('amount')) if market else None,
             fee_items=[FeeItem('provision' if PROVISION.search(text) else 'entgelt', fees)] if fees else [],
             price=correction_number(price.group('amount')) if price else None, price_currency='EUR' if price else '',
-            trade_date=executed, executed_at=f"{executed}T{execution.group('time')}", pay_date=c['valuta'],
+            trade_date=executed, executed_at=(f"{executed}T{execution.group('time')}"
+                                               if execution.group('time') else ''), pay_date=c['valuta'],
             cash_account=c['iban'], depot_account=account, security_ref=isin,
             order_id=order.group('order'), venue=' '.join(venue.group('v').split()) if venue else '',
             document_reference=reference or order.group('order'),
             order_subtype='sparplan' if 'Sparplan' in kind_text else ('wiederanlage' if 'Wiederanlage' in kind_text else ''),
             field_sources={'amount': 'ocr', 'quantity': 'ocr'} if c['page'].used_ocr else {}))
         batch.securities.append(SecurityInfo(key=isin, isin=isin, wkn=security.group('wkn'), name=c['name'], quote_currency='EUR'))
-        batch.warnings.append(f"ING {BUY_TITLE.search(text).group('type')} (Order {order.group('order')}, "
-                              f"Valuta {c['valuta']}): Kontobelastung wurde nicht als eigene Kontobuchung erzeugt.")
+        direction = 'Kontobelastung' if kind == Kind.BUY else 'Kontogutschrift'
+        batch.warnings.append(f"ING {kind_text} (Order {order.group('order')}, Valuta {c['valuta']}): "
+                              f'{direction} wurde nicht als eigene Kontobuchung erzeugt.')
         return self._finish(batch, document, c, account)
+
+    def _advance_tax(self, document, batch):
+        c = self._common(document, ADVANCE_TOTAL)
+        text, security = c['text'], c['security']
+        nominal, depot = NOMINAL_DIV.search(text), DEPOT.search(text)
+        per_unit, taxable = ADVANCE_PER_UNIT.search(text), ADVANCE_TAXABLE.search(text)
+        if not all((nominal, depot, per_unit, taxable)):
+            raise ValueError('Stückzahl, Depot, Vorabpauschale je Stück oder Steuerbasis nicht erkannt.')
+        amount = money(c['total'].group('amount'))
+        qty = correction_number(nominal.group('qty'))
+        components = [(name, money(match.group('amount'))) for name, pattern in TAX_COMPONENTS.items()
+                      for match in [pattern.search(text)] if match]
+        component_total = sum((Decimal(value) for _, value in components), Decimal())
+        if amount is None or qty is None or abs(component_total - Decimal(amount)) > Decimal('0.01'):
+            raise ValueError('Steuerkomponenten der Vorabpauschale passen nicht zur Kontobelastung.')
+        account = 'Depot ' + depot.group('id')
+        isin = security.group('isin')
+        event_id = 'pdf-ing-advance-' + digest([account, isin, c['valuta'], qty, taxable.group('amount')])
+        batch.tax_events.append(TaxEvent(
+            external_id=event_id, account=account, type='vorabpauschale', date=c['valuta'],
+            tax_year=c['valuta'][:4], security_ref=isin, quantity=qty,
+            taxable_income=money(taxable.group('amount')), per_unit=correction_number(per_unit.group('amount')),
+            partial_exemption_amount=(money(ADVANCE_PARTIAL.search(text).group('amount'))
+                                      if ADVANCE_PARTIAL.search(text) else None)))
+        batch.transactions.append(BankTransaction(
+            account=account, external_id=event_id + '-tax', date=c['valuta'], value_date=c['valuta'],
+            kind=Kind.TAX, amount='-' + amount, currency='EUR', security=isin, quantity=qty,
+            taxes=amount, tax_items=[TaxItem(name, value) for name, value in components],
+            cash_account=c['iban'], depot_account=account, security_ref=isin, affects_cash=False,
+            booking_text='ING Vorabpauschale Steuerbelastung', raw_text=c['source_line'],
+            purpose=f'ING Vorabpauschale {c["name"]}', document_reference=extract_bank_reference(text)))
+        batch.securities.append(SecurityInfo(key=isin, isin=isin, wkn=security.group('wkn'), name=c['name']))
+        return self._finish(batch, document, c, account)
+
+    def _tax_settlement(self, document, batch):
+        text = document.text
+        total, iban, valuta, depot = (TAX_SETTLEMENT_TOTAL.search(text), TAX_SETTLEMENT_IBAN.search(text),
+                                      VALUTA.search(text), DEPOT.search(text))
+        if not all((total, iban, valuta, depot)):
+            raise ValueError('Steuerbetrag, Gegenkonto, Depotnummer oder Valuta nicht erkannt.')
+        amount = money(total.group('amount'))
+        components = [(name, money(match.group('amount'))) for name, pattern in TAX_COMPONENTS.items()
+                      for match in [pattern.search(text)] if match]
+        if not components or amount is None:
+            raise ValueError('Keine prüfbaren Steuerkomponenten erkannt.')
+        component_total = sum((Decimal(value) for _, value in components), Decimal())
+        if abs(component_total - Decimal(amount)) > Decimal('0.01'):
+            raise ValueError('Steuerkomponenten passen nicht zum Erstattungs-/Belastungsbetrag.')
+        booked = parse_date(valuta.group('date'))
+        is_charge = bool(total.group('sign'))
+        kind = Kind.TAX if is_charge else Kind.TAX_REFUND
+        cash_account = 'IBAN ' + re.sub(r'\s+', '', iban.group('iban'))
+        account = 'Depot ' + depot.group('id')
+        external_id = 'pdf-ing-tax-settlement-' + digest(
+            [account, cash_account, booked, kind, amount, extract_bank_reference(text)])
+        batch.transactions.append(BankTransaction(
+            account=account, external_id=external_id, date=booked, value_date=booked, kind=kind,
+            amount=('-' if is_charge else '') + amount, currency='EUR', taxes=amount,
+            tax_items=[TaxItem(name, value) for name, value in components], cash_account=cash_account,
+            depot_account=account, affects_cash=False,
+            purpose='ING nachträgliche Verlustverrechnung', booking_text='ING Steuerverrechnung',
+            raw_text=' '.join(total.group().split()), bank_reference=extract_bank_reference(text)))
+        common = dict(page=document.pages[0], row=1, source_line=' '.join(total.group().split()),
+                      text=text, valuta=booked)
+        return self._finish(batch, document, common, account)
 
 
     def _statement(self, document, batch):

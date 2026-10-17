@@ -33,10 +33,26 @@ in diesem Benchmark nicht instrumentiert und werden daher nicht behauptet.
 
 ## Phase B – comdirect und ING
 
-Geplant: verifizierte Verkaufs-, Gebühren-, Steuer-/Erstattungs-, FX-,
-Vorabpauschal- und Korrekturbelege. Voraussetzung sind anonymisierte Fixtures
-je Layout. Finanzreport-Geldbuchungen und Wertpapierbelege werden über den
-Phase-A-Vertrag als ein wirtschaftlicher Vorgang behandelt.
+Umgesetzt auf `codex/importers-comdirect-ing`: comdirect-Verkauf im bestehenden
+kompakten Layout, ING-Verkauf, ING-Vorabpauschale mit tatsächlicher
+Steuerbelastung sowie positive nachträgliche Steuererstattung. Kauf und Verkauf
+werden als Depotereignisse normalisiert; die separate Geldbuchung bleibt über
+den Phase-A-Vertrag zuordenbar und zählt nicht doppelt.
+
+Nicht verifiziert bleiben insbesondere comdirect-Fremdwährungsverkäufe,
+separate comdirect-Steuerkorrekturen, historische Layouts mit beschädigter
+Schriftextraktion sowie ING-Kapitalmaßnahmen, Belastungen aus nachträglicher
+Verlustverrechnung und weitere FX-/Kirchensteuervarianten. Dafür fehlen
+freigegebene anonymisierte Originalbelege; es wurden bewusst keine
+spekulativen Regeln ergänzt.
+
+Nachprüfung mit lokal bereitgestellten Dokumenten: Zwei ING-Verkäufe bestätigen
+das implementierte Layout sowohl mit als auch ohne ausgewiesene Gebühr. Die
+comdirect-Sammlung bestätigt ein weiteres kompaktes Kauf-/Steuerlayout, dessen
+eingebettete Schrift Stückzahlen teilweise als null extrahiert. Solche Belege
+werden nun ausdrücklich abgewiesen statt mit falschem Bestand importiert.
+Mangels verfügbarer lokaler OCR-Laufzeit und sicher lesbarer Stückzahl bleibt
+dieses Layout teilweise unterstützt.
 
 ## Phase C – Baader, FNZ/ebase und Deka
 

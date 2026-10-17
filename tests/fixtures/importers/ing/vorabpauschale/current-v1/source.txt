@@ -1,0 +1,13 @@
+ING-DiBa
+Vorabpauschale
+Direkt-Depot Nr.: 1234567890
+ISIN (WKN) DE000A1TEST0 (A1TEST)
+Wertpapierbezeichnung Muster ETF
+Nominale 10,00 Stück
+Vorabpauschale pro Stück EUR 1,0000
+KapSt-pflichtiger Kapitalertrag 10,00 EUR
+Kapitalertragsteuer EUR 2,50
+Solidaritätszuschlag EUR 0,13
+Gesamtbetrag zu Ihren Lasten EUR - 2,63
+Abrechnungs-IBAN DE11 1111 1111 1111 1111 11
+Valuta 02.01.2026

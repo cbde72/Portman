@@ -200,7 +200,7 @@ def depot_candidates(store, tx, owners=None):
     return candidates
 
 
-PORTFOLIO_CASH_KINDS = {'DIVIDEND', 'TAX', 'FEE'}
+PORTFOLIO_CASH_KINDS = {'DIVIDEND', 'TAX', 'TAX_REFUND', 'FEE'}
 
 
 def dividend_match(a, b):
@@ -346,7 +346,8 @@ def performance_transactions(store, transactions, account=None):
                     continue
             if target:
                 tx.update(account=target['name'], cash_account=original['account'],
-                          performance_source={'DIVIDEND': 'Dividende', 'TAX': 'Steuer', 'FEE': 'Gebühr'}[tx['kind']]
+                          performance_source={'DIVIDEND': 'Dividende', 'TAX': 'Steuer',
+                                              'TAX_REFUND': 'Steuererstattung', 'FEE': 'Gebühr'}[tx['kind']]
                           + ' auf ' + original['account'])
         if account and account_key(tx['account']) != account_key(account):
             continue
@@ -355,6 +356,6 @@ def performance_transactions(store, transactions, account=None):
         if tx['kind'] in ('BUY', 'SELL') and not tx.get('affects_cash', True):
             tx['amount'] = str(abs(Decimal(tx['amount'])) * (-1 if tx['kind'] == 'BUY' else 1))
         if tx.get('affects_cash', True) or tx['kind'] in (
-                'DIVIDEND', 'TAX', 'FEE', 'BUY', 'SELL', 'TRANSFER_IN', 'TRANSFER_OUT'):
+                'DIVIDEND', 'TAX', 'TAX_REFUND', 'FEE', 'BUY', 'SELL', 'TRANSFER_IN', 'TRANSFER_OUT'):
             result.append(tx)
     return result

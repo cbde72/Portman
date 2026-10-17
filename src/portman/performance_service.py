@@ -8,7 +8,7 @@ from portfolio_v5.accounts import canonical_depot
 from .chart_cache import cached_series
 
 ZERO = Decimal(0)
-PERFORMANCE_KINDS = {"BUY", "SELL", "DIVIDEND", "INTEREST", "FEE", "TAX"}
+PERFORMANCE_KINDS = {"BUY", "SELL", "DIVIDEND", "INTEREST", "FEE", "TAX", "TAX_REFUND"}
 
 
 def _minus_years(value, years):

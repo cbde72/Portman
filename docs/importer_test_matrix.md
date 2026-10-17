@@ -42,3 +42,38 @@ Phase-A-Abschlusslauf (Python 3.13.9, pytest 8.4.2, PySide6 6.9.2): **961
 bestanden, 9 übersprungen, 0 fehlgeschlagen** in 293,82 Sekunden. Der gezielte
 Integritätslauf ergab 122 bestandene und 6 übersprungene Tests. Ruff,
 `py_compile` und `git diff --check` waren erfolgreich.
+
+## Phase-B-Regressionsmatrix
+
+| Fall | Fixture / Test | Invariante |
+|---|---|---|
+| comdirect Verkauf | `comdirect/verkauf/compact-v1`; `test_comdirect_sale_is_depot_event_with_positive_cash_direction` | SELL positiv, Gebühr aus Brutto/Netto, PDF cash-neutral |
+| comdirect Gegenrichtung | `test_comdirect_sale_rejects_debit_direction` | Verkauf mit Belastung wird hart abgewiesen |
+| ING Verkauf | `ing/verkauf/current-v1`; `test_ing_sale_extracts_fee_and_positive_net_amount` | Kurswert minus Gebühr = Gutschrift |
+| ING Vorabpauschale | `ing/vorabpauschale/current-v1`; `test_ing_advance_tax_separates_tax_basis_from_cash_debit` | Steuerbasis und tatsächliche Belastung bleiben getrennt |
+| ING Steuererstattung | `ing/steuererstattung/current-v1`; `test_ing_tax_refund_has_positive_economic_direction` | positive Erstattung, Komponenten vollständig |
+| Manipulierte Steuerkorrektur | `test_ing_tax_refund_rejects_inconsistent_components` | abweichende Summe wird nicht importiert |
+| ING Original-Verkäufe | lokaler, nicht eingecheckter Prüflauf über zwei Belege | beide SELL positiv; mit/ohne Gebühr abgestimmtes Brutto/Netto; Depot- und Zahlungskonto vorhanden |
+| comdirect defekte PDF-Schrift | `test_comdirect_unreadable_zero_quantity_is_never_booked` plus lokaler Originalbeleg | extrahierte Null-Stückzahl erzeugt keine Finanzbuchung |
+
+Die Fixtures sind synthetisch und anonymisiert; jede Fixture enthält einen
+Provenienznachweis. Nicht durch eine Fixture belegte Varianten werden in der
+Abdeckungsmatrix nicht als unterstützt bezeichnet.
+
+Phase-B-Abschlusslauf (Python 3.14, 17.10.2026): **970 bestanden, 9
+übersprungen, 5 Subtests bestanden, 0 fehlgeschlagen** in 340,56 Sekunden.
+Der gezielte Importer-/Settlement-/Performance-Lauf ergab 84 bestandene Tests
+und 2 bestandene Subtests. Ruff, `py_compile` und `git diff --check` waren
+erfolgreich. Die Finanzinvarianten für Bestand, Geldsaldo, Einstand,
+realisierten Gewinn sowie TWR, Modified Dietz und XIRR werden durch die
+bestehenden End-to-End-Regressionsszenarien zusammen mit den neuen
+Cashflow-Richtungs- und Doppelerfassungsfällen abgedeckt.
+
+Nachprüfung mit den lokal bereitgestellten Dokumenten: **972 bestanden, 9
+übersprungen, 5 Subtests bestanden, 0 fehlgeschlagen** in 326,45 Sekunden.
+Der Zuwachs umfasst die gebührenfreie ING-Verkaufsvariante und die sichere
+Abweisung nicht lesbarer comdirect-Stückzahlen.
+
+Die vom Nutzer lokal unter `history/comdirect` und `history/ing`
+bereitgestellten Originale bleiben außerhalb des Repositories. Es werden weder
+Dateinamen noch Personen-, Konto-, Depot- oder Dokumentnummern committed.
