@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 
 from portfolio_v5.models import BankDocument, BankTransaction, ImportBatch, digest
+from portfolio_v5.booking_details import classify_cash_booking
 from .bank_history_range import ALL_HISTORY_START
 from .ing_banking import (BankingError, Cancelled, decimal_value, SOURCE,
                           safe_diagnostic, reset_diagnostic, check_bank_response)
@@ -60,6 +61,8 @@ def parse_transactions(rows, account, start, end, *, source_prefix='ing'):
         transaction.operation = clean('transaction_details')
         transaction.booking_text = clean('purpose')
         transaction.raw_text = str(data.get('transaction_details') or '') + '\n' + str(data.get('purpose') or '')
+        if source_prefix == 'renault':
+            classify_cash_booking(transaction)
         result.append(transaction)
     return sorted(result, key=lambda t: (t.date, t.external_id))
 

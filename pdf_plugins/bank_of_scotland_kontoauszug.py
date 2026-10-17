@@ -6,6 +6,7 @@ from decimal import Decimal
 from portfolio_v5.models import (AccountInfo, AccountStatement, BankDocument, BankTransaction, Kind,
                                  digest, money, parse_date)
 from portfolio_v5.pdf_plugins import Detection
+from portfolio_v5.booking_details import classify_cash_booking, enrich_details
 
 DATE = r'\d{2}\.\d{2}\.\d{4}'
 AMOUNT = r'[0-9]{1,3}(?:\.[0-9]{3})*,\d{2}|\d+,\d{2}'
@@ -127,12 +128,15 @@ class BankOfScotlandPlugin:
             booked, value_date = parse_date(b['date']), parse_date(b['value'])
             identity = digest([account, booked, value_date, amount, 'EUR', b['description']])
             occurrences[identity] = occurrences.get(identity, 0) + 1
-            batch.transactions.append(BankTransaction(
+            transaction = BankTransaction(
                 account=account, external_id=f'pdf-bos-{identity}-{occurrences[identity]}',
                 date=booked, kind=Kind.BANK_BOOKING, amount=amount, currency='EUR', row=b['line'],
                 value_date=value_date, purpose=b['description'], booking_text=booking_text,
                 counterparty_iban=counterparty_iban, counterparty_bic=counterparty_bic,
-                raw_text=b['raw']))
+                raw_text=b['raw'])
+            enrich_details(transaction)
+            classify_cash_booking(transaction)
+            batch.transactions.append(transaction)
             batch.pdf_booking_evidence.append({
                 'page': b['page'], 'line': b['line'], 'text': b['raw'],
                 'ocr': b['ocr'], 'confidence': b['confidence'], 'review_required': b['ocr']})

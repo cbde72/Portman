@@ -105,3 +105,27 @@ Der gezielte Importer-/Settlement-/Performance-Lauf ergab 45 bestandene Tests
 und 2 bestandene Subtests. Ruff, `py_compile` und `git diff --check` waren
 erfolgreich. Es wurde keine Performanceverbesserung behauptet; Phase C ändert
 keinen gemessenen Massenschreibpfad.
+
+## Phase-D-Regressionsmatrix
+
+| Fall | Fixture / Test | Invariante |
+|---|---|---|
+| Renault Zins/Steuer | `renault/kontoauszug/verified-v1`; `test_renault_classifies_interest_tax_and_transfer_without_changing_cash_sum` | Zins, KapESt und Soli getrennt; Cashsumme unverändert |
+| Renault Storno/Erstattung | `test_renault_storno_and_tax_refund_keep_economic_direction` | negativer Zinsstorno und positive Steuererstattung |
+| Renault FinTS | `test_renault_fints_uses_same_explicit_cash_classification` | gleiche Fachtypen wie PDF, stabile alte Buchungs-ID |
+| BoS Zins/Steuer/Saldo | `bank_of_scotland/kontoauszug/verified-v1`; `test_bank_of_scotland_statement_classifies_rows_and_reconciles_balance` | Anfang + Buchungen = Ende |
+| Fehlende Seite/falscher Saldo | zwei BoS-Manipulationstests | kein vollständiger Import |
+| Überlappende Auszüge | `test_overlapping_statement_rows_have_stable_ids_and_do_not_duplicate` | identische Buchung nur einmal |
+| Interner Transfer | `test_internal_transfer_scoped_cashflow` | nach Paarung kein externer Beitrag |
+| TWR/XIRR | `test_partial_settlement_matches_reference_twr_dietz_and_xirr` | Referenzrenditen bleiben unverändert |
+
+Lokale, nicht eingecheckte Verifikation: 200 Renault- und 75 Bank-of-Scotland-
+PDFs. Die Originale, Dateinamen und personenbezogenen Daten bleiben außerhalb
+des Repositories. Fachliche Portfolio-Performance-Referenz ist Commit
+`805c20dff5d999e987675181b4f1d82f81df10c0`.
+
+Phase-D-Abschlusslauf (Python 3.14, 17.10.2026): **988 bestanden, 9
+übersprungen, 5 Subtests bestanden, 0 fehlgeschlagen** in 343,28 Sekunden.
+Der erweiterte Ziellauf ergab 61 bestandene Tests. Ruff, `py_compile` und
+`git diff --check` waren erfolgreich. Phase D verändert keinen gemessenen
+Massenschreibpfad; daher wird keine Performanceverbesserung behauptet.

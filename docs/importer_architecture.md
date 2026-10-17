@@ -94,3 +94,18 @@ Deka behandelt den belegten Vorgang „Ausschüttung / Kauf aus Ertrag“ ebenfa
 als zwei verknüpfte Ereignisse mit Cashflowsumme null. Quartalsberichte und
 historische Jahresdepotauszüge teilen dieselbe konservative Bestandsprüfung;
 nicht eindeutig belegte Umsatzarten werden nur gewarnt, nicht geraten.
+
+## Phase-D-Normalisierung
+
+Renault-PDF und Renault-FinTS verwenden dieselbe konservative Klassifikation
+für ausdrücklich bezeichnete Zinsen, Steuerabzüge, Steuererstattungen sowie
+Ein- und Auszahlungen. Bank-of-Scotland-Kontoauszüge wenden denselben Vertrag
+auf Zinsen, Abgeltungssteuer und Solidaritätszuschlag an. Das Vorzeichen allein
+klassifiziert keine Buchung.
+
+Vollständige Auszüge benötigen Anfangssaldo, Endsaldo und die Gleichung
+`Anfangssaldo + Summe(Buchungen) = Endsaldo`. Fehlende Schlussseiten und
+abweichende Summen verhindern den Import. Identitäten aus Konto, Buchungs- und
+Valutadatum, Betrag und Buchungstext bleiben über überlappende Auszüge stabil.
+Transfers zwischen eigenen Konten werden erst nach belegter Paarung intern;
+bis dahin bleiben die Originalbuchungen sichtbar.

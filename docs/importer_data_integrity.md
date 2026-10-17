@@ -74,3 +74,18 @@ Performance zu erfassen. Brutto, Gebühren und Netto müssen sich je Richtung
 innerhalb eines Cents abstimmen lassen. Bei Vorabpauschalen wird die
 Bemessungsgrundlage nicht als Geldbewegung erfunden; nur ein auf dem Dokument
 ausgewiesener Steuerabzug wird als `TAX` erfasst.
+
+## Geldkontoauszüge (Phase D)
+
+Renault und Bank of Scotland importieren jede saldowirksame Zeile genau einmal.
+Zins, TAX und TAX_REFUND werden nur aus eindeutigen Buchungstexten abgeleitet;
+der Betrag behält das tatsächliche Vorzeichen. Steuerzeilen werden nicht noch
+einmal als Teil des Zinsertrags gebucht. Überlappende und wiederholte Auszüge
+verwenden stabile fachliche IDs, während echte identische Mehrfachbuchungen
+durch einen Vorkommenszähler innerhalb desselben Auszugs erhalten bleiben.
+
+Ein vollständiger Auszug wird nur akzeptiert, wenn Anfangssaldo plus alle
+Buchungen dem Endsaldo entspricht. Bei Renault ersetzt der geprüfte Zeitraum
+vorhandene PDF-/FinTS-Geldbuchungen derselben Periode atomar und rückgängig
+machbar. Eigene Überweisungen zählen erst nach expliziter Transferpaarung als
+interne Bewegung und verändern dann weder externe Beiträge noch Erträge.
