@@ -7,7 +7,7 @@
 - Eine Geldbuchung kann nur innerhalb ihres Restbetrags mehreren
   Depotereignissen zugeordnet werden.
 - Depot- und Geldseite dürfen nicht überbucht werden.
-- BUY benötigt Belastung; SELL und DIVIDEND Gutschrift; TAX und FEE Belastung.
+- BUY benötigt Belastung; SELL, DIVIDEND und TAX_REFUND Gutschrift; TAX und FEE Belastung.
 - Währungen müssen bei direkter Zuordnung identisch sein.
 - Gleiche Beträge ohne eindeutige Referenz oder exklusive Kandidatenlage werden
   nicht automatisch verbunden.
@@ -56,3 +56,13 @@ Positionszahlen ab; Deka lässt unbekannte Anteile partiell. Konfigurierbare
 PDF-Plugins sind ohne ausdrückliches `complete_snapshot=true` standardmäßig
 partiell. Auch historische transponierte Deka-Tabellen bleiben ohne
 Gesamtnachweis ausdrücklich partiell.
+
+## comdirect und ING (Phase B)
+
+Wertpapierabrechnungen sind cash-neutrale Depotereignisse mit explizitem
+Zahlungskonto. Ein später importierter Kontoumsatz liefert Geldbewegungsbeleg,
+ohne den Kauf, Verkauf, Ertrag oder Steuerbetrag ein zweites Mal in der
+Performance zu erfassen. Brutto, Gebühren und Netto müssen sich je Richtung
+innerhalb eines Cents abstimmen lassen. Bei Vorabpauschalen wird die
+Bemessungsgrundlage nicht als Geldbewegung erfunden; nur ein auf dem Dokument
+ausgewiesener Steuerabzug wird als `TAX` erfasst.

@@ -9,8 +9,12 @@ Funktion nicht als nachgewiesen.
 | Baader Bank | Quartalsaufstellung PDF | unterstützt | synthetische Parserfälle; Depotwertabgleich | Einstandswerte nicht ausgewiesen | weitere echte anonymisierte Layoutversionen; mittel |
 | Baader Bank | Kauf/Verkauf PDF | teilweise | Kauf-/Verkaufs- und Validierungstests | breite Steuer-/FX-/Stornovarianten | Dividende, Steuer, Vorabpauschale, Übertrag; hoch |
 | comdirect | Finanzreport PDF | unterstützt | alte/neue Layouts, Salden und Depotwert; fehlende Schlussseite getestet | einzelne historische Layouts | anonymisierte Varianten; mittel |
-| comdirect | Ertrag/Kauf/Vorabpauschale PDF | teilweise | vorhandene Pluginregressionen | Verkauf, Korrektur, breite FX-/Steuerfälle | geeignete Belege; hoch |
-| ING Deutschland | Kauf/Sparplan/Dividende PDF | teilweise | umfangreiche vorhandene Tests | Verkauf, Steuerkorrektur, FX-Varianten | geeignete Belege; hoch |
+| comdirect | Ertrag/Kauf/Vorabpauschale PDF | teilweise | vorhandene Pluginregressionen | breite FX-/Steuerfälle | geeignete Belege; hoch |
+| comdirect | Verkauf PDF, kompaktes Layout | unterstützt | `compact-v1`, synthetische Fixture, Gebühren-/Richtungstest | separate Steuerbehandlung und historische defekte Schriftlayouts | anonymisierte Originalbelege; mittel |
+| ING Deutschland | Kauf/Sparplan/Dividende PDF | teilweise | umfangreiche vorhandene Tests | weitere FX-/Layoutvarianten | geeignete Belege; mittel |
+| ING Deutschland | Verkauf PDF | unterstützt | `current-v1`, Brutto/Netto/Gebühr/Richtung | Kapitalmaßnahmen- und Altvarianten | anonymisierte Varianten; mittel |
+| ING Deutschland | Vorabpauschale PDF | unterstützt für belegte Variante | `current-v1`, Steuerbasis/Komponenten/Kontobelastung | negative/steuerfreie Varianten | weitere anonymisierte Varianten; mittel |
+| ING Deutschland | nachträgliche Verlustverrechnung PDF | teilweise | `current-v1`, Erstattung und Summenkontrolle | Belastung, Kirchensteuer und mehrseitige Varianten nicht mit Fixture verifiziert | passende Belege; hoch |
 | ING Deutschland | Jahresdepotauszug PDF | unterstützt | Summe, Positionszahl, Seitenüberträge | gescannte Auszüge | anonymisierte Scans; hoch |
 | Deka | Quartalsbericht PDF | teilweise | unvollständige Anteile bleiben `complete=False` | breite Umsätze/Steuern/Wechsel | Belege mit vollständiger Umsatzstrecke; hoch |
 | Deka | Bestände/Umsätze XLSX | teilweise | Spezialimport setzt Bestände sicher partiell | Verkauf, Wechsel, Steuer, Kontrollen | anonymisierte Arbeitsmappen; hoch |
@@ -25,4 +29,6 @@ nach belegter Layoutanalyse eigene Parserregeln.
 Die Phase-A-Änderung betrifft alle sieben Banken gemeinsam: sichere
 Teilzuordnung, vollständige/partielle Zustände und konservative
 Bestandsvollständigkeit. Neue bankspezifische Dokumenttypen wurden bewusst noch
-nicht behauptet.
+nicht behauptet. Die Phase-B-Erweiterungen übernehmen keinen Quellcode aus
+Portfolio Performance. Verglichen wurden Dokumentmerkmale und erwartete
+fachliche Ergebnisse am Commit `805c20dff5d999e987675181b4f1d82f81df10c0`.

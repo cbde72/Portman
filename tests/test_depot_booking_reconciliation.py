@@ -125,7 +125,7 @@ def test_shared_reference_wins_over_an_equal_weak_candidate(tmp_path):
 
 @pytest.mark.parametrize('kind,depot_amount,cash_amount', [
     ('BUY', '-100', '100'), ('SELL', '100', '-100'), ('DIVIDEND', '100', '-100'),
-    ('TAX', '-100', '100'), ('FEE', '-100', '100'),
+    ('TAX', '-100', '100'), ('TAX_REFUND', '100', '-100'), ('FEE', '-100', '100'),
 ])
 def test_automatic_reconciliation_rejects_opposite_payment_direction(
         tmp_path, kind, depot_amount, cash_amount):
@@ -144,7 +144,7 @@ def test_automatic_reconciliation_rejects_opposite_payment_direction(
 
 @pytest.mark.parametrize('kind,depot_amount,cash_amount', [
     ('BUY', '-100', '100'), ('SELL', '100', '-100'), ('DIVIDEND', '100', '-100'),
-    ('TAX', '-100', '100'), ('FEE', '-100', '100'),
+    ('TAX', '-100', '100'), ('TAX_REFUND', '100', '-100'), ('FEE', '-100', '100'),
 ])
 def test_manual_reconciliation_rejects_opposite_payment_direction(
         tmp_path, kind, depot_amount, cash_amount):
@@ -165,7 +165,8 @@ def test_manual_reconciliation_rejects_opposite_payment_direction(
 
 
 @pytest.mark.parametrize('kind,amount', [
-    ('BUY', '-100'), ('SELL', '100'), ('DIVIDEND', '100'), ('TAX', '-100'), ('FEE', '-100'),
+    ('BUY', '-100'), ('SELL', '100'), ('DIVIDEND', '100'), ('TAX', '-100'),
+    ('TAX_REFUND', '100'), ('FEE', '-100'),
 ])
 def test_manual_reconciliation_accepts_matching_payment_direction(tmp_path, kind, amount):
     repo = repository(tmp_path)

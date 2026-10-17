@@ -1,0 +1,14 @@
+ING-DiBa
+Wertpapierabrechnung Verkauf
+Ordernummer 123.456
+Direkt-Depot Nr.: 1234567890
+ISIN (WKN) DE000A1TEST0 (A1TEST)
+Wertpapierbezeichnung Muster ETF
+Nominale Stück 2,00
+Kurs EUR 50,00
+Ausführungstag / -zeit 10.10.2026 um 11:22:33
+Kurswert EUR 100,00
+Provision EUR 1,00
+Endbetrag zu Ihren Gunsten EUR 99,00
+Abrechnungs-IBAN DE11 1111 1111 1111 1111 11
+Valuta 12.10.2026

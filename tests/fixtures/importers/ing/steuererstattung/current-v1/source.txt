@@ -1,0 +1,8 @@
+ING-DiBa
+nachträgliche Verlustverrechnung
+Direkt-Depot Nr.: 1234567890
+Gegenkonto DE11 1111 1111 1111 1111 11
+Valuta 03.01.2026
+Kapitalertragsteuer EUR 2,50
+Solidaritätszuschlag EUR 0,13
+Erstattung/Belastung (-) 2,63

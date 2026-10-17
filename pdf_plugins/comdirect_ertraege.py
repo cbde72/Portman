@@ -41,16 +41,16 @@ AMOUNT = r'[0-9]{1,3}(?:\.[0-9]{3})*,\d{2}|\d+,\d{2}'
 # Older comdirect trade confirmations often have broken embedded fonts and are
 # extracted without spaces.  These patterns therefore use stable ASCII labels
 # and accept both compact and normally spaced text.
-TRADE_MARKER = re.compile(r'Wertpapierkauf', re.I)
-TRADE_FEE = re.compile(r'Provision\s*:?\s*EUR\s*(?P<a>' + AMOUNT + ')', re.I)
+TRADE_MARKER = re.compile(r'Wertpapier(?P<type>kauf|verkauf)', re.I)
+TRADE_FEE = re.compile(r'Provision\s*:?\s*EUR\s*(?:-\s*)?(?P<a>' + AMOUNT + ')', re.I)
 TRADE_LINE = re.compile(
     r'Stk\.\s*(?P<qty>\d[\d.]*(?:,\d+)?)\s*(?P<name>.+?)\s*,?\s*WKN/ISIN\s*:\s*'
     r'(?P<wkn>[A-Z0-9]{6})\s*/\s*(?P<isin>[A-Z]{2}[A-Z0-9]{9}\d)', re.I | re.S)
-TRADE_DAY = re.compile(r'Wertpapierkauf\s*Nr\.?\s*(?P<order>\d+)\s*vom\s*(?P<d>\d{2}\.\d{2}\.\d{4})', re.I)
+TRADE_DAY = re.compile(r'Wertpapier(?P<type>kauf|verkauf)\s*Nr\.?\s*(?P<order>\d+)\s*vom\s*(?P<d>\d{2}\.\d{2}\.\d{4})', re.I)
 TRADE_SETTLEMENT = re.compile(
     r'Valuta\s*(?P<d>\d{2}\.\d{2}\.\d{4}).{0,80}?IBAN\s*(?P<iban>DE\d{20})|'
     r'Valuta.{0,80}?(?P<iban2>DE\d{20})\s*EUR\s*(?P<d2>\d{2}\.\d{2}\.\d{4})', re.I | re.S)
-TRADE_TOTAL = re.compile(r'ZuIhrenLasten(?:nach|vor)Steuern\s*:\s*EUR\s*-?\s*(?P<a>' + AMOUNT + ')', re.I)
+TRADE_TOTAL = re.compile(r'ZuIhren(?P<direction>Lasten|Gunsten)(?:nach|vor)Steuern\s*:\s*EUR\s*-?\s*(?P<a>' + AMOUNT + ')', re.I)
 TRADE_MARKET = re.compile(r'Kurswert\s*:?\s*EUR\s*(?P<a>' + AMOUNT + ')', re.I)
 TRADE_DEPOT = re.compile(r'Depot(?:nummer|nr\.)\s*:?\s*(?P<n>\d+)', re.I)
 TRADE_REFERENCE = re.compile(r'Referenz-Nummer\s*:\s*(?P<r>[A-Z0-9]+)', re.I)
@@ -149,7 +149,7 @@ class ComdirectErtraegePlugin:
     plugin_id = 'user.comdirect-ertraege'
     bank_name = 'comdirect'
     version = '1.1'
-    document_types = ('Dividendengutschrift, Ertragsgutschrift, Einlösung, Wertpapierabrechnung Kauf, '
+    document_types = ('Dividendengutschrift, Ertragsgutschrift, Einlösung, Wertpapierabrechnung Kauf/Verkauf, '
                       'Steuermitteilung Vorabpauschale')
 
     def detect(self, document):
@@ -160,9 +160,12 @@ class ComdirectErtraegePlugin:
         if ADVANCE_TAX_TITLE.search(text) and ADVANCE_TAX_SECURITY.search(text):
             result.append(Detection(0.99, 'comdirect Steuermitteilung Vorabpauschale', 'vorabpauschale',
                                     'comdirect, Vorabpauschale und Wertpapierkennung erkannt'))
-        if TRADE_MARKER.search(text) and TRADE_FEE.search(text):
-            result.append(Detection(0.97, 'comdirect Wertpapierabrechnung Kauf', 'wertpapierkauf',
-                                    'comdirect, Wertpapierkauf und Provision erkannt'))
+        trade_marker = TRADE_MARKER.search(text)
+        if trade_marker and TRADE_FEE.search(text):
+            trade_type = trade_marker.group('type').lower()
+            result.append(Detection(0.97, 'comdirect Wertpapierabrechnung ' + trade_type.title(),
+                                    'wertpapier' + trade_type,
+                                    'comdirect, Wertpapier' + trade_type + ' und Provision erkannt'))
         if not SETTLEMENT.search(text):
             return result
         result.extend(Detection(0.95, handler['title'], handler_id,
@@ -173,7 +176,7 @@ class ComdirectErtraegePlugin:
     def parse(self, document, detection, context):
         if detection.handler_id == 'vorabpauschale':
             return self._advance_tax(document, context.batch)
-        if detection.handler_id == 'wertpapierkauf':
+        if detection.handler_id in ('wertpapierkauf', 'wertpapierverkauf'):
             return self._trade(document, context.batch)
         handler = HANDLERS.get(detection.handler_id)
         if handler is None:
@@ -356,8 +359,14 @@ class ComdirectErtraegePlugin:
         trade = TRADE_DAY.search(compact)
         settlement = TRADE_SETTLEMENT.search(compact)
         total = TRADE_TOTAL.search(compact)
-        if not all((fee, security, trade, settlement, total)):
+        depot = TRADE_DEPOT.search(compact)
+        if not all((fee, security, trade, settlement, total, depot)):
             raise ValueError('Provision, Wertpapier, Geschäftstag, Valuta, IBAN oder Endbetrag nicht erkannt.')
+        kind = Kind.BUY if trade.group('type').lower() == 'kauf' else Kind.SELL
+        expected_direction = 'Lasten' if kind == Kind.BUY else 'Gunsten'
+        if total.group('direction').lower() != expected_direction.lower():
+            raise ValueError(f'Wirtschaftliche Zahlungsrichtung widerspricht {kind}: '
+                             f"Zu Ihren {total.group('direction')} statt zu Ihren {expected_direction}.")
         valuta = parse_date(settlement.group('d') or settlement.group('d2'))
         iban = settlement.group('iban') or settlement.group('iban2')
         trade_day = parse_date(trade.group('d'))
@@ -365,25 +374,31 @@ class ComdirectErtraegePlugin:
         amount, provision = money(total.group('a')), money(fee.group('a'))
         if not all((valuta, trade_day, qty, amount, provision)):
             raise ValueError('Betrag, Provision, Stückzahl oder Datum ungültig.')
-        account = 'IBAN ' + iban
+        cash_account = 'IBAN ' + iban
         isin, wkn = security.group('isin').upper(), security.group('wkn').upper()
         name = ' '.join(security.group('name').split())
         reference = (TRADE_REFERENCE.search(compact).group('r')
                      if TRADE_REFERENCE.search(compact) else trade.group('order'))
-        depot = TRADE_DEPOT.search(compact)
+        account = 'Depot ' + depot.group('n')
         market = TRADE_MARKET.search(compact)
         gross = money(market.group('a')) if market else None
-        if gross is not None and abs(Decimal(gross) + Decimal(provision) - Decimal(amount)) > Decimal('0.01'):
-            batch.warnings.append('Kurswert plus Provision passt nicht zum Endbetrag; Abrechnung bitte prüfen.')
+        expected_total = (Decimal(gross) + Decimal(provision) if kind == Kind.BUY
+                          else Decimal(gross) - Decimal(provision)) if gross is not None else None
+        if expected_total is not None and abs(expected_total - Decimal(amount)) > Decimal('0.01'):
+            batch.warnings.append('Kurswert, Provision und Endbetrag stimmen nicht überein; Abrechnung bitte prüfen.')
         booking_text = f'{name}\nWPKNR: {wkn} ISIN: {isin}'
         purpose = f'Wertpapiere · {name} · WPKNR: {wkn} ISIN: {isin} · Provision {provision} EUR'
-        external_id = 'pdf-comdirect-trade-' + digest([account, trade.group('order'), isin, trade_day, valuta, amount])
+        # Keep the historical BUY identity stable across the model correction
+        # from cash booking to depot event; otherwise a re-import after upgrade
+        # could create a second economic transaction.
+        external_id = 'pdf-comdirect-trade-' + digest(
+            [cash_account, trade.group('order'), isin, trade_day, valuta, amount])
         batch.transactions.append(BankTransaction(
             account=account, external_id=external_id, date=trade_day, value_date=valuta,
-            kind=Kind.BANK_BOOKING, amount='-' + amount, currency='EUR', security=isin,
+            kind=kind, amount=('-' if kind == Kind.BUY else '') + amount, currency='EUR', security=isin,
             quantity=qty, fees=provision, fee_items=[FeeItem('provision', provision)],
             gross_amount=gross, trade_date=trade_day, pay_date=valuta,
-            cash_account=account, depot_account=('Depot ' + depot.group('n')) if depot else '',
+            cash_account=cash_account, depot_account=account, affects_cash=False,
             security_ref=isin, order_id=trade.group('order'), document_reference=reference,
             transaction_reference=reference, operation='Wertpapiere', booking_text=booking_text,
             purpose=purpose, raw_text=purpose,
@@ -396,10 +411,10 @@ class ComdirectErtraegePlugin:
             'ocr': page.used_ocr, 'confidence': page.confidence, 'review_required': page.used_ocr})
         batch.documents.append(BankDocument(
             account, batch.file_hash + ':' + account, document.path.name, trade_day,
-            base64.b64encode(document.content).decode('ascii'), document_type='Wertpapierabrechnung Kauf',
+            base64.b64encode(document.content).decode('ascii'), document_type='Wertpapierabrechnung ' + kind.title(),
             bank_name='comdirect', document_no=reference, page_count=len(document.pages),
             extraction_method='OCR' if page.used_ocr else 'PDF-Text', linked_ids=[external_id]))
-        batch.account_names.append(account)
+        batch.account_names.extend([account, cash_account])
         batch.warnings.append(f'Provision {provision} EUR erkannt; Zuordnung über Valuta, Betrag und WKN/ISIN.')
         return batch
 

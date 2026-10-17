@@ -231,6 +231,8 @@ Referenz-Nummer: 24INLL4XX5T001NI
         '2026-07-23', '2026-07-27', '-41.95', '41.33')
     assert (tx.security, tx.quantity, tx.fees) == ('DE0005933998', '0.620', '0.62')
     assert [(item.kind, item.amount) for item in tx.fee_items] == [('provision', '0.62')]
-    assert tx.account == tx.cash_account == 'IBAN DE84200411330476492400'
-    assert tx.depot_account == 'Depot 476492400'
+    assert tx.kind == 'BUY'
+    assert tx.account == tx.depot_account == 'Depot 476492400'
+    assert tx.cash_account == 'IBAN DE84200411330476492400'
+    assert tx.affects_cash is False
     assert batch.securities[0].wkn == '593399'

@@ -1,7 +1,7 @@
 # Importer-Architektur Portman V09
 
-Stand: Phase A, 17.10.2026. Portman-Basiscommit:
-`b121549790776ce99fe52f932b8a0be6a914edda`. Fachliche Referenz: Portfolio
+Stand: Phase B, 17.10.2026. Portman-Basiscommit:
+`7412d28e6e4bc56eb1ef31fa039c6599dd4feae5`. Fachliche Referenz: Portfolio
 Performance `805c20dff5d999e987675181b4f1d82f81df10c0`. Es wurde kein fremder
 Quellcode übernommen.
 
@@ -62,3 +62,16 @@ Teilzuordnung bleibt der Restbetrag als abgeleitete Sicht der ursprünglichen
 Geldbuchung wirksam. Es wird keine zusätzliche gespeicherte Buchung angelegt.
 Ein Link über eine Auswertungsgrenze neutralisiert nichts, solange nicht beide
 Originale im betrachteten Zeitraum enthalten sind.
+
+## Phase-B-Normalisierung
+
+Verifizierte comdirect- und ING-Wertpapierabrechnungen werden als Depotereignis
+`BUY` oder `SELL` gespeichert; das ausgewiesene IBAN-Konto bleibt als
+`cash_account` erhalten. Der PDF-Beleg erzeugt keine zweite Geldbewegung.
+Eine separat importierte Kontobuchung kann über den Settlementvertrag als
+Beleg desselben wirtschaftlichen Vorgangs zugeordnet werden.
+
+Vorabpauschalen trennen die steuerliche Bemessungsgrundlage (`TaxEvent`) von
+einer tatsächlich ausgewiesenen Kontobelastung (`TAX`). Steuererstattungen sind
+positive `TAX_REFUND`-Cashflows. Auch für diese Typen gelten Komponentenabgleich,
+Richtung, Währung und eindeutige Depotzuordnung.

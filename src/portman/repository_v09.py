@@ -19,7 +19,8 @@ def reference(tx):
 
 def booking_direction_matches(depot_tx, cash_tx):
     """Return whether both records describe the same economic cash direction."""
-    expected = {'BUY': -1, 'SELL': 1, 'DIVIDEND': 1, 'TAX': -1, 'FEE': -1}
+    expected = {'BUY': -1, 'SELL': 1, 'DIVIDEND': 1, 'TAX': -1,
+                'TAX_REFUND': 1, 'FEE': -1}
     direction = expected.get(depot_tx.get('kind'))
     if direction is None:
         return False
