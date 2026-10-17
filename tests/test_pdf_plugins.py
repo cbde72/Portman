@@ -47,6 +47,7 @@ position_regex="(?m)^(?P<isin>[A-Z0-9]{12}) (?P<name>.+) (?P<quantity>[0-9]+) (?
     assert detected.handler_id == 'portfolio'
     assert batch.snapshots[0].account == 'Test Depot 77'
     assert batch.snapshots[0].positions[0].name == 'Apple'
+    assert batch.snapshots[0].complete is False
 
 
 def test_registry_rejects_ambiguous_document_handlers():

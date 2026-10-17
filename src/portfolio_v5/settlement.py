@@ -289,17 +289,38 @@ def performance_transactions(store, transactions, account=None):
         return json.dumps([tx['import_id'], tx.get('depot', tx['account']), tx['external_id']],
                           ensure_ascii=False, separators=(',', ':'))
     active_refs = {tx_ref(tx) for tx in transactions}
-    suppressed_cash_refs = set()
+    cash_allocations = defaultdict(Decimal)
     try:
-        suppressed_cash_refs = {row['cash_ref'] for row in store.db.execute(
-            "SELECT depot_ref,cash_ref FROM transaction_reconciliations WHERE status IN ('matched','manual')")
-                                if row['depot_ref'] in active_refs and row['cash_ref'] in active_refs}
+        for row in store.db.execute(
+                "SELECT depot_ref,cash_ref,allocated_amount FROM transaction_reconciliations "
+                "WHERE status IN ('matched','manual')"):
+            # Only neutralize evidence that is inside the requested performance
+            # boundary.  If one side is outside, the in-boundary cash flow must
+            # remain visible instead of being silently consumed by a remote link.
+            if row['depot_ref'] in active_refs and row['cash_ref'] in active_refs:
+                cash_allocations[row['cash_ref']] += Decimal(row['allocated_amount'])
     except Exception:
         pass  # Older repositories without the additive reconciliation table.
     owners = None
     for original in transactions:
-        if tx_ref(original) in suppressed_cash_refs:
-            continue
+        cash_allocation = cash_allocations.get(tx_ref(original), Decimal())
+        if cash_allocation:
+            original_amount = Decimal(original['amount'])
+            remaining = abs(original_amount) - cash_allocation
+            if remaining < 0:
+                raise ValueError('Geldbuchung ist durch Depotzuordnungen überbucht.')
+            if not remaining:
+                continue
+            # This is an evaluation-only view of the unchanged source booking,
+            # not a stored or invented transaction.  Auxiliary gross/tax/fee
+            # values describe the original booking and must not be duplicated
+            # on its residual share.
+            original = dict(original, amount=str(remaining.copy_sign(original_amount)),
+                            reconciliation_residual=True,
+                            reconciliation_allocated=str(cash_allocation))
+            for field in ('gross_income', 'fees', 'taxes', 'withholding_tax', 'solidarity_tax'):
+                if field in original:
+                    original[field] = None
         tx = dict(original, kind=kind_of(original))
         if tx['kind'] in ('BUY', 'SELL') and tx.get('performance_depot_key'):
             target = records.get(tx['performance_depot_key'])
@@ -333,6 +354,7 @@ def performance_transactions(store, transactions, account=None):
             raise ValueError('Mehrere mögliche Belege für dieselbe Dividende. Bitte die doppelten Importe prüfen.')
         if tx['kind'] in ('BUY', 'SELL') and not tx.get('affects_cash', True):
             tx['amount'] = str(abs(Decimal(tx['amount'])) * (-1 if tx['kind'] == 'BUY' else 1))
-        if tx.get('affects_cash', True) or tx['kind'] in ('DIVIDEND', 'BUY', 'SELL', 'TRANSFER_IN', 'TRANSFER_OUT'):
+        if tx.get('affects_cash', True) or tx['kind'] in (
+                'DIVIDEND', 'TAX', 'FEE', 'BUY', 'SELL', 'TRANSFER_IN', 'TRANSFER_OUT'):
             result.append(tx)
     return result
