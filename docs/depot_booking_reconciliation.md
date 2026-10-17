@@ -55,7 +55,8 @@ geldwirksame Depotbuchungen auf einem erlaubten Konto gelten als
 
 Manuelle Zuordnungen dürfen begründete Teilbeträge enthalten. Die Summe aller
 aktiven Zuordnungen wird dabei sowohl gegen den Depotbeleg als auch gegen den
-Geldbeleg geprüft; eine Überzuordnung wird abgewiesen.
+Geldbeleg geprüft; eine Überzuordnung wird abgewiesen. Auch bei einer manuellen
+Bestätigung muss die wirtschaftliche Zahlungsrichtung übereinstimmen.
 
 ## Datenintegrität und Performance
 
@@ -100,8 +101,8 @@ Renditegrenzen ab.
 
 Abschlussprüfung am 17. Oktober 2026:
 
-- gezielte Abgleichsregressionen: **13 bestanden**;
-- vollständige Testsuite: **940 bestanden, 9 übersprungen**;
+- gezielte Abgleichsregressionen: **23 bestanden**;
+- vollständige Testsuite: **950 bestanden, 9 übersprungen**;
 - Ruff-Prüfung für `src` und `tests`: **ohne Befund**;
 - Depotbestände und Kontosalden blieben vor/nach dem Abgleich identisch;
   TWR und XIRR blieben ebenfalls identisch, und der verknüpfte Geldgegenbeleg

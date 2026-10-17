@@ -141,6 +141,47 @@ def test_automatic_reconciliation_rejects_opposite_payment_direction(
         repo.close()
 
 
+@pytest.mark.parametrize('kind,depot_amount,cash_amount', [
+    ('BUY', '-100', '100'), ('SELL', '100', '-100'), ('DIVIDEND', '100', '-100'),
+    ('TAX', '-100', '100'), ('FEE', '-100', '100'),
+])
+def test_manual_reconciliation_rejects_opposite_payment_direction(
+        tmp_path, kind, depot_amount, cash_amount):
+    repo = repository(tmp_path)
+    try:
+        notice = BankTransaction('Depot', 'notice', '2026-03-02', kind, depot_amount, 'EUR',
+            security='SEC', affects_cash=False, performance_depot_key='depot')
+        cash = BankTransaction('Giro', 'cash', '2026-03-02', 'BANK_BOOKING', cash_amount, 'EUR')
+        repo.store.import_batch(ImportBatch('notice.pdf', 'notice', transactions=[notice]))
+        repo.store.import_batch(ImportBatch('bank.csv', 'bank', transactions=[cash]))
+        txs = {row['external_id']: reference(row) for row in repo.transactions()}
+
+        with pytest.raises(ValueError, match='Zahlungsrichtung'):
+            repo.confirm_booking_link(txs['notice'], txs['cash'], 'Manuell geprüft')
+        assert repo.booking_links() == []
+    finally:
+        repo.close()
+
+
+@pytest.mark.parametrize('kind,amount', [
+    ('BUY', '-100'), ('SELL', '100'), ('DIVIDEND', '100'), ('TAX', '-100'), ('FEE', '-100'),
+])
+def test_manual_reconciliation_accepts_matching_payment_direction(tmp_path, kind, amount):
+    repo = repository(tmp_path)
+    try:
+        notice = BankTransaction('Depot', 'notice', '2026-03-02', kind, amount, 'EUR',
+            security='SEC', affects_cash=False, performance_depot_key='depot')
+        cash = BankTransaction('Giro', 'cash', '2026-03-02', 'BANK_BOOKING', amount, 'EUR')
+        repo.store.import_batch(ImportBatch('notice.pdf', 'notice', transactions=[notice]))
+        repo.store.import_batch(ImportBatch('bank.csv', 'bank', transactions=[cash]))
+        txs = {row['external_id']: reference(row) for row in repo.transactions()}
+
+        repo.confirm_booking_link(txs['notice'], txs['cash'], 'Manuell geprüft')
+        assert len(repo.booking_links()) == 1
+    finally:
+        repo.close()
+
+
 def test_manual_partial_allocations_respect_both_available_amounts(tmp_path):
     repo = repository(tmp_path)
     try:

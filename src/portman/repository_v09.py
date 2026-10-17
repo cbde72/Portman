@@ -212,6 +212,8 @@ class RepositoryV09(RepositoryV07):
             raise ValueError('Das Geldkonto ist für dieses Depot nicht als Zahlungsquelle zugelassen.')
         if depot_tx['currency'] != cash_tx['currency']:
             raise ValueError('Währungen stimmen nicht überein.')
+        if not booking_direction_matches(depot_tx, cash_tx):
+            raise ValueError('Die Zahlungsrichtung passt nicht zur Wertpapierbuchung.')
         try:
             amount = abs(Decimal(str(allocated_amount if allocated_amount is not None else cash_tx['amount'])))
         except Exception:
