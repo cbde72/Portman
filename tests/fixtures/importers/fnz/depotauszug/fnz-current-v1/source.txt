@@ -1,0 +1,8 @@
+FNZ Bank SE
+Depotauszug-Nr. 87
+Depotauszug für Ihr finvesto Depot bei der FNZ Bank
+Depot-Nr. 12345678901
+Bestand Depotpositionen
+Pos. Fonds Anteile Bewertungskurs zum Datum Devisenkurs Bestand
+02 DE0008474511 5,600 100,0000 USD 30.09.2026 1,0000 560,00 EUR
+Depotgesamtwert 560,00 EUR

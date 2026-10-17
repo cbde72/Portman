@@ -57,6 +57,14 @@ PDF-Plugins sind ohne ausdrückliches `complete_snapshot=true` standardmäßig
 partiell. Auch historische transponierte Deka-Tabellen bleiben ohne
 Gesamtnachweis ausdrücklich partiell.
 
+Phase C verschärft dies für FNZ, Deka und Baader: FNZ-Umsatzabrechnungen gelten
+unabhängig von rechnerisch passenden Einzelwerten als partiell; FNZ-
+Quartalsauszüge und Baader-Jahresdepotauszüge benötigen eine passende
+Gesamtsumme. Deka verlangt weiterhin Gesamtwert, stichtagsgleichen Bestand je
+Unterdepot und eindeutige Mengen. Ausschüttung plus Wiederanlage erzeugt einen
+positiven DIVIDEND- und einen gleich hohen negativen BUY-Cashflow, sodass kein
+zusätzlicher Ertrag und keine zusätzliche externe Einzahlung entsteht.
+
 ## comdirect und ING (Phase B)
 
 Wertpapierabrechnungen sind cash-neutrale Depotereignisse mit explizitem

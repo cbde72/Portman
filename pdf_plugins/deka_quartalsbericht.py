@@ -8,15 +8,16 @@ from portfolio_v5.models import (BankDocument, Position, Snapshot, Transaction,
 from portfolio_v5.pdf_plugins import Detection
 from portfolio_v5.booking_details import extract_bank_reference
 
-DIVIDEND_KIND = 'dividende'   # Ausschüttung / Kauf aus Ertrag
+DIVIDEND_KIND = 'DIVIDEND'   # Ausschüttung / Kauf aus Ertrag
 ASSET_TYPE = 'Fonds'
 
 DATE = r'\d{2}\.\d{2}\.\d{4}'
 AMOUNT = r'[0-9]{1,3}(?:\.[0-9]{3})*,\d{2}'
 
-TITLE = re.compile(r'Quartalsbericht\s*per\s*(?P<date>' + DATE + ')')
-OVERVIEW_PAGE = re.compile(r'(?m)^[ \t]*Depotübersicht[ \t]*$')
-TURNOVER_PAGE = re.compile(r'(?m)^[ \t]*Umsatzübersicht[ \t]*$')
+TITLE = re.compile(r'(?P<title>Quartalsbericht|Jahresdepotauszug)\s*per\s*(?P<date>' + DATE + ')')
+OVERVIEW_PAGE = re.compile(r'(?m)^[ \t]*Depot(?:übersicht|�bersicht)[ \t]*$')
+TURNOVER_PAGE = re.compile(
+    r'(?m)^[ \t]*(?:Umsatz(?:übersicht|�bersicht)|Umsatz(?:-|�)Jahres(?:übersicht|�bersicht))[ \t]*$')
 DEPOT = re.compile(r'Depot:\s*(?P<id>\d{6,})')
 OVERVIEW_ROW = re.compile(
     r'(?m)^[ \t]*(?P<isin>[A-Z]{2}[A-Z0-9]{9}\d)[ \t]+(?P<ud>\d{2})[ \t]+(?P<name>\S.*?)[ \t]+'
@@ -39,14 +40,15 @@ class DekaQuartalsberichtPlugin:
     plugin_id = 'user.deka-quartalsbericht'
     bank_name = 'Deka Investments'
     version = '1.0'
-    document_types = 'Quartalsbericht (Depotübersicht, Umsatzübersicht)'
+    document_types = 'Quartalsbericht/Jahresdepotauszug (Depotübersicht, Umsatzübersicht)'
 
     def detect(self, document):
         text = document.text
         if not (re.search(r'Deka', text) and TITLE.search(text) and OVERVIEW_PAGE.search(text)):
             return []
-        return [Detection(0.95, 'Deka Quartalsbericht', 'quartalsbericht',
-                          'Deka, Quartalsbericht und Depotübersicht erkannt')]
+        title = TITLE.search(text).group('title')
+        return [Detection(0.95, f'Deka {title}', 'quartalsbericht',
+                          f'Deka, {title} und Depotübersicht erkannt')]
 
     def parse(self, document, detection, context):
         if any(page.used_ocr for page in document.pages):
@@ -128,12 +130,24 @@ class DekaQuartalsberichtPlugin:
                         moved += Decimal(correction_number(dist.group('shares')))
                         line_no = page.text[:offset + dated.start()].count('\n') + 1
                         reference = extract_bank_reference(line)
+                        event_key = digest([account, row['ud'], row['isin'], booked, amount,
+                                            dist.group('shares')])
+                        dividend_id = 'pdf-deka-' + event_key + '-dividend'
+                        buy_id = 'pdf-deka-' + event_key + '-reinvestment'
                         transactions.append(Transaction(
                             account=account, security=row['isin'], kind=DIVIDEND_KIND,
                             date=booked, amount=amount, currency='EUR', row=line_no,
-                            document_reference=reference,
-                            external_id='pdf-deka-' + digest([account, row['ud'], row['isin'], booked, amount,
-                                                              dist.group('shares')])))
+                            document_reference=reference, security_ref=row['isin'],
+                            group_id='deka-reinvestment-' + event_key, related_ids=[buy_id],
+                            external_id=dividend_id))
+                        transactions.append(Transaction(
+                            account=account, security=row['isin'], kind='BUY',
+                            date=booked, amount='-' + amount, currency='EUR', row=line_no,
+                            quantity=correction_number(dist.group('shares').lstrip('+')),
+                            price=correction_number(dist.group('price')), price_currency='EUR',
+                            document_reference=reference, security_ref=row['isin'], depot_account=account,
+                            order_subtype='wiederanlage', group_id='deka-reinvestment-' + event_key,
+                            related_ids=[dividend_id], external_id=buy_id))
                         evidence.append({'page': page.number, 'line': line_no, 'text': ' '.join(line.split()),
                                          'ocr': False, 'confidence': None, 'review_required': False})
                     if opening and Decimal(quantity) != Decimal(correction_number(opening[0].group('shares'))) + moved:
@@ -161,8 +175,8 @@ class DekaQuartalsberichtPlugin:
         if not complete:
             batch.warnings.append('Nicht für alle Unterdepots sind Anteile bekannt; Bestände bitte prüfen.')
         if transactions:
-            batch.warnings.append('Ausschüttungen wurden wiederangelegt (Kauf aus Ertrag); der Anteilszuwachs '
-                                  'steckt im Bestand, es wurde keine Kaufbuchung erzeugt.')
+            batch.warnings.append('Ausschüttung und Wiederanlage wurden als verknüpfter Ertrag und Kauf erfasst; '
+                                  'der Stichtagsbestand bleibt die maßgebliche Bestandskontrolle.')
         return batch
 
 

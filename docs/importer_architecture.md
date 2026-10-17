@@ -1,7 +1,7 @@
 # Importer-Architektur Portman V09
 
-Stand: Phase B, 17.10.2026. Portman-Basiscommit:
-`7412d28e6e4bc56eb1ef31fa039c6599dd4feae5`. Fachliche Referenz: Portfolio
+Stand: Phase C, 17.10.2026. Portman-Basiscommit:
+`1dfdd4ad6d3a736d8bde513bd5d0826e5e64bb9b`. Fachliche Referenz: Portfolio
 Performance `805c20dff5d999e987675181b4f1d82f81df10c0`. Es wurde kein fremder
 Quellcode übernommen.
 
@@ -75,3 +75,22 @@ Vorabpauschalen trennen die steuerliche Bemessungsgrundlage (`TaxEvent`) von
 einer tatsächlich ausgewiesenen Kontobelastung (`TAX`). Steuererstattungen sind
 positive `TAX_REFUND`-Cashflows. Auch für diese Typen gelten Komponentenabgleich,
 Richtung, Währung und eindeutige Depotzuordnung.
+
+## Phase-C-Normalisierung
+
+Baader-Dividenden und Vorabpauschalen sind cash-neutrale Depotbelege mit
+explizitem Zahlungskonto. Steuerkomponenten, Brutto und Netto werden
+abgestimmt. Depotüberträge bleiben mengenbezogene Ereignisse ohne erfundenen
+Cashflow; Jahresdepotauszüge sind nur nach Depotwertabgleich vollständig.
+
+FNZ Bank (ehemals ebase) besitzt eine eigene Quellidentität und wird nicht mit
+finanzen.net zero gleichgesetzt. Umsatzabrechnungen sind wegen ihrer expliziten
+Beschränkung auf bewegte Positionen immer partielle Snapshots. Ein
+Quartalsdepotauszug wird erst nach Positionssummenabgleich vollständig.
+Ausschüttung und Wiederanlage werden als verknüpfter Ertrag und neuer Kauf
+gespeichert.
+
+Deka behandelt den belegten Vorgang „Ausschüttung / Kauf aus Ertrag“ ebenfalls
+als zwei verknüpfte Ereignisse mit Cashflowsumme null. Quartalsberichte und
+historische Jahresdepotauszüge teilen dieselbe konservative Bestandsprüfung;
+nicht eindeutig belegte Umsatzarten werden nur gewarnt, nicht geraten.

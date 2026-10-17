@@ -2,7 +2,8 @@ import base64
 import re
 from decimal import Decimal
 
-from portfolio_v5.models import BankDocument, BankTransaction, Position, Snapshot, parse_date, valid_isin
+from portfolio_v5.models import (BankDocument, BankTransaction, Position, SecurityInfo, Snapshot,
+                                 TaxEvent, TaxItem, Transaction, parse_date, valid_isin)
 from portfolio_v5.importers import asset_type
 
 NUMBER = r'\d[\d.]*(?:,\d+)?'
@@ -22,7 +23,116 @@ def required(pattern, text):
 def is_baader_portfolio(pages):
     text = '\n'.join(pages)
     return ('Baader Bank' in text and bool(re.search(r'Depot-Nr\.:\s*\d+', text))
-            and bool(re.search(r'Quartalsaufstellung|Wertpapierabrechnung:', text)))
+            and bool(re.search(r'Quartalsaufstellung|Wertpapierabrechnung:|Dividendenabrechnung|Vorabpauschale|'
+                               r'Depotauszug\s+per|Depoteinlieferung|Depotauslieferung', text)))
+
+
+def security_header(text):
+    match = required(r'Nominale\s+ISIN:\s*([A-Z0-9]{12})\s+WKN:\s*(\w{6})[^\n]*\n\s*STK\s+(' + NUMBER + r')\s+([^\n]+)', text)
+    isin, wkn, quantity, rest = match[1], match[2], number(match[3]), match[4].strip()
+    if not valid_isin(isin) or quantity <= 0:
+        raise ValueError('Ungültige ISIN oder Stückzahl im Baader-Ereignis.')
+    return isin, wkn, quantity, rest
+
+
+def tax_items(text):
+    patterns = (('kapitalertragsteuer', r'^\s*Kapitalertragsteuer\s+EUR\s+(' + NUMBER + r')\s*-?\s*$'),
+                ('solidaritaetszuschlag', r'^\s*Solidaritätszuschlag\s+EUR\s+(' + NUMBER + r')\s*-?\s*$'),
+                ('kirchensteuer', r'^\s*Kirchensteuer\s+EUR\s+(' + NUMBER + r')\s*-?\s*$'),
+                ('quellensteuer', r'^\s*(?:US-)?Quellensteuer\s+EUR\s+(' + NUMBER + r')\s*-?\s*$'))
+    return [TaxItem(kind, str(number(match[1]))) for kind, pattern in patterns
+            for match in [re.search(pattern, text, re.M)] if match and number(match[1])]
+
+
+def parse_baader_income(batch, text, account):
+    isin, wkn, quantity, rest = security_header(text)
+    settlement = required(r'Zu\s+Gunsten\s+Konto\s+(\d+)\s+Valuta:\s*(' + r'\d{2}\.\d{2}\.\d{4}' +
+                          r')\s+([A-Z]{3})\s+(' + NUMBER + r')', text)
+    day, amount, currency = parse_date(settlement[2]), number(settlement[4]), settlement[3]
+    reference = required(r'Referenz-Nr\.:\s*(\d+)', text)[1]
+    items = tax_items(text)
+    taxes = sum((Decimal(item.amount) for item in items), Decimal())
+    tx = BankTransaction(
+        account=account, external_id='baader-income-' + reference, date=day, value_date=day,
+        kind='DIVIDEND', amount=str(amount), currency=currency, security=isin,
+        security_ref=isin, quantity=str(quantity), taxes=str(taxes) if taxes else None,
+        tax_items=items, gross_amount=str(amount + taxes), gross_income=str(amount + taxes),
+        gross_currency=currency, income_basis='net', cash_account='Baader Konto ' + settlement[1],
+        depot_account=account, affects_cash=False, bank_reference=reference,
+        document_reference=reference, purpose=rest)
+    batch.transactions.append(tx)
+    batch.securities.append(SecurityInfo(key=isin, isin=isin, wkn=wkn, name=rest))
+    return day
+
+
+def parse_baader_advance_tax(batch, text, account):
+    isin, wkn, quantity, rest = security_header(text)
+    settlement = required(r'Zu\s+Lasten\s+Konto\s+(\d+)\s+Valuta:\s*(' + r'\d{2}\.\d{2}\.\d{4}' +
+                          r')\s+([A-Z]{3})\s+(' + NUMBER + r')', text)
+    day, amount, currency = parse_date(settlement[2]), number(settlement[4]), settlement[3]
+    reference = required(r'Referenz-Nr\.:\s*(\d+)', text)[1]
+    items = tax_items(text)
+    taxes = sum((Decimal(item.amount) for item in items), Decimal())
+    if abs(taxes - amount) > Decimal('.01'):
+        raise ValueError('Baader-Steuerkomponenten passen nicht zur Vorabpauschalen-Belastung.')
+    bases = re.findall(r'Bemessungsgrundlage\s+zur\s+Kapitalertragsteuer\s+EUR\s+(' + NUMBER +
+                       r')\s+EUR\s+(' + NUMBER + r')', text)
+    taxable = str(number(bases[-1][1])) if bases else None
+    event_id = 'baader-advance-' + reference
+    batch.tax_events.append(TaxEvent(
+        external_id=event_id, account=account, type='vorabpauschale', date=day,
+        tax_year=day[:4], security_ref=isin, quantity=str(quantity), currency=currency,
+        taxable_income=taxable, reference_no=reference))
+    batch.transactions.append(BankTransaction(
+        account=account, external_id=event_id + '-tax', date=day, value_date=day,
+        kind='TAX', amount='-' + str(amount), currency=currency, security=isin,
+        security_ref=isin, quantity=str(quantity), taxes=str(amount), tax_items=items,
+        cash_account='Baader Konto ' + settlement[1], depot_account=account, affects_cash=False,
+        bank_reference=reference, document_reference=reference, purpose='Vorabpauschale ' + rest))
+    batch.securities.append(SecurityInfo(key=isin, isin=isin, wkn=wkn, name=rest))
+    return day
+
+
+def parse_baader_transfer(batch, text, account):
+    inbound = 'Depoteinlieferung' in text
+    isin, wkn, quantity, rest = security_header(text)
+    valuta = required(r'Lagerstelle:\s*\d+\s+Valuta:\s*(\d{2}\.\d{2}\.\d{4})', text)[1]
+    day = parse_date(valuta)
+    reference = required(r'(?:EINLIEFERUNG|AUSLIEFERUNG)-(\d+[.]\d+)', text,)[1]
+    batch.transactions.append(Transaction(
+        account=account, external_id='baader-transfer-' + reference, date=day,
+        kind='TRANSFER_IN' if inbound else 'TRANSFER_OUT', amount='0', currency='EUR',
+        security=isin, security_ref=isin, quantity=str(quantity), depot_account=account,
+        document_reference=reference, transaction_reference=reference))
+    batch.securities.append(SecurityInfo(key=isin, isin=isin, wkn=wkn, name=rest))
+    return day
+
+
+def parse_baader_statement(batch, text, account):
+    day = parse_date(required(r'Depotauszug\s+per\s+(\d{2}\.\d{2}\.\d{4})', text)[1])
+    starts = list(re.finditer(r'^\s*Stück\s+(' + NUMBER + r')\s+WKN:\s*(\w{6})\s+([A-Z]{3})\s+(' +
+                              NUMBER + r')\s+(' + NUMBER + r')\s+EUR\s*$', text, re.M))
+    positions = []
+    for index, row in enumerate(starts):
+        end = starts[index + 1].start() if index + 1 < len(starts) else len(text)
+        block = text[row.start():end]
+        isin = required(r'ISIN:\s*([A-Z0-9]{12})', block)[1]
+        if not valid_isin(isin):
+            raise ValueError('Ungültige ISIN im Baader-Jahresdepotauszug.')
+        name_match = re.search(r'ISIN:[^\n]*\n\s*([^\n]+)', block)
+        name = name_match[1].strip() if name_match else 'Baader Wertpapier ' + isin
+        positions.append(Position(
+            key=isin, name=name, isin=isin, wkn=row[2], quantity=str(number(row[1])),
+            value=str(number(row[5])), currency='EUR', quote_date=day,
+            price=str(number(row[4])), price_currency=row[3]))
+    total = number(required(r'Depotwert\s+(' + NUMBER + r')\s+EUR', text)[1])
+    if not positions or abs(sum((Decimal(p.value) for p in positions), Decimal()) - total) > Decimal('.01'):
+        raise ValueError('Baader-Jahresbestand ist leer oder stimmt nicht mit dem Depotwert überein.')
+    batch.snapshots.append(Snapshot(
+        account=account, period=day[:7], as_of=day, sheet='Baader Jahresdepotauszug',
+        positions=positions, complete=True, reported_total_value=str(total),
+        reported_position_count=len(positions), statement_type='Jahresdepotauszug'))
+    return day
 
 
 def parse_baader_portfolio(batch, pages, content):
@@ -33,7 +143,19 @@ def parse_baader_portfolio(batch, pages, content):
     batch.pdf_text = text
     if re.search(r'\bStorno\b|\bStornierung\b', text, re.I):
         raise ValueError('Baader-Stornobeleg muss mit der ursprünglichen Abrechnung abgeglichen werden.')
-    if 'Quartalsaufstellung' in text:
+    if 'Dividendenabrechnung' in text:
+        batch.document_type = 'Baader Dividendenabrechnung'
+        day = parse_baader_income(batch, text, account)
+    elif 'Vorabpauschale' in text:
+        batch.document_type = 'Baader Vorabpauschale'
+        day = parse_baader_advance_tax(batch, text, account)
+    elif 'Depoteinlieferung' in text or 'Depotauslieferung' in text:
+        batch.document_type = 'Baader Depotein-/auslieferung'
+        day = parse_baader_transfer(batch, text, account)
+    elif re.search(r'Depotauszug\s+per', text):
+        batch.document_type = 'Baader Jahresdepotauszug'
+        day = parse_baader_statement(batch, text, account)
+    elif 'Quartalsaufstellung' in text:
         batch.document_type = 'Baader Quartalsaufstellung'
         day = parse_date(required(r'MIFID II per\s+(\d{2}\.\d{2}\.\d{4})', text)[1])
         if not day:
