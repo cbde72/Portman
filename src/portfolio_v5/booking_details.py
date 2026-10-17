@@ -1,6 +1,8 @@
 """Preserve full bank text and extract only identifiable labelled details."""
 import re
 
+from .models import TaxItem
+
 DETAIL_FIELDS = ('purpose', 'counterparty', 'bank_reference', 'operation', 'booking_text',
                  'counterparty_iban', 'counterparty_bic', 'raw_text')
 
@@ -96,5 +98,41 @@ def enrich_details(tx):
         if match:
             tx.counterparty = match[1].strip()
     tx.purpose = readable_purpose(tx)
+
+
+def classify_cash_booking(tx):
+    """Classify only explicit cash-account wording; never infer from the sign alone."""
+    text = ' '.join((tx.booking_text or tx.purpose or tx.raw_text or '').split())
+    amount = tx.amount or '0'
+    negative = amount.startswith('-')
+    if re.match(
+            r'^(?:Vorgang:\s*)?(?:(?:Storno\s+)?Abschluss|Bonuszins(?:en)?|Habenzins(?:en)?|'
+            r'Zins(?:en|gutschrift)?|Zinsen/Kontof.hrung)\b', text, re.I):
+        tx.kind = 'INTEREST'
+        return tx
+    tax_patterns = (
+        ('kapitalertragsteuer', r'\b(?:Kapitalertragsteuer|Kapitalertragssteuer|Abgeltungssteuer|Kap\.\s*Steuer)\b'),
+        ('solidaritaetszuschlag', r'\b(?:Solid(?:arit.t)?s?\.?-?Zuschlag|Sol\.?\s*Zuschl)\b'),
+        ('kirchensteuer', r'\bKirchensteuer\b'),
+    )
+    tax_kind = next((kind for kind, pattern in tax_patterns if re.search(pattern, text, re.I)), None)
+    if tax_kind:
+        tx.kind = 'TAX' if negative else 'TAX_REFUND'
+        if negative:
+            value = amount.lstrip('-')
+            tx.taxes = value
+            tx.tax_items = [TaxItem(tax_kind, value)]
+        return tx
+    if negative and re.match(r'^(?:Vorgang:\s*)?(?:Gebühr|Gebuehr|Entgelt)\b', text, re.I):
+        tx.kind = 'FEE'
+        tx.fees = amount.lstrip('-')
+        return tx
+    transfer = re.search(
+        r'\b(?:Zahlungseingang|Überweisungs?-?Gutschrift|Ueberweisungs?-?Gutschrift|'
+        r'Dauerauftrags?gutschr(?:ift)?|Internet-Euro-Überweisung|Überweisung|Ueberweisung|'
+        r'Einzahlung|Auszahlung|Kontoübertrag)\b', text, re.I)
+    if transfer:
+        tx.kind = 'WITHDRAWAL' if negative else 'DEPOSIT'
+    return tx
 
 

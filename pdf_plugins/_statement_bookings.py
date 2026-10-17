@@ -5,7 +5,7 @@ from decimal import Decimal
 import re
 
 from portfolio_v5.models import BankTransaction, digest, money, parse_date
-from portfolio_v5.booking_details import enrich_details
+from portfolio_v5.booking_details import classify_cash_booking, enrich_details
 
 DATE = r'\d{2}\.\d{2}\.(?:\d{4})?'
 ROW = re.compile(r'^\s*(?P<date>' + DATE + r')\s+(?P<body>.+)$')
@@ -117,6 +117,7 @@ def parse_bookings(pages, identify):
                 tx, source_line, source_row = pending
                 tx.purpose = ' '.join(tx.purpose.split())
                 enrich_details(tx)
+                classify_cash_booking(tx)
                 identity = digest([tx.account, tx.date, tx.value_date, tx.amount, tx.currency, tx.purpose])
                 occurrences[identity] += 1
                 tx.external_id = f'pdf-booking-{identity}-{occurrences[identity]}'

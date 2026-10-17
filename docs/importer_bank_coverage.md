@@ -24,8 +24,8 @@ Funktion nicht als nachgewiesen.
 | FNZ Bank (ehemals ebase) | Umsatzabrechnung PDF | teilweise | anonymisierte `fnz-current-v1`; 12 lokale Dokumente geprüft | Verkauf, Vorabpauschale, Übertrag, reine Gebührenfälle | passende anonymisierte Belege; hoch |
 | FNZ Bank (ehemals ebase) | Quartalsdepotauszug PDF | unterstützt für belegte Variante | Gesamtsummenabgleich, Manipulationstest | weitere Layoutversionen | anonymisierte Varianten; mittel |
 | FNZ Bank (ehemals ebase) | historischer ebase-Kontoauszug PDF | nicht verifiziert | lokales Dokument ohne Buchungszeilen | Konto-Umsätze und Saldenfolge | Auszug mit anonymisierten Umsätzen; hoch |
-| Renault Bank direkt | Kontoauszug PDF/FinTS | unterstützt für bekannte Layouts | Saldenabgleich und Überlappungstests | weitere Layouts/Stornos | mehrseitige anonymisierte Auszüge; mittel |
-| Bank of Scotland | Kontoauszug PDF | unterstützt für bekannte Layouts | Saldenabgleich | weitere Layouts/Stornos | mehrseitige anonymisierte Auszüge; mittel |
+| Renault Bank direkt | Kontoauszug PDF/FinTS | unterstützt für belegte Layouts | 200 lokale PDFs; Zins, KapESt, Soli, Erstattung, Valuta, Storno, Saldo, Überlappung | Kirchensteuer und weitere Korrekturtexte nicht lokal belegt | anonymisierte Varianten; mittel |
+| Bank of Scotland | Kontoauszug PDF | unterstützt für belegte Layouts | 75 lokale PDFs; 17 vollständige Auszüge; Zins, Abgeltungssteuer, Soli, Valuta, Mehrseitigkeit | Steuererstattung, Storno und Kirchensteuer nicht lokal belegt | passende anonymisierte Belege; mittel |
 
 FNZ Bank wird weder in Erkennung noch Kontenmodell mit finanzen.net zero
 gleichgesetzt. Die eigene Erkennung stützt sich auf verifizierte FNZ-/finvesto-

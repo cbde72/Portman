@@ -69,9 +69,17 @@ werden nicht spekulativ interpretiert.
 
 ## Phase D – Renault Bank und Bank of Scotland
 
-Geplant: mehrseitige und überlappende Kontoauszüge, Valuta/Buchung,
-Zins-/Steuer-/Stornofälle und weitere Layoutversionen. Beide Quellen bleiben
-Geldkonten, solange Belege keine Wertpapierfunktion nachweisen.
+Umgesetzt auf `codex/importers-renault-bos`: gemeinsame explizite
+Cash-Klassifikation für Renault-PDF/FinTS und Bank of Scotland, Zinsen,
+Kapitalertrag-/Abgeltungssteuer, Soli, Renault-Steuererstattung, Valuta,
+Storno, mehrseitige Auszüge, Saldenabgleich sowie stabile IDs für überlappende
+und wiederholte Importe. Beide Quellen bleiben reine Geldkonten.
+
+Nicht verifiziert bleiben Renault-Kirchensteuer und weitere Korrekturtexte
+sowie BoS-Steuererstattung, Storno, Kirchensteuer und nicht vorliegende
+Layoutfamilien. Portfolio Performance besitzt am untersuchten Commit einen
+Renault-Extractor mit 13 Textfixtures, aber keinen nachgewiesenen eigenen
+Bank-of-Scotland-Extractor. Es wurde kein fremder Quellcode übernommen.
 
 ## Fehlende Nachweise
 

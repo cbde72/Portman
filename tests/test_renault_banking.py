@@ -13,6 +13,7 @@ from portman import renault_dialog as ui
 from portman.renault_banking import fetch_renault, create_client, ENDPOINT, BankingError
 from portman.renault_credentials import RenaultCredentialStore
 from portman.baader_credentials import BaaderCredentialStore
+from portman.ing_history import parse_transactions
 from portman.repository import PortfolioRepository
 
 
@@ -59,6 +60,16 @@ def test_renault_endpoint_and_http_safety():
     assert call.kwargs['allow_redirects'] is False
     assert call.kwargs['timeout'] == (10, 30)
     c.connection.session.close()
+
+
+def test_renault_fints_uses_same_explicit_cash_classification():
+    rows = [transaction(amount='10.00', purpose='Zinsgutschrift'),
+            transaction(amount='-2.50', purpose='Kapitalertragsteuer'),
+            transaction(amount='2.50', purpose='Steuererstattung Kap.Steuer')]
+    parsed = parse_transactions(rows, 'Renault', date(2026, 9, 1), date(2026, 9, 30),
+                                source_prefix='renault')
+    assert {(tx.kind, tx.amount) for tx in parsed} == {
+        ('INTEREST', '1E+1'), ('TAX', '-2.5'), ('TAX_REFUND', '2.5')}
 
 
 def test_refresh_replaces_only_target_balance_and_is_idempotent(tmp_path):

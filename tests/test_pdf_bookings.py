@@ -22,7 +22,7 @@ neuer Kontostand vom 31.01.2026 120,00 H''')
     assert [(t.date, t.amount) for t in transactions] == [('2025-12-31', '25.00'), ('2026-01-02', '-5.00')]
     assert not warnings
     assert evidence[0]['page'] == 1
-    assert all(t.kind == 'BANK_BOOKING' for t in transactions)
+    assert [t.kind for t in transactions] == ['DEPOSIT', 'FEE']
 
 
 def test_multiple_accounts_same_page_and_counterparty_does_not_switch():

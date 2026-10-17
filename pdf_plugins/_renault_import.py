@@ -87,7 +87,8 @@ def prepare_renault_batch(repository, original):
     batch.replace_bank_bookings = [
         {key: tx[key] for key in ('import_id', 'depot', 'external_id')}
         for tx in repository.transactions()
-        if tx['account'] == target_name and tx['kind'] == 'BANK_BOOKING'
+        if tx['account'] == target_name and tx['kind'] in (
+            'BANK_BOOKING', 'DEPOSIT', 'WITHDRAWAL', 'INTEREST', 'TAX', 'TAX_REFUND', 'FEE')
         and start.isoformat() <= tx['date'] <= end.isoformat()]
     return batch
 
