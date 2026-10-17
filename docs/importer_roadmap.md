@@ -46,6 +46,14 @@ Verlustverrechnung und weitere FX-/Kirchensteuervarianten. Dafür fehlen
 freigegebene anonymisierte Originalbelege; es wurden bewusst keine
 spekulativen Regeln ergänzt.
 
+Nachprüfung mit lokal bereitgestellten Dokumenten: Zwei ING-Verkäufe bestätigen
+das implementierte Layout sowohl mit als auch ohne ausgewiesene Gebühr. Die
+comdirect-Sammlung bestätigt ein weiteres kompaktes Kauf-/Steuerlayout, dessen
+eingebettete Schrift Stückzahlen teilweise als null extrahiert. Solche Belege
+werden nun ausdrücklich abgewiesen statt mit falschem Bestand importiert.
+Mangels verfügbarer lokaler OCR-Laufzeit und sicher lesbarer Stückzahl bleibt
+dieses Layout teilweise unterstützt.
+
 ## Phase C – Baader, FNZ/ebase und Deka
 
 Geplant: Baader-Ertrag/Steuer/Kapitalmaßnahme, eigener FNZ-/ebase-Importer mit

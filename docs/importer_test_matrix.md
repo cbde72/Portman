@@ -53,6 +53,8 @@ Integritätslauf ergab 122 bestandene und 6 übersprungene Tests. Ruff,
 | ING Vorabpauschale | `ing/vorabpauschale/current-v1`; `test_ing_advance_tax_separates_tax_basis_from_cash_debit` | Steuerbasis und tatsächliche Belastung bleiben getrennt |
 | ING Steuererstattung | `ing/steuererstattung/current-v1`; `test_ing_tax_refund_has_positive_economic_direction` | positive Erstattung, Komponenten vollständig |
 | Manipulierte Steuerkorrektur | `test_ing_tax_refund_rejects_inconsistent_components` | abweichende Summe wird nicht importiert |
+| ING Original-Verkäufe | lokaler, nicht eingecheckter Prüflauf über zwei Belege | beide SELL positiv; mit/ohne Gebühr abgestimmtes Brutto/Netto; Depot- und Zahlungskonto vorhanden |
+| comdirect defekte PDF-Schrift | `test_comdirect_unreadable_zero_quantity_is_never_booked` plus lokaler Originalbeleg | extrahierte Null-Stückzahl erzeugt keine Finanzbuchung |
 
 Die Fixtures sind synthetisch und anonymisiert; jede Fixture enthält einen
 Provenienznachweis. Nicht durch eine Fixture belegte Varianten werden in der
@@ -66,3 +68,12 @@ erfolgreich. Die Finanzinvarianten für Bestand, Geldsaldo, Einstand,
 realisierten Gewinn sowie TWR, Modified Dietz und XIRR werden durch die
 bestehenden End-to-End-Regressionsszenarien zusammen mit den neuen
 Cashflow-Richtungs- und Doppelerfassungsfällen abgedeckt.
+
+Nachprüfung mit den lokal bereitgestellten Dokumenten: **972 bestanden, 9
+übersprungen, 5 Subtests bestanden, 0 fehlgeschlagen** in 326,45 Sekunden.
+Der Zuwachs umfasst die gebührenfreie ING-Verkaufsvariante und die sichere
+Abweisung nicht lesbarer comdirect-Stückzahlen.
+
+Die vom Nutzer lokal unter `history/comdirect` und `history/ing`
+bereitgestellten Originale bleiben außerhalb des Repositories. Es werden weder
+Dateinamen noch Personen-, Konto-, Depot- oder Dokumentnummern committed.

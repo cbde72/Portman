@@ -4,7 +4,7 @@ import re
 from decimal import Decimal
 
 from portfolio_v5.models import (BankDocument, BankTransaction, FeeItem, Kind, SecurityInfo,
-                                 TaxEvent, correction_number, digest, money, parse_date)
+                                 TaxEvent, TaxItem, correction_number, digest, money, parse_date)
 from portfolio_v5.pdf_plugins import Detection
 
 DIVIDEND_KIND = Kind.DIVIDEND      # Dividenden und Fonds-Ausschüttungen
@@ -54,6 +54,12 @@ TRADE_TOTAL = re.compile(r'ZuIhren(?P<direction>Lasten|Gunsten)(?:nach|vor)Steue
 TRADE_MARKET = re.compile(r'Kurswert\s*:?\s*EUR\s*(?P<a>' + AMOUNT + ')', re.I)
 TRADE_DEPOT = re.compile(r'Depot(?:nummer|nr\.)\s*:?\s*(?P<n>\d+)', re.I)
 TRADE_REFERENCE = re.compile(r'Referenz-Nummer\s*:\s*(?P<r>[A-Z0-9]+)', re.I)
+TRADE_TAX_TOTAL = re.compile(r'abgef.hrteSteuern\s*:?\s*EUR\s*-?\s*(?P<a>' + AMOUNT + ')', re.I)
+TRADE_TAX_ITEMS = {
+    'kapitalertragsteuer': re.compile(r'Kapitalertragsteuer\s*:?\s*EUR\s*-?\s*(?P<a>' + AMOUNT + ')', re.I),
+    'solidaritaetszuschlag': re.compile(r'Solidarit.tszuschlag\s*:?\s*EUR\s*-?\s*(?P<a>' + AMOUNT + ')', re.I),
+    'kirchensteuer': re.compile(r'Kirchensteuer\s*:?\s*EUR\s*-?\s*(?P<a>' + AMOUNT + ')', re.I),
+}
 
 
 def short_date(value):
@@ -161,7 +167,8 @@ class ComdirectErtraegePlugin:
             result.append(Detection(0.99, 'comdirect Steuermitteilung Vorabpauschale', 'vorabpauschale',
                                     'comdirect, Vorabpauschale und Wertpapierkennung erkannt'))
         trade_marker = TRADE_MARKER.search(text)
-        if trade_marker and TRADE_FEE.search(text):
+        compact = re.sub(r'[ \t]+', '', text)
+        if trade_marker and TRADE_TOTAL.search(compact) and TRADE_MARKET.search(compact):
             trade_type = trade_marker.group('type').lower()
             result.append(Detection(0.97, 'comdirect Wertpapierabrechnung ' + trade_type.title(),
                                     'wertpapier' + trade_type,
@@ -360,8 +367,8 @@ class ComdirectErtraegePlugin:
         settlement = TRADE_SETTLEMENT.search(compact)
         total = TRADE_TOTAL.search(compact)
         depot = TRADE_DEPOT.search(compact)
-        if not all((fee, security, trade, settlement, total, depot)):
-            raise ValueError('Provision, Wertpapier, Geschäftstag, Valuta, IBAN oder Endbetrag nicht erkannt.')
+        if not all((security, trade, settlement, total, depot)):
+            raise ValueError('Wertpapier, Geschäftstag, Valuta, IBAN oder Endbetrag nicht erkannt.')
         kind = Kind.BUY if trade.group('type').lower() == 'kauf' else Kind.SELL
         expected_direction = 'Lasten' if kind == Kind.BUY else 'Gunsten'
         if total.group('direction').lower() != expected_direction.lower():
@@ -371,9 +378,12 @@ class ComdirectErtraegePlugin:
         iban = settlement.group('iban') or settlement.group('iban2')
         trade_day = parse_date(trade.group('d'))
         qty = correction_number(security.group('qty'))
-        amount, provision = money(total.group('a')), money(fee.group('a'))
-        if not all((valuta, trade_day, qty, amount, provision)):
+        amount = money(total.group('a'))
+        if not all((valuta, trade_day, qty, amount)):
             raise ValueError('Betrag, Provision, Stückzahl oder Datum ungültig.')
+        if Decimal(qty) <= 0:
+            raise ValueError('Stückzahl ist wegen der eingebetteten PDF-Schrift nicht sicher lesbar; '
+                             'Dokument nicht automatisch verbucht.')
         cash_account = 'IBAN ' + iban
         isin, wkn = security.group('isin').upper(), security.group('wkn').upper()
         name = ' '.join(security.group('name').split())
@@ -382,12 +392,34 @@ class ComdirectErtraegePlugin:
         account = 'Depot ' + depot.group('n')
         market = TRADE_MARKET.search(compact)
         gross = money(market.group('a')) if market else None
+        tax_total_match = TRADE_TAX_TOTAL.search(compact)
+        taxes = money(tax_total_match.group('a')) if tax_total_match else '0.00'
+        tax_items = [TaxItem(name, money(match.group('a'))) for name, pattern in TRADE_TAX_ITEMS.items()
+                     for match in [pattern.search(compact)] if match and Decimal(money(match.group('a'))) != 0]
+        documented_tax_total = sum((Decimal(item.amount) for item in tax_items), Decimal())
+        if tax_items and abs(documented_tax_total - Decimal(taxes)) > Decimal('0.01'):
+            raise ValueError('Steuerkomponenten passen nicht zur ausgewiesenen Steuersumme.')
+        if fee:
+            provision = money(fee.group('a'))
+        elif gross is not None:
+            provision_value = ((Decimal(amount) - Decimal(gross) - Decimal(taxes)) if kind == Kind.BUY
+                               else (Decimal(gross) - Decimal(taxes) - Decimal(amount)))
+            if provision_value < Decimal('-0.01'):
+                raise ValueError('Kurswert, Steuern und Endbetrag widersprechen der Zahlungsrichtung.')
+            provision = money(max(provision_value, Decimal()))
+        else:
+            provision = None
         expected_total = (Decimal(gross) + Decimal(provision) if kind == Kind.BUY
-                          else Decimal(gross) - Decimal(provision)) if gross is not None else None
+                          else Decimal(gross) - Decimal(provision)) if gross is not None and provision is not None else None
+        if expected_total is not None:
+            expected_total = (expected_total + Decimal(taxes) if kind == Kind.BUY
+                              else expected_total - Decimal(taxes))
         if expected_total is not None and abs(expected_total - Decimal(amount)) > Decimal('0.01'):
             batch.warnings.append('Kurswert, Provision und Endbetrag stimmen nicht überein; Abrechnung bitte prüfen.')
         booking_text = f'{name}\nWPKNR: {wkn} ISIN: {isin}'
-        purpose = f'Wertpapiere · {name} · WPKNR: {wkn} ISIN: {isin} · Provision {provision} EUR'
+        purpose = f'Wertpapiere · {name} · WPKNR: {wkn} ISIN: {isin}'
+        if provision and Decimal(provision):
+            purpose += f' · Provision {provision} EUR'
         # Keep the historical BUY identity stable across the model correction
         # from cash booking to depot event; otherwise a re-import after upgrade
         # could create a second economic transaction.
@@ -396,7 +428,10 @@ class ComdirectErtraegePlugin:
         batch.transactions.append(BankTransaction(
             account=account, external_id=external_id, date=trade_day, value_date=valuta,
             kind=kind, amount=('-' if kind == Kind.BUY else '') + amount, currency='EUR', security=isin,
-            quantity=qty, fees=provision, fee_items=[FeeItem('provision', provision)],
+            quantity=qty, fees=provision if provision and Decimal(provision) else None,
+            taxes=taxes if Decimal(taxes) else None,
+            fee_items=[FeeItem('provision', provision)] if provision and Decimal(provision) else [],
+            tax_items=tax_items,
             gross_amount=gross, trade_date=trade_day, pay_date=valuta,
             cash_account=cash_account, depot_account=account, affects_cash=False,
             security_ref=isin, order_id=trade.group('order'), document_reference=reference,
@@ -406,7 +441,7 @@ class ComdirectErtraegePlugin:
                            'security': 'comdirect Wertpapierabrechnung · WKN/ISIN',
                            'value_date': 'comdirect Wertpapierabrechnung · Valuta'}))
         batch.securities.append(SecurityInfo(key=isin, isin=isin, wkn=wkn, name=name, quote_currency='EUR'))
-        page = next((p for p in document.pages if TRADE_FEE.search(re.sub(r'[ \t]+', '', p.text))), document.pages[0])
+        page = next((p for p in document.pages if TRADE_TOTAL.search(re.sub(r'[ \t]+', '', p.text))), document.pages[0])
         batch.pdf_booking_evidence.append({'page': page.number, 'line': 1, 'text': purpose,
             'ocr': page.used_ocr, 'confidence': page.confidence, 'review_required': page.used_ocr})
         batch.documents.append(BankDocument(
@@ -415,7 +450,8 @@ class ComdirectErtraegePlugin:
             bank_name='comdirect', document_no=reference, page_count=len(document.pages),
             extraction_method='OCR' if page.used_ocr else 'PDF-Text', linked_ids=[external_id]))
         batch.account_names.extend([account, cash_account])
-        batch.warnings.append(f'Provision {provision} EUR erkannt; Zuordnung über Valuta, Betrag und WKN/ISIN.')
+        batch.warnings.append(
+            f'Gebühren {provision or "nicht ausgewiesen"} EUR; Zuordnung über Valuta, Betrag und WKN/ISIN.')
         return batch
 
 

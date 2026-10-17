@@ -10,9 +10,9 @@ Funktion nicht als nachgewiesen.
 | Baader Bank | Kauf/Verkauf PDF | teilweise | Kauf-/Verkaufs- und Validierungstests | breite Steuer-/FX-/Stornovarianten | Dividende, Steuer, Vorabpauschale, Übertrag; hoch |
 | comdirect | Finanzreport PDF | unterstützt | alte/neue Layouts, Salden und Depotwert; fehlende Schlussseite getestet | einzelne historische Layouts | anonymisierte Varianten; mittel |
 | comdirect | Ertrag/Kauf/Vorabpauschale PDF | teilweise | vorhandene Pluginregressionen | breite FX-/Steuerfälle | geeignete Belege; hoch |
-| comdirect | Verkauf PDF, kompaktes Layout | unterstützt | `compact-v1`, synthetische Fixture, Gebühren-/Richtungstest | separate Steuerbehandlung und historische defekte Schriftlayouts | anonymisierte Originalbelege; mittel |
+| comdirect | Kauf/Verkauf PDF, kompaktes Layout | teilweise | `compact-v1`, synthetische Fixture; lokale Kaufbelege gegen Richtung/Beträge geprüft | lokale PDFs können Stückzahlen wegen eingebetteter Schrift nur als `0` liefern und werden dann sicher abgewiesen; separate Steuerbehandlung | OCR-fähige oder anonymisierte textextrahierbare Belege; hoch |
 | ING Deutschland | Kauf/Sparplan/Dividende PDF | teilweise | umfangreiche vorhandene Tests | weitere FX-/Layoutvarianten | geeignete Belege; mittel |
-| ING Deutschland | Verkauf PDF | unterstützt | `current-v1`, Brutto/Netto/Gebühr/Richtung | Kapitalmaßnahmen- und Altvarianten | anonymisierte Varianten; mittel |
+| ING Deutschland | Verkauf PDF | unterstützt | `current-v1`; zwei lokale Originalbelege (mit/ohne Gebühr) gegen Stückzahl, Kennung, Konten und Brutto/Netto geprüft | Kapitalmaßnahmen- und Altvarianten | anonymisierte Varianten; mittel |
 | ING Deutschland | Vorabpauschale PDF | unterstützt für belegte Variante | `current-v1`, Steuerbasis/Komponenten/Kontobelastung | negative/steuerfreie Varianten | weitere anonymisierte Varianten; mittel |
 | ING Deutschland | nachträgliche Verlustverrechnung PDF | teilweise | `current-v1`, Erstattung und Summenkontrolle | Belastung, Kirchensteuer und mehrseitige Varianten nicht mit Fixture verifiziert | passende Belege; hoch |
 | ING Deutschland | Jahresdepotauszug PDF | unterstützt | Summe, Positionszahl, Seitenüberträge | gescannte Auszüge | anonymisierte Scans; hoch |

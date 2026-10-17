@@ -57,6 +57,29 @@ def test_ing_sale_extracts_fee_and_positive_net_amount():
     assert (tx.quantity, tx.price, tx.cash_account) == ('2.00', '50.00', 'IBAN DE11111111111111111111')
 
 
+def test_ing_sale_without_fee_keeps_fee_unknown_and_equation_valid():
+    plugin = load_plugin('ing_wertpapiere.py')
+    path = FIXTURES / 'ing/verkauf/current-v1/source.txt'
+    text = path.read_text(encoding='utf-8').replace('Provision EUR 1,00\n', '').replace(
+        'Endbetrag zu Ihren Gunsten EUR 99,00', 'Endbetrag zu Ihren Gunsten EUR 100,00')
+    document = PdfDocument(path, text.encode(), 'no-fee-sale', (PdfPage(1, text),))
+    batch = plugin.parse(document, plugin.detect(document)[0],
+                         ParseContext(ImportBatch(path.name, 'no-fee-sale', source_sheet='PDF')))
+    tx = batch.transactions[0]
+    assert (tx.kind, tx.amount, tx.gross_amount, tx.fees, tx.fee_items) == (
+        'SELL', '100.00', '100.00', None, [])
+
+
+def test_comdirect_unreadable_zero_quantity_is_never_booked():
+    plugin = load_plugin('comdirect_ertraege.py')
+    path = FIXTURES / 'comdirect/verkauf/compact-v1/source.txt'
+    text = path.read_text(encoding='utf-8').replace('Stk. 2,000', 'Stk. 0')
+    document = PdfDocument(path, text.encode(), 'unreadable-quantity', (PdfPage(1, text),))
+    with pytest.raises(ValueError, match='nicht sicher lesbar'):
+        plugin.parse(document, plugin.detect(document)[0],
+                     ParseContext(ImportBatch(path.name, 'unreadable-quantity', source_sheet='PDF')))
+
+
 def test_ing_advance_tax_separates_tax_basis_from_cash_debit():
     detection, batch = parse(load_plugin('ing_wertpapiere.py'), 'ing/vorabpauschale/current-v1')
     event, tx = batch.tax_events[0], batch.transactions[0]
