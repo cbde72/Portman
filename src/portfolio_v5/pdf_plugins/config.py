@@ -95,7 +95,7 @@ class ConfigPdfPlugin:
                     row.get('currency') or currency, day, row_number))
             if not positions: raise ValueError(f'{detection.document_type}: keine Depotposition erkannt.')
             batch.snapshots.append(Snapshot(account, day[:7], day, detection.document_type, positions,
-                                            bool(spec.get('complete_snapshot', True))))
+                                            bool(spec.get('complete_snapshot', False))))
         batch.documents.append(BankDocument(account, document.file_hash + ':' + account,
             detection.document_type, self._document_date(document.text, spec),
             base64.b64encode(document.content).decode('ascii')))

@@ -304,19 +304,29 @@ class RepositoryV09(RepositoryV07):
         for tx in depot_transactions:
             ref = reference(tx)
             if linked.get(ref):
-                result.append({'transaction': tx, 'status': ('Manuell bestätigt' if any(
-                    row['status'] == 'manual' for row in linked[ref]) else 'Abgeglichen'),
-                    'links': linked[ref]})
+                allocated = sum((Decimal(row['allocated_amount']) for row in linked[ref]), Decimal())
+                required = abs(Decimal(tx['amount']))
+                state = 'conflict' if allocated > required else 'complete' if allocated == required else 'partial'
+                status = {'conflict': 'Konflikt', 'complete': 'Vollständig abgeglichen',
+                          'partial': 'Teilweise zugeordnet'}[state]
+                result.append({'transaction': tx, 'status': status, 'state': state,
+                               'allocated_amount': str(allocated),
+                               'remaining_amount': str(max(required - allocated, Decimal())),
+                               'links': linked[ref]})
                 continue
             own_key = names.get(account_key(tx['account']), account_key(tx['account']))
             if tx.get('affects_cash', True) and own_key in payment_keys:
-                result.append({'transaction': tx, 'status': 'Abgeglichen', 'links': []})
+                result.append({'transaction': tx, 'status': 'Vollständig abgeglichen',
+                               'state': 'complete', 'allocated_amount': str(abs(Decimal(tx['amount']))),
+                               'remaining_amount': '0', 'links': []})
                 continue
             amount = abs(Decimal(tx['amount']))
             candidates = matches.get(ref, [])
             exclusive = [item for item in candidates if (ref, item[0]) in eligible_edges
                          and len(cash_usage[item[0]]) == 1 and item[0] not in reserved_cash]
-            status = 'Offen' if not candidates else 'Konflikt' if len(exclusive) != 1 else 'Abgeglichen'
+            state = 'open' if not candidates else 'conflict' if len(exclusive) != 1 else 'complete'
+            status = {'open': 'Offen', 'conflict': 'Konflikt',
+                      'complete': 'Vollständig abgeglichen'}[state]
             new_links = []
             if len(exclusive) == 1:
                 cash_ref, _, _ = exclusive[0]
@@ -329,7 +339,9 @@ class RepositoryV09(RepositoryV07):
                         self.db.execute('''INSERT OR IGNORE INTO transaction_reconciliations
                             (depot_ref,cash_ref,allocated_amount,currency,status,reason) VALUES(?,?,?,?,?,?)''',
                             tuple(new_links[0][key] for key in ('depot_ref','cash_ref','allocated_amount','currency','status','reason')))
-            result.append({'transaction': tx, 'status': status, 'links': new_links,
+            result.append({'transaction': tx, 'status': status, 'state': state,
+                           'allocated_amount': str(amount if new_links else Decimal()),
+                           'remaining_amount': str(Decimal() if new_links else amount), 'links': new_links,
                            'candidates': [item[0] for item in candidates]})
         return result
 

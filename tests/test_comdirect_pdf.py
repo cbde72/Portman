@@ -79,6 +79,11 @@ def test_finanzreport_accounts_continuations_values_and_reconciliation(tmp_path)
         repo.close()
 
 
+def test_missing_last_pdf_page_cannot_create_complete_statement():
+    with pytest.raises(ValueError, match='Saldo|saldo|abgestimmt'):
+        parsed(report()[:1])
+
+
 def test_interest_closing_is_structured_and_classified(tmp_path):
     pages = ["""comdirect
 Finanzreport Nr. 3 per 30.09.2026

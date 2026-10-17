@@ -160,7 +160,8 @@ def table_date(rows):
     return next(iter(dates), None)
 
 
-def parse_positions(rows, sheet, path, period, override_date=None, override_account=None, complete=True, sheet_date_only=False):
+def parse_positions(rows, sheet, path, period, override_date=None, override_account=None,
+                    complete=None, sheet_date_only=False):
     header_idx = None
     for i, row in enumerate(rows):
         if field(row, ['ISIN', 'WKN']) is not None and field(row, ['Bezeichnung', 'Wertpapiername', 'Name']) is not None:
@@ -199,7 +200,9 @@ def parse_positions(rows, sheet, path, period, override_date=None, override_acco
         period = d[:7]
     if not period:
         raise ValueError(f'{sheet}: Kein Stichtag erkennbar. Im Importdialog Datum angeben.')
-    snapshot = Snapshot(account, period, d, sheet, complete=complete, date_basis=basis)
+    # Generic tables are partial until a source total/count proves that every
+    # position was parsed, or a caller explicitly records a reviewed override.
+    snapshot = Snapshot(account, period, d, sheet, complete=complete is True, date_basis=basis)
     if not d:
         snapshot.warnings.append('Nur Berichtsmonat bekannt; kein tagesgenauer Stichtag.')
     elif d[:7] != period:
@@ -251,6 +254,7 @@ def parse_positions(rows, sheet, path, period, override_date=None, override_acco
     # A complete wallet export must never replace the securities snapshot.
     if profile == 'zero' and sheet == 'CSV' and not override_account and all(p.asset_type == 'Krypto' for p in snapshot.positions):
         snapshot.account = 'ZERO/Krypto'
+    completeness_proofs = []
     for row in rows:
         for i, value in enumerate(row):
             if norm(value) == 'depotwert':
@@ -259,8 +263,28 @@ def parse_positions(rows, sheet, path, period, override_date=None, override_acco
                     total = sum(Decimal(p.value) for p in snapshot.positions)
                     if declared is not None and abs(Decimal(declared) - total) > Decimal('.10'):
                         raise ValueError(f'{sheet}: Depotwert {declared} stimmt nicht mit Positionssumme {total} überein.')
+                    if declared is not None:
+                        completeness_proofs.append('Depotwert')
                 except ValueError:
                     raise
+            if norm(value) in ('positionszahl', 'anzahlpositionen'):
+                raw_count = cell(row, i + 1)
+                try:
+                    declared_count = int(raw_count)
+                except (TypeError, ValueError):
+                    raise ValueError(f'{sheet}: Ungültige ausgewiesene Positionszahl {raw_count!r}.') from None
+                if declared_count != len(snapshot.positions):
+                    raise ValueError(f'{sheet}: {len(snapshot.positions)} Positionen erkannt, '
+                                     f'aber {declared_count} ausgewiesen.')
+                completeness_proofs.append('Positionszahl')
+    if complete is None:
+        snapshot.complete = bool(completeness_proofs)
+        if not snapshot.complete:
+            snapshot.warnings.append(
+                'Bestandsvollständigkeit nicht durch Depotwert oder Positionszahl nachgewiesen; '
+                'Import wird als Teilbestand behandelt.')
+    elif complete is True and not completeness_proofs:
+        snapshot.warnings.append('Bestandsvollständigkeit wurde beim Import manuell bestätigt.')
     return snapshot
 
 
@@ -285,7 +309,9 @@ def parse_deka(rows, sheet, period):
                      value=parse_money(cell(rows[labels['wert']], col), 'EUR', locale='de_DE'), row=labels['wert'] + 1)
         if p.value is None:
             raise ValueError('Deka: Marktwert fehlt')
-        result.append(Snapshot('Deka/' + sub, period or (d or '')[:7], d, sheet, [p], date_basis='document' if d else 'month'))
+        result.append(Snapshot('Deka/' + sub, period or (d or '')[:7], d, sheet, [p],
+                               complete=False, date_basis='document' if d else 'month',
+                               warnings=['Historischer Deka-Tabellenausschnitt ohne prüfbare Gesamtzahl; Teilbestand.']))
     return result
 
 
@@ -416,7 +442,7 @@ def parse_transactions(rows, batch):
     return True
 
 
-def parse_file(path, as_of=None, account=None, complete=True, *, sheets=None, sheet_date_only=False,
+def parse_file(path, as_of=None, account=None, complete=None, *, sheets=None, sheet_date_only=False,
                document_tags=None, plugin_catalog=None):
     path = Path(path).resolve()
     if path.suffix.lower() == '.pdf':
