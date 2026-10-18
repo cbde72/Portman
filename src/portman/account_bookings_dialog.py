@@ -243,6 +243,8 @@ class AccountBookingsDialog(QDialog):
             reconciliation_status = {reference(row['transaction']): row['status'] for row in reconciliation}
             source = ([row['transaction'] for row in reconciliation] if reconciliation
                       else self.repository.transactions(self.account))
+            if self.depot_key and hasattr(self.repository, 'tax_event_bookings'):
+                source += self.repository.tax_event_bookings(self.account)
             self.transactions = sorted(source, key=lambda tx: tx['date'])
             reviewed = self.repository.reviewed_duplicates() if hasattr(self.repository, 'reviewed_duplicates') else set()
             self.wallet = any(p.get('asset_type') == 'Krypto' for p in self.repository.holdings(account=self.account)) or any(
@@ -303,6 +305,10 @@ class AccountBookingsDialog(QDialog):
     def edit_selected(self):
         try: tx = self.selected_transaction()
         except ValueError as error: QMessageBox.information(self, 'Buchung auswählen', str(error)); return
+        if tx.get('tax_event'):
+            QMessageBox.information(self, 'Steuerereignis',
+                'Dieses Steuerereignis stammt unverändert aus der Steuermitteilung und ist nicht als Geldbuchung editierbar.')
+            return
         if TransactionEditDialog(self.repository, tx, self).exec(): self.refresh_after_change()
 
     def assign_dividend(self):

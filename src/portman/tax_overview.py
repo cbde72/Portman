@@ -80,7 +80,8 @@ def automatic_tax_values(repository, year):
     seen_events = set()
     for record in store.model_records(kind='tax_events'):
         event = record['payload']
-        if event.get('type') != 'vorabpauschale_ausland' or str(event.get('tax_year') or event.get('date', '')[:4]) != str(year):
+        if event.get('type') not in ('vorabpauschale', 'vorabpauschale_ausland') or str(
+                event.get('tax_year') or event.get('date', '')[:4]) != str(year):
             continue
         identity = event.get('external_id') or (event.get('account'), event.get('date'), event.get('security_ref'))
         if identity in seen_events:

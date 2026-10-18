@@ -76,6 +76,16 @@ einer tatsächlich ausgewiesenen Kontobelastung (`TAX`). Steuererstattungen sind
 positive `TAX_REFUND`-Cashflows. Auch für diese Typen gelten Komponentenabgleich,
 Richtung, Währung und eindeutige Depotzuordnung.
 
+V09 speichert dabei steuerlichen Zufluss (`date`), Steuerjahr (`tax_year`),
+Ertragsjahr (`income_year`) und Belegdatum (`document_date`) getrennt. Ein
+`TaxEvent` verändert weder Bestand noch Einstandskosten oder Performance. Die
+Depotbuchungsansicht zeigt ihn als kontowirkungslosen Steuernachweis. Nur eine
+auf dem Beleg tatsächlich ausgewiesene Steuerzahlung erhält eine verknüpfte
+Geldbuchung; `related_transaction_id` und `cash_account` halten die Zuordnung
+zum Verrechnungskonto eindeutig. Für spätere Verkäufe stellt
+`advance_tax_credit()` die historisierten Vorabpauschalen als ausschließlich
+steuerliche Basis bereit, ohne sie in handelsbezogene Gewinne einzurechnen.
+
 ## Phase-C-Normalisierung
 
 Baader-Dividenden und Vorabpauschalen sind cash-neutrale Depotbelege mit

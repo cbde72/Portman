@@ -154,8 +154,65 @@ ADVANCE_TAX_TAXABLE = re.compile(
     r'Steuerbemessungsgrundlage\s+vor\s+Verlustverrechnung(?:\s*\(\d+\))?\s+EUR\s+(?P<a>' + AMOUNT + r')', re.I)
 ADVANCE_TAX_USED = re.compile(
     r'in\s+Anspruch\s+genommener\s+Freistellungsauftrag\s+EUR\s+(?P<a>' + AMOUNT + r')', re.I)
+ADVANCE_TAX_AFTER = re.compile(
+    r'Steuerbemessungsgrundlage\s+nach\s+Verlustverrechnung\s+EUR\s+(?P<a>' + AMOUNT + r')', re.I)
+ADVANCE_TAX_DOCUMENT_DATE = re.compile(r'Datum:\s*(?P<d>\d{2}\.\d{2}\.\d{4})', re.I)
+ADVANCE_TAX_COMPONENTS = {
+    'capital_gains_tax': re.compile(r'Kapitalertragsteuer\s+EUR\s+(?P<a>' + AMOUNT + r')', re.I),
+    'solidarity_surcharge': re.compile(r'Solidarit.tszuschlag\s+EUR\s+(?P<a>' + AMOUNT + r')', re.I),
+    'church_tax': re.compile(r'Kirchensteuer\s+EUR\s+(?P<a>' + AMOUNT + r')', re.I),
+}
+ADVANCE_TAX_PAID = re.compile(r'abgef.hrte\s+Steuern\s+EUR\s+(?P<a>' + AMOUNT + r')', re.I)
+ADVANCE_TAX_SETTLEMENT = re.compile(
+    r'(?:Belastung|Gutschrift)\s+erfolgt\s+mit\s+Valuta\s+(?P<d>\d{2}\.\d{2}\.\d{4})'
+    r'.{0,100}?IBAN\s*(?P<iban>DE(?:\s*\d){20})', re.I | re.S)
 ADVANCE_TAX_DEPOT = re.compile(r'Depotnummer:\s*(?P<n>\d+(?:\s+\d+)?)', re.I)
 ADVANCE_TAX_REFERENCE = re.compile(r'Referenz-Nummer:\s*(?P<r>[A-Z0-9\s]+?)(?=Depotnummer:|\n\s*\n)', re.I)
+
+
+def _advance_tax_balances(document):
+    """Read the eight before/after balances in comdirect's reconciliation table."""
+    fields = (
+        'equity_loss_pot_before', 'equity_loss_pot_after',
+        'other_loss_pot_before', 'other_loss_pot_after',
+        'foreign_tax_pot_before', 'foreign_tax_pot_after',
+        'allowance_before', 'allowance_after')
+    for page in document.pages:
+        start = re.search(r'Verrechnungssalden\s+in\s+EUR', page.text, re.I)
+        end = re.search(r'Hinweise\s+zur\s+Ermittlung', page.text, re.I)
+        if not start or not end:
+            continue
+        if start.end() < end.start():
+            amounts = [money(value) for value in re.findall(AMOUNT, page.text[start.end():end.start()])]
+            if len(amounts) >= 8:
+                return dict(zip(fields, amounts[-8:]))
+            continue
+
+        # portfolio_v5.pdf_text may return the visual table from bottom to top.
+        # Retained horizontal spacing still identifies the four columns.
+        reversed_table = page.text[end.end():start.start()]
+        after_split = re.split(r'nach\s+Ermittlung', reversed_table, maxsplit=1, flags=re.I)
+        if len(after_split) != 2:
+            continue
+        before_split = re.split(r'vor\s+Ermittlung', after_split[1], maxsplit=1, flags=re.I)
+        if len(before_split) != 2:
+            continue
+
+        def columns(fragment):
+            result = {}
+            for line in fragment.splitlines():
+                for match in re.finditer(AMOUNT, line):
+                    column = min(range(4), key=lambda index: abs(match.start() - (44, 87, 130, 170)[index]))
+                    if abs(match.start() - (44, 87, 130, 170)[column]) <= 12:
+                        result[column] = money(match.group())
+            return result
+
+        after_values, before_values = columns(after_split[0]), columns(before_split[0])
+        if set(after_values) == set(before_values) == set(range(4)):
+            amounts = [value for column in range(4)
+                       for value in (before_values[column], after_values[column])]
+            return dict(zip(fields, amounts))
+    return {}
 
 
 def ocr_holding(document, page, options):
@@ -375,6 +432,7 @@ class ComdirectErtraegePlugin:
         title, security = ADVANCE_TAX_TITLE.search(text), ADVANCE_TAX_SECURITY.search(text)
         base, partial = ADVANCE_TAX_BASE.search(text), ADVANCE_TAX_PARTIAL.search(text)
         taxable, used = ADVANCE_TAX_TAXABLE.search(text), ADVANCE_TAX_USED.search(text)
+        after = ADVANCE_TAX_AFTER.search(text)
         if not all((title, security, base, partial, taxable, used)):
             raise ValueError('Vorabpauschale, Teilfreistellung, Steuerbemessungsgrundlage oder Freistellungsnutzung nicht erkannt.')
         treatment_date = parse_date(title.group('date'))
@@ -386,6 +444,20 @@ class ComdirectErtraegePlugin:
             raise ValueError('Vorabpauschale minus Teilfreistellung passt nicht zur Steuerbemessungsgrundlage.')
         if Decimal(values['used']) > Decimal(values['taxable']):
             raise ValueError('Der verbrauchte Freistellungsauftrag übersteigt die Steuerbemessungsgrundlage.')
+        after_value = money(after.group('a')) if after else None
+        loss_offset = (Decimal(values['taxable']) - Decimal(values['used']) - Decimal(after_value or '0'))
+        if loss_offset < Decimal('-0.01'):
+            raise ValueError('Freistellungsauftrag, Verlustverrechnung und verbleibende Steuerbasis widersprechen sich.')
+
+        components = {name: money(match.group('a')) for name, pattern in ADVANCE_TAX_COMPONENTS.items()
+                      for match in [pattern.search(text)] if match}
+        paid_match = ADVANCE_TAX_PAID.search(text)
+        paid_taxes = money(paid_match.group('a')) if paid_match else None
+        if paid_taxes is not None and components:
+            component_total = sum((Decimal(value) for value in components.values()), Decimal())
+            if abs(component_total - Decimal(paid_taxes)) > Decimal('0.01'):
+                raise ValueError('Kapitalertragsteuer, Solidaritätszuschlag und Kirchensteuer passen nicht '
+                                 'zur Summe der abgeführten Steuern.')
 
         isin, wkn = security.group('isin').upper(), security.group('wkn').upper()
         qty = correction_number(security.group('qty'))
@@ -395,21 +467,51 @@ class ComdirectErtraegePlugin:
         account = 'Depot ' + depot_number if depot_number else 'comdirect Depot'
         reference_match = ADVANCE_TAX_REFERENCE.search(text)
         reference = re.sub(r'\s+', '', reference_match.group('r')) if reference_match else ''
+        document_date_match = ADVANCE_TAX_DOCUMENT_DATE.search(text)
+        document_date = parse_date(document_date_match.group('d')) if document_date_match else treatment_date
+        income_year = str(int(treatment_date[:4]) - 1)
+        settlement = ADVANCE_TAX_SETTLEMENT.search(text)
+        cash_account = ('IBAN ' + re.sub(r'\s+', '', settlement.group('iban'))) if settlement else ''
+        balances = _advance_tax_balances(document)
         external_id = 'pdf-comdirect-advance-tax-' + digest(
-            [account, isin, treatment_date, values['base'], values['taxable'], reference])
+            [account, isin, income_year, treatment_date, values['base'], values['taxable'], reference])
+        related_transaction_id = external_id + '-payment' if paid_taxes and Decimal(paid_taxes) else ''
         batch.tax_events.append(TaxEvent(
             external_id=external_id, account=account, type='vorabpauschale_ausland',
-            date=treatment_date, tax_year=treatment_date[:4], security_ref=isin, quantity=qty,
+            date=treatment_date, tax_year=treatment_date[:4], income_year=income_year,
+            document_date=document_date, security_ref=isin, quantity=qty,
             currency='EUR', taxable_income=values['taxable'], advance_tax_base=values['base'],
             partial_exemption_amount=values['partial'], used_exemption=values['used'],
+            loss_offset=f'{max(loss_offset, Decimal()):.2f}',
+            capital_gains_tax=components.get('capital_gains_tax'),
+            solidarity_surcharge=components.get('solidarity_surcharge'),
+            church_tax=components.get('church_tax'), paid_taxes=paid_taxes,
+            **balances,
             after_partial_exemption=values['taxable'],
             partial_exemption_rate=correction_number(partial.group('rate')),
-            reference_no=reference))
+            reference_no=reference, related_transaction_id=related_transaction_id,
+            cash_account=cash_account))
+        if related_transaction_id:
+            if not cash_account:
+                raise ValueError('Steuerbelastung erkannt, aber das belastete Verrechnungskonto ist nicht lesbar.')
+            paid_day = parse_date(settlement.group('d'))
+            batch.transactions.append(BankTransaction(
+                account=cash_account, external_id=related_transaction_id, date=paid_day,
+                value_date=paid_day, kind=Kind.TAX, amount='-' + paid_taxes, currency='EUR',
+                security=isin, taxes=paid_taxes,
+                tax_items=[TaxItem(name, value) for name, value in (
+                    ('kapitalertragsteuer', components.get('capital_gains_tax')),
+                    ('solidaritaetszuschlag', components.get('solidarity_surcharge')),
+                    ('kirchensteuer', components.get('church_tax'))) if value is not None],
+                cash_account=cash_account, depot_account=account, performance_depot_key='',
+                security_ref=isin, affects_cash=True, bank_reference=reference,
+                document_reference=reference, transaction_reference=reference,
+                booking_text='comdirect Vorabpauschale Steuerbelastung',
+                purpose=f'Vorabpauschale {income_year} · {name}'))
         batch.securities.append(SecurityInfo(key=isin, isin=isin, wkn=wkn, name=name))
-        document_date = re.search(r'Datum:\s*(\d{2}\.\d{2}\.\d{4})', text, re.I)
         batch.documents.append(BankDocument(
             account, batch.file_hash + ':' + account, document.path.name,
-            parse_date(document_date.group(1)) if document_date else treatment_date,
+            document_date,
             base64.b64encode(document.content).decode('ascii'),
             document_type='Steuermitteilung Vorabpauschale', bank_name='comdirect',
             document_no=reference, page_count=len(document.pages), extraction_method='PDF-Text'))

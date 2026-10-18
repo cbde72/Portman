@@ -51,6 +51,7 @@ Integritätslauf ergab 122 bestandene und 6 übersprungene Tests. Ruff,
 | comdirect Gegenrichtung | `test_comdirect_sale_rejects_debit_direction` | Verkauf mit Belastung wird hart abgewiesen |
 | ING Verkauf | `ing/verkauf/current-v1`; `test_ing_sale_extracts_fee_and_positive_net_amount` | Kurswert minus Gebühr = Gutschrift |
 | ING Vorabpauschale | `ing/vorabpauschale/current-v1`; `test_ing_advance_tax_separates_tax_basis_from_cash_debit` | Steuerbasis und tatsächliche Belastung bleiben getrennt |
+| Vorabpauschale V09 | `test_advance_tax_events.py` | Vollständig/teilweise freigestellte und besteuerte Fälle; Zufluss-, Ertrags- und Belegdatum getrennt; Steuerkomponenten und Geldzahlung verknüpft; Depotbuchungsansicht cash-neutral; Dubletten je Depot/ISIN/Ertragsjahr verhindert |
 | ING Steuererstattung | `ing/steuererstattung/current-v1`; `test_ing_tax_refund_has_positive_economic_direction` | positive Erstattung, Komponenten vollständig |
 | Manipulierte Steuerkorrektur | `test_ing_tax_refund_rejects_inconsistent_components` | abweichende Summe wird nicht importiert |
 | ING Original-Verkäufe | lokaler, nicht eingecheckter Prüflauf über zwei Belege | beide SELL positiv; mit/ohne Gebühr abgestimmtes Brutto/Netto; Depot- und Zahlungskonto vorhanden |

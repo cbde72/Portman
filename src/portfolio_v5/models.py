@@ -284,6 +284,8 @@ class TaxEvent:
     type: str
     date: str
     tax_year: str = ''
+    income_year: str = ''
+    document_date: str = ''
     security_ref: str = ''
     quantity: str | None = None
     currency: str = 'EUR'
@@ -291,8 +293,19 @@ class TaxEvent:
     advance_tax_base: str | None = None
     partial_exemption_amount: str | None = None
     used_exemption: str | None = None
+    loss_offset: str | None = None
+    capital_gains_tax: str | None = None
+    solidarity_surcharge: str | None = None
+    church_tax: str | None = None
+    paid_taxes: str | None = None
     allowance_before: str | None = None
     allowance_after: str | None = None
+    equity_loss_pot_before: str | None = None
+    equity_loss_pot_after: str | None = None
+    other_loss_pot_before: str | None = None
+    other_loss_pot_after: str | None = None
+    foreign_tax_pot_before: str | None = None
+    foreign_tax_pot_after: str | None = None
     withholding_pot_before: str | None = None
     withholding_pot_after: str | None = None
     creditable_withholding: str | None = None
@@ -304,6 +317,7 @@ class TaxEvent:
     refund_kist: str | None = None
     reference_no: str = ''
     related_transaction_id: str = ''
+    cash_account: str = ''
 
 
 @dataclass
