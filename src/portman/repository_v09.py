@@ -188,7 +188,7 @@ class RepositoryV09(RepositoryV07):
         return sorted(result, key=lambda event: (event.get('date', ''), event.get('external_id', '')))
 
     @cached_read
-    def tax_detail_records(self, account=None, tax_year=None):
+    def _imported_tax_detail_records(self, account=None, tax_year=None):
         """Return lossless CSV facts with conservative PDF/cash-booking links."""
         from portfolio_v5.comdirect_tax_detail import date_value
         links, mappings = self.store._import_links(), self.store._depot_mappings()
@@ -262,6 +262,17 @@ class RepositoryV09(RepositoryV07):
                 continue
             result.append(row)
         return sorted(result, key=lambda row: (row.get('tax_date', ''), row.get('external_id', '')))
+
+    @cached_read
+    def tax_detail_records(self, account=None, tax_year=None):
+        """Return the read-only unified 32-column tax ledger from every supported source."""
+        from .automatic_tax_detail import automatic_tax_detail_records
+        rows = automatic_tax_detail_records(self, self._imported_tax_detail_records())
+        if account:
+            rows = [row for row in rows if account_key(row.get('account', '')) == account_key(account)]
+        if tax_year is not None:
+            rows = [row for row in rows if row.get('tax_year') == str(tax_year)]
+        return rows
 
     def tax_event_bookings(self, account):
         """Project tax facts into the depot booking view without creating transactions."""

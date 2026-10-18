@@ -3,7 +3,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from portfolio_v5.comdirect_tax_detail import COLUMNS, GROUPS, parse_comdirect_tax_detail
-from portfolio_v5.models import ImportBatch, TaxEvent
+from portfolio_v5.models import BankTransaction, ImportBatch, TaxEvent, TaxItem, Transaction
 from portman.repository_v09 import RepositoryV09
 from portman.tax_overview import automatic_tax_values
 
@@ -105,7 +105,7 @@ def test_different_references_link_by_depot_security_date_and_amount(tmp_path):
             income_year='2025', security_ref='A111X9', taxable_income='96.35',
             advance_tax_base='137.65', reference_no='ANDERE-PDF-REFERENZ')])])
         repo.commit_batches([parse_comdirect_tax_detail(source, account='Depot Test')])
-        row = repo.tax_detail_records()[0]
+        row = next(r for r in repo.tax_detail_records() if r['source_format'] == 'comdirect_tax_detail_v1')
         assert row['linked_tax_event_id'] == 'pdf-event'
         assert row['match_status'] == 'matched'
     finally:
@@ -122,7 +122,7 @@ def test_ambiguous_pdf_candidates_are_not_merged(tmp_path):
             reference_no=f'OTHER-{kind}') for kind in ('vorabpauschale', 'vorabpauschale_ausland')]
         repo.commit_batches([ImportBatch('pdf', 'pdf', tax_events=events)])
         repo.commit_batches([parse_comdirect_tax_detail(source, account='Depot Test')])
-        row = repo.tax_detail_records()[0]
+        row = next(r for r in repo.tax_detail_records() if r['source_format'] == 'comdirect_tax_detail_v1')
         assert row['linked_tax_event_id'] == ''
         assert row['match_status'] == 'ambiguous'
     finally:
@@ -187,5 +187,71 @@ def test_linked_detail_exposes_pdf_tax_and_cash_context(tmp_path):
             '137.65', '41.30', '96.35')
         assert row['cash_account'] == 'Cash'
         assert row['linked_document_source'] == 'notice.pdf'
+    finally:
+        repo.close()
+
+
+def test_pdf_only_advance_tax_creates_complete_32_column_view_row(tmp_path):
+    repo = RepositoryV09(tmp_path / 'portfolio.sqlite', backups=False)
+    try:
+        repo.save_account('Depot Test', {'kind': 'Depot', 'institution': 'Andere Bank'})
+        repo.commit_batches([ImportBatch('notice.pdf', 'pdf', tax_events=[TaxEvent(
+            'pdf-only', 'Depot Test', 'vorabpauschale_ausland', '2026-01-02', tax_year='2026',
+            income_year='2025', document_date='2026-01-19', security_ref='A111X9', quantity='234.356',
+            advance_tax_base='137.65', partial_exemption_amount='41.30', taxable_income='96.35',
+            used_exemption='96.35', capital_gains_tax='0.00', solidarity_surcharge='0.00',
+            church_tax='0.00', paid_taxes='0.00', reference_no='PDF-ONLY')])])
+        row = repo.tax_detail_records()[0]
+        assert tuple(row['original_values']) == COLUMNS
+        assert row['source_format'] == 'automatic_tax_event_v1'
+        assert (row['original_values']['Betrag Brutto'], row['original_values']['Verlust Sonstige'],
+                row['original_values']['Steuerbemessungsgrundlage'], row['original_values']['Veränderung FSA'],
+                row['original_values']['Summe Steuern']) == (
+                '137,65', '-41,30', '96,35', '-96,35', '0,00')
+        assert row['linked_tax_event_id'] == 'pdf-only'
+        assert repo.transactions() == [] and repo.holdings() == []
+    finally:
+        repo.close()
+
+
+def test_automatic_rows_cover_bank_income_sale_and_tax_without_inventing_basis(tmp_path):
+    repo = RepositoryV09(tmp_path / 'portfolio.sqlite', backups=False)
+    try:
+        repo.save_account('Bankdepot', {'kind': 'Depot', 'institution': 'Musterbank'})
+        rows = [
+            BankTransaction('Bankdepot','div','2026-03-01','DIVIDEND','75','EUR',security='FUND',
+                gross_income='100',taxes='25',tax_items=[TaxItem('kapitalertragsteuer','25')]),
+            BankTransaction('Bankdepot','interest','2026-03-02','INTEREST','10','EUR',gross_income='10'),
+            Transaction('Bankdepot','buy','2026-03-03','BUY','-100','EUR',security='FUND',quantity='1'),
+            Transaction('Bankdepot','sell','2026-03-04','SELL','130','EUR',security='FUND',quantity='1'),
+            BankTransaction('Bankdepot','refund','2026-03-05','TAX_REFUND','5','EUR')]
+        repo.commit_batches([ImportBatch('bank.pdf','bank',transactions=rows)])
+        repo.confirm_coverage('Bankdepot','0001-01-01','2026-12-31')
+        details = repo.tax_detail_records()
+        assert [r['original_values']['Vorgang'] for r in details] == [
+            'Dividende','Zinsertrag','Wertpapierverkauf','Steuererstattung']
+        dividend = details[0]['original_values']
+        assert dividend['Betrag Brutto'] == '100' and dividend['Kapitalertragssteuer'] == '-25'
+        assert dividend['BMG nach VV'] == ''  # no loss/FSA evidence: remain unknown
+        assert details[2]['original_values']['Gewinn/Verlust'] == '30'
+        assert all(tuple(r['original_values']) == COLUMNS for r in details)
+    finally:
+        repo.close()
+
+
+def test_linked_csv_conflict_is_visible_and_original_value_is_preserved(tmp_path):
+    source = tmp_path / 'tax.csv'; write_export(source, [advance_tax()])
+    repo = RepositoryV09(tmp_path / 'portfolio.sqlite', backups=False)
+    try:
+        repo.save_account('Depot Test', {'kind': 'Depot'})
+        repo.commit_batches([ImportBatch('pdf', 'pdf', tax_events=[TaxEvent(
+            'pdf-event', 'Depot Test', 'vorabpauschale_ausland', '2026-01-02', tax_year='2026',
+            security_ref='A111X9', taxable_income='99.99', paid_taxes='0.00',
+            reference_no='ANON-REF-001')])])
+        repo.commit_batches([parse_comdirect_tax_detail(source, account='Depot Test')])
+        row = repo.tax_detail_records()[0]
+        assert row['original_values']['Steuerbemessungsgrundlage'] == '96,35'
+        assert row['match_status'] == 'conflict'
+        assert 'Steuerbemessungsgrundlage' in row['conflicts'][0]
     finally:
         repo.close()

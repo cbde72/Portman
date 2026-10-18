@@ -3,7 +3,7 @@ import csv
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QSortFilterProxyModel
-from PySide6.QtGui import QStandardItem, QStandardItemModel
+from PySide6.QtGui import QColor, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QFileDialog,
     QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton,
     QScrollArea, QTableView, QVBoxLayout, QWidget)
@@ -56,6 +56,15 @@ class TaxDetailDialog(QDialog):
             items = []
             for index, column in enumerate(COLUMNS):
                 item = QStandardItem(record['original_values'].get(column, ''))
+                provenance = record.get('column_provenance', {}).get(column)
+                if provenance:
+                    item.setToolTip(f"Herkunft: {provenance.get('status', 'unbekannt')} · {provenance.get('source', '')}")
+                else:
+                    item.setToolTip('Nicht zuverlässig bestimmbar')
+                    item.setBackground(QColor('#fff4cc'))
+                if record.get('conflicts'):
+                    item.setBackground(QColor('#ffd6d6'))
+                    item.setToolTip(item.toolTip() + '\nWiderspruch: ' + '\n'.join(record['conflicts']))
                 if index == 0: item.setData(record, Qt.ItemDataRole.UserRole)
                 items.append(item)
             self.model.appendRow(items)
@@ -133,4 +142,9 @@ class TaxDetailDialog(QDialog):
         form.addRow('PDF-Steuermitteilung', QLabel(record.get('linked_tax_event_id') or 'nicht eindeutig verknüpft'))
         form.addRow('Zugehörige Geldbuchung', QLabel(record.get('linked_transaction_id') or 'keine / nicht eindeutig'))
         form.addRow('Zuordnungsstatus', QLabel(record.get('match_status', 'unmatched')))
+        form.addRow('Fehlende Felder', QLabel(', '.join(record.get('missing_columns', [])) or 'keine'))
+        form.addRow('Widersprüche', QLabel('\n'.join(record.get('conflicts', [])) or 'keine'))
+        provenance = QLabel('\n'.join(f"{column}: {data.get('status')} · {data.get('source', '')}"
+                                      for column, data in record.get('column_provenance', {}).items()))
+        provenance.setWordWrap(True); form.addRow('Herkunft je Tabellenwert', provenance)
         scroll.setWidget(content); outer.addWidget(scroll); dialog.exec()
