@@ -54,7 +54,7 @@ Integritätslauf ergab 122 bestandene und 6 übersprungene Tests. Ruff,
 | ING Steuererstattung | `ing/steuererstattung/current-v1`; `test_ing_tax_refund_has_positive_economic_direction` | positive Erstattung, Komponenten vollständig |
 | Manipulierte Steuerkorrektur | `test_ing_tax_refund_rejects_inconsistent_components` | abweichende Summe wird nicht importiert |
 | ING Original-Verkäufe | lokaler, nicht eingecheckter Prüflauf über zwei Belege | beide SELL positiv; mit/ohne Gebühr abgestimmtes Brutto/Netto; Depot- und Zahlungskonto vorhanden |
-| comdirect defekte PDF-Schrift | `test_comdirect_unreadable_zero_quantity_is_never_booked` plus lokaler Originalbeleg | extrahierte Null-Stückzahl erzeugt keine Finanzbuchung |
+| comdirect Kauf-Stückzahl | `test_comdirect_trade_prefers_business_quantity_for_both_text_layouts`, `test_comdirect_trade_uses_positive_tax_quantity_only_after_value_check`, `test_comdirect_trade_rejects_when_both_quantity_sources_are_missing` plus lokale Originalbelege LS9AVX/ETF039 | Geschäftsabrechnung (`Nennwert`/`Zum Kurs von`) hat Vorrang; steuerliche `Stk.` nur positiv und nach Prüfung. Stückzahl × Kurs wird kaufmännisch auf Cent gerundet; höchstens 0,01 EUR Abweichung zum Kurswert ist zulässig, Widersprüche und fehlende Angaben brechen den Import konkret ab. |
 
 Die Fixtures sind synthetisch und anonymisiert; jede Fixture enthält einen
 Provenienznachweis. Nicht durch eine Fixture belegte Varianten werden in der

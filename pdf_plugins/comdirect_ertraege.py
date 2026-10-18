@@ -1,7 +1,7 @@
 """comdirect Wertpapier-Erträge (Dividende, Ausschüttung, Einlösung); user plugin."""
 import base64
 import re
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 from portfolio_v5.models import (BankDocument, BankTransaction, FeeItem, Kind, SecurityInfo,
                                  TaxEvent, TaxItem, correction_number, digest, money, parse_date)
@@ -52,6 +52,10 @@ TRADE_SETTLEMENT = re.compile(
     r'Valuta.{0,80}?(?P<iban2>DE\d{20})\s*EUR\s*(?P<d2>\d{2}\.\d{2}\.\d{4})', re.I | re.S)
 TRADE_TOTAL = re.compile(r'ZuIhren(?P<direction>Lasten|Gunsten)(?:nach|vor)Steuern\s*:\s*EUR\s*-?\s*(?P<a>' + AMOUNT + ')', re.I)
 TRADE_MARKET = re.compile(r'Kurswert\s*:?\s*EUR\s*(?P<a>' + AMOUNT + ')', re.I)
+TRADE_EXECUTION = re.compile(
+    r'Nennwert\s*Zum\s*Kurs\s*von\s*(?:St\.\s*(?P<qty>\d[\d.]*(?:,\d+)?)\s*)?'
+    r'EUR\s*(?P<price>\d[\d.]*(?:,\d+)?)\s*Kurswert\s*:?\s*EUR\s*(?P<market>' + AMOUNT + ')',
+    re.I)
 TRADE_DEPOT = re.compile(r'Depot(?:nummer|nr\.)\s*:?\s*(?P<n>\d+)', re.I)
 TRADE_REFERENCE = re.compile(r'Referenz-Nummer\s*:\s*(?P<r>[A-Z0-9]+)', re.I)
 TRADE_TAX_TOTAL = re.compile(r'abgef.hrteSteuern\s*:?\s*EUR\s*-?\s*(?P<a>' + AMOUNT + ')', re.I)
@@ -60,6 +64,63 @@ TRADE_TAX_ITEMS = {
     'solidaritaetszuschlag': re.compile(r'Solidarit.tszuschlag\s*:?\s*EUR\s*-?\s*(?P<a>' + AMOUNT + ')', re.I),
     'kirchensteuer': re.compile(r'Kirchensteuer\s*:?\s*EUR\s*-?\s*(?P<a>' + AMOUNT + ')', re.I),
 }
+
+# Kurs und Stückzahl werden auf den ausgewiesenen Kurswert in Cent gerundet.
+# Ein Cent Toleranz deckt ausschließlich Differenzen der gedruckten Kurspräzision ab;
+# größere Abweichungen werden als widersprüchliche Abrechnung abgewiesen.
+TRADE_VALUE_TOLERANCE = Decimal('0.01')
+
+
+def _trade_value_difference(qty, price, market):
+    calculated = (Decimal(qty) * Decimal(price)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    return calculated, abs(calculated - Decimal(market))
+
+
+def _trade_quantity(document, tax_security):
+    """Primär Geschäftsabrechnung, sekundär nur eine positive steuerliche Stk.-Angabe."""
+    executions = []
+    for page in document.pages:
+        compact = re.sub(r'[ \t]+', '', page.text)
+        match = TRADE_EXECUTION.search(compact)
+        if match:
+            executions.append((page.number, match))
+    if len(executions) > 1:
+        raise ValueError('Mehrere Geschäftsabrechnungen mit Nennwert, Kurs und Kurswert erkannt.')
+
+    tax_qty = correction_number(tax_security.group('qty')) if tax_security else None
+    tax_qty = tax_qty if tax_qty is not None and Decimal(tax_qty) > 0 else None
+    if executions:
+        page_number, execution = executions[0]
+        primary_qty = correction_number(execution.group('qty')) if execution.group('qty') else None
+        price = correction_number(execution.group('price'))
+        market = money(execution.group('market'))
+        if primary_qty is not None and Decimal(primary_qty) <= 0:
+            primary_qty = None
+        if primary_qty is not None and tax_qty is not None and Decimal(tax_qty) != Decimal(primary_qty):
+            raise ValueError(
+                f'Stückzahlangaben widersprüchlich: Geschäftsabrechnung {primary_qty} Stück, '
+                f'steuerliche Mitteilung {tax_qty} Stück.')
+        qty = primary_qty or tax_qty
+        if qty is None:
+            raise ValueError('Stückzahl fehlt sowohl in der Geschäftsabrechnung als auch als positive Angabe '
+                             'in der steuerlichen Mitteilung; Dokument nicht automatisch verbucht.')
+        if price is None or market is None:
+            raise ValueError(f'Ungültige Kurs- oder Kurswertangabe auf der Geschäftsabrechnung (Seite {page_number}).')
+        calculated, difference = _trade_value_difference(qty, price, market)
+        if difference > TRADE_VALUE_TOLERANCE:
+            raise ValueError(
+                f'Geschäftsabrechnung widersprüchlich: {qty} Stück × {price} EUR ergeben '
+                f'{calculated:.2f} EUR, ausgewiesen sind {Decimal(market):.2f} EUR '
+                f'(Toleranz {TRADE_VALUE_TOLERANCE:.2f} EUR).')
+        source = ('comdirect Geschäftsabrechnung · Nennwert/Zum Kurs von' if primary_qty is not None
+                  else 'comdirect steuerliche Mitteilung · Stk. (sekundär, gegen Geschäftsabrechnung geprüft)')
+        return qty, price, market, page_number, source
+
+    if tax_qty is None:
+        raise ValueError('Stückzahl fehlt sowohl in der Geschäftsabrechnung als auch als positive Angabe '
+                         'in der steuerlichen Mitteilung; Dokument nicht automatisch verbucht.')
+    raise ValueError(f'Steuerliche Stückzahl {tax_qty} ist vorhanden, kann aber ohne Kurs und Kurswert '
+                     'der Geschäftsabrechnung nicht plausibilisiert werden; Dokument nicht automatisch verbucht.')
 
 
 def short_date(value):
@@ -154,7 +215,7 @@ def split_name_wkn(rest):
 class ComdirectErtraegePlugin:
     plugin_id = 'user.comdirect-ertraege'
     bank_name = 'comdirect'
-    version = '1.1'
+    version = '1.2'
     document_types = ('Dividendengutschrift, Ertragsgutschrift, Einlösung, Wertpapierabrechnung Kauf/Verkauf, '
                       'Steuermitteilung Vorabpauschale')
 
@@ -377,13 +438,10 @@ class ComdirectErtraegePlugin:
         valuta = parse_date(settlement.group('d') or settlement.group('d2'))
         iban = settlement.group('iban') or settlement.group('iban2')
         trade_day = parse_date(trade.group('d'))
-        qty = correction_number(security.group('qty'))
+        qty, price, execution_market, execution_page, quantity_source = _trade_quantity(document, security)
         amount = money(total.group('a'))
         if not all((valuta, trade_day, qty, amount)):
             raise ValueError('Betrag, Provision, Stückzahl oder Datum ungültig.')
-        if Decimal(qty) <= 0:
-            raise ValueError('Stückzahl ist wegen der eingebetteten PDF-Schrift nicht sicher lesbar; '
-                             'Dokument nicht automatisch verbucht.')
         cash_account = 'IBAN ' + iban
         isin, wkn = security.group('isin').upper(), security.group('wkn').upper()
         name = ' '.join(security.group('name').split())
@@ -391,7 +449,7 @@ class ComdirectErtraegePlugin:
                      if TRADE_REFERENCE.search(compact) else trade.group('order'))
         account = 'Depot ' + depot.group('n')
         market = TRADE_MARKET.search(compact)
-        gross = money(market.group('a')) if market else None
+        gross = execution_market or (money(market.group('a')) if market else None)
         tax_total_match = TRADE_TAX_TOTAL.search(compact)
         taxes = money(tax_total_match.group('a')) if tax_total_match else '0.00'
         tax_items = [TaxItem(name, money(match.group('a'))) for name, pattern in TRADE_TAX_ITEMS.items()
@@ -432,16 +490,19 @@ class ComdirectErtraegePlugin:
             taxes=taxes if Decimal(taxes) else None,
             fee_items=[FeeItem('provision', provision)] if provision and Decimal(provision) else [],
             tax_items=tax_items,
-            gross_amount=gross, trade_date=trade_day, pay_date=valuta,
+            gross_amount=gross, price=price, trade_date=trade_day, pay_date=valuta,
             cash_account=cash_account, depot_account=account, affects_cash=False,
             security_ref=isin, order_id=trade.group('order'), document_reference=reference,
             transaction_reference=reference, operation='Wertpapiere', booking_text=booking_text,
             purpose=purpose, raw_text=purpose,
             field_sources={'fees': 'comdirect Wertpapierabrechnung · Provision',
+                           'quantity': quantity_source,
+                           **({'price': 'comdirect Geschäftsabrechnung · Zum Kurs von'} if price else {}),
                            'security': 'comdirect Wertpapierabrechnung · WKN/ISIN',
                            'value_date': 'comdirect Wertpapierabrechnung · Valuta'}))
         batch.securities.append(SecurityInfo(key=isin, isin=isin, wkn=wkn, name=name, quote_currency='EUR'))
-        page = next((p for p in document.pages if TRADE_TOTAL.search(re.sub(r'[ \t]+', '', p.text))), document.pages[0])
+        page = (next((p for p in document.pages if p.number == execution_page), None) if execution_page else None)
+        page = page or next((p for p in document.pages if TRADE_TOTAL.search(re.sub(r'[ \t]+', '', p.text))), document.pages[0])
         batch.pdf_booking_evidence.append({'page': page.number, 'line': 1, 'text': purpose,
             'ocr': page.used_ocr, 'confidence': page.confidence, 'review_required': page.used_ocr})
         batch.documents.append(BankDocument(
