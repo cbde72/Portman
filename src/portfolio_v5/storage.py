@@ -540,11 +540,24 @@ class Store:
                 by_id[event.external_id] = serialized
                 by_period[period_key] = serialized
             batch.tax_events = unique
+        if batch.tax_details:
+            existing_ids = {record['payload'].get('external_id')
+                            for record in self.model_records(kind='tax_details')}
+            seen_ids = set()
+            unique = []
+            for record in batch.tax_details:
+                if not record.external_id or record.external_id in seen_ids:
+                    raise ValueError('Steuerdetail benötigt eine eindeutige externe ID; Doppelimport abgewiesen.')
+                seen_ids.add(record.external_id)
+                if record.external_id not in existing_ids:
+                    unique.append(record)
+                    existing_ids.add(record.external_id)
+            batch.tax_details = unique
         payload = asdict(batch)
         identity = {'file': batch.file_hash, 'parser': PARSER_VERSION,
                     'snapshots': payload['snapshots'], 'balances': payload['balances'],
                     'transactions': payload['transactions']}
-        model_collections = ('securities', 'accounts', 'statements', 'tax_events', 'cost_reports', 'events')
+        model_collections = ('securities', 'accounts', 'statements', 'tax_events', 'tax_details', 'cost_reports', 'events')
         for name in model_collections:
             if payload.get(name): identity[name] = payload[name]
         prepared_documents = []
@@ -586,7 +599,7 @@ class Store:
             for name in new_accounts.values():
                 self._register_account(name)
             records = self._account_view()
-            names = batch.account_names + [s.account for s in batch.snapshots] + [b.account for b in batch.balances if b.account != 'Archiv'] + [t.account for t in batch.transactions] + [d.account for d in batch.documents]
+            names = batch.account_names + [s.account for s in batch.snapshots] + [b.account for b in batch.balances if b.account != 'Archiv'] + [t.account for t in batch.transactions] + [d.account for d in batch.documents] + [r.account for r in batch.tax_details]
             for name in names:
                 if account_key(name) not in assignments:
                     self._register_account(name)

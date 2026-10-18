@@ -187,6 +187,71 @@ class RepositoryV09(RepositoryV07):
             result = [event for event in result if str(event.get('income_year') or '') == str(income_year)]
         return sorted(result, key=lambda event: (event.get('date', ''), event.get('external_id', '')))
 
+    @cached_read
+    def tax_detail_records(self, account=None, tax_year=None):
+        """Return lossless CSV facts with conservative PDF/cash-booking links."""
+        from portfolio_v5.comdirect_tax_detail import date_value
+        links, mappings = self.store._import_links(), self.store._depot_mappings()
+        accounts = {row['account_key']: row for row in self.account_records() if row['active']}
+        imports = {row['id']: row['path'] for row in self.db.execute(
+            'SELECT id,path FROM imports WHERE active=1')}
+        tax_events = self.tax_events()
+        transactions = self.transactions()
+        result, seen = [], set()
+        for record in self.store.model_records(kind='tax_details'):
+            row = dict(record['payload'])
+            if row.get('external_id') in seen:
+                continue
+            seen.add(row.get('external_id'))
+            values = row.get('original_values') or {}
+            source_key = account_key(row.get('account', ''))
+            target_key = links.get((record['import_id'], source_key), mappings.get(source_key, source_key))
+            target = accounts.get(target_key)
+            if target is None:
+                continue
+            tax_day = date_value(values, 'Steuerliches Datum')
+            booking_day = date_value(values, 'Buchungstag')
+            reference_no = values.get('Referenznummer', '').strip()
+            wkn = values.get('WKN', '').strip().upper()
+            master = self.db.execute('SELECT isin FROM security_master WHERE wkn=?', (wkn,)).fetchone()
+            security_refs = {wkn, master['isin'] if master and master['isin'] else ''} - {''}
+            try:
+                csv_taxable = Decimal(values.get('Steuerbemessungsgrundlage', '').replace('.', '').replace(',', '.'))
+            except Exception:
+                csv_taxable = None
+            candidates = [event for event in tax_events
+                          if account_key(event.get('account', '')) == target_key
+                          and (not security_refs or event.get('security_ref') in security_refs)
+                          and ((reference_no and event.get('reference_no') == reference_no) or
+                               (event.get('date') in (tax_day, booking_day) and csv_taxable is not None
+                                and abs(Decimal(str(event.get('taxable_income') or 0))) == abs(csv_taxable)))]
+            cash = [tx for tx in transactions
+                    if account_key(tx.get('account', '')) == target_key
+                    and tx.get('date') in (tax_day, booking_day)
+                    and (reference_no and reference_no in ' '.join(str(tx.get(k) or '') for k in
+                         ('transaction_reference', 'bank_reference', 'document_reference', 'purpose', 'booking_text')))]
+            if len(candidates) == 1 and candidates[0].get('related_transaction_id'):
+                related = [tx for tx in transactions
+                           if tx.get('external_id') == candidates[0]['related_transaction_id']]
+                if len(related) == 1:
+                    cash = related
+            linked_event = candidates[0] if len(candidates) == 1 else {}
+            row.update(account=target['name'], depot=row.get('account', ''), import_id=record['import_id'],
+                       source=imports.get(record['import_id'], ''), booking_date=booking_day,
+                       tax_date=tax_day, tax_year=values.get('Steuerjahr', '').strip(),
+                       document_date=linked_event.get('document_date', ''),
+                       income_year=linked_event.get('income_year', ''),
+                       linked_tax_event_id=linked_event.get('external_id', ''),
+                       linked_transaction_id=(reference(cash[0]) if len(cash) == 1 else ''),
+                       match_status=('ambiguous' if len(candidates) > 1 or len(cash) > 1 else
+                                     'matched' if len(candidates) == 1 else 'unmatched'))
+            if account and account_key(row['account']) != account_key(account):
+                continue
+            if tax_year is not None and row['tax_year'] != str(tax_year):
+                continue
+            result.append(row)
+        return sorted(result, key=lambda row: (row.get('tax_date', ''), row.get('external_id', '')))
+
     def tax_event_bookings(self, account):
         """Project tax facts into the depot booking view without creating transactions."""
         rows = []

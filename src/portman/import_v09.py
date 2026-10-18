@@ -11,7 +11,7 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from portfolio_v5.models import (ImportBatch, Snapshot, Position, Balance, Transaction, BankTransaction,
-    BankDocument, TaxItem, FeeItem, SecurityInfo, AccountInfo, AccountStatement, TaxEvent,
+    BankDocument, TaxItem, FeeItem, SecurityInfo, AccountInfo, AccountStatement, TaxEvent, TaxDetailRecord,
     CostItem, CostReport, CorporateEvent, digest)
 from portfolio_v5.accounts import account_key
 from .repository_v09 import RepositoryV09, reference
@@ -49,7 +49,7 @@ def transaction(repo, commit=False):
 
 def decode_batch(payload):
     # Avoid deepcopy - construct new objects directly from payload data
-    d = {k: v for k, v in payload.items() if k not in ('snapshots', 'balances', 'transactions', 'documents', 'securities', 'accounts', 'statements', 'tax_events', 'cost_reports', 'events')}
+    d = {k: v for k, v in payload.items() if k not in ('snapshots', 'balances', 'transactions', 'documents', 'securities', 'accounts', 'statements', 'tax_events', 'tax_details', 'cost_reports', 'events')}
     d['snapshots'] = [Snapshot(**{**s,'positions':[Position(**p) for p in s['positions']]}) for s in payload['snapshots']]
     d['balances'] = [Balance(**b) for b in payload['balances']]
     bank_fields = {'purpose', 'counterparty', 'bank_reference', 'operation', 'booking_text',
@@ -66,6 +66,7 @@ def decode_batch(payload):
     d['accounts'] = [AccountInfo(**row) for row in payload.get('accounts', [])]
     d['statements'] = [AccountStatement(**row) for row in payload.get('statements', [])]
     d['tax_events'] = [TaxEvent(**row) for row in payload.get('tax_events', [])]
+    d['tax_details'] = [TaxDetailRecord(**row) for row in payload.get('tax_details', [])]
     d['cost_reports'] = [CostReport(**{**row, 'items': [CostItem(**item) for item in row.get('items', [])]})
                          for row in payload.get('cost_reports', [])]
     d['events'] = [CorporateEvent(**row) for row in payload.get('events', [])]

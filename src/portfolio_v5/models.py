@@ -321,6 +321,24 @@ class TaxEvent:
 
 
 @dataclass
+class TaxDetailRecord:
+    """Lossless row from an institution's tax-detail export.
+
+    ``original_values`` deliberately contains the source strings.  Normalized
+    dates and amounts are derived by readers and never replace audit evidence.
+    """
+    external_id: str
+    institution: str
+    account: str
+    source_format: str
+    original_values: dict[str, str]
+    source_reference: str = ''
+    linked_tax_event_id: str = ''
+    linked_transaction_id: str = ''
+    match_status: str = 'unmatched'
+
+
+@dataclass
 class CostItem:
     security_ref: str
     service_costs: str | None = None
@@ -840,6 +858,7 @@ class ImportBatch:
     accounts: list[AccountInfo] = field(default_factory=list)
     statements: list[AccountStatement] = field(default_factory=list)
     tax_events: list[TaxEvent] = field(default_factory=list)
+    tax_details: list[TaxDetailRecord] = field(default_factory=list)
     cost_reports: list[CostReport] = field(default_factory=list)
     events: list[CorporateEvent] = field(default_factory=list)
 
@@ -860,6 +879,7 @@ class ImportBatch:
                 'positions': sum(len(s.positions) for s in self.snapshots),
                 'balances': len(self.balances), 'transactions': len(self.transactions), 'documents': len(self.documents),
                 'securities': len(self.securities), 'accounts': len(self.accounts), 'statements': len(self.statements),
-                'tax_events': len(self.tax_events), 'cost_reports': len(self.cost_reports), 'events': len(self.events),
+                'tax_events': len(self.tax_events), 'tax_details': len(self.tax_details),
+                'cost_reports': len(self.cost_reports), 'events': len(self.events),
                 'warnings': self.warnings + [f'{s.sheet}: {w}' for s in self.snapshots for w in s.warnings],
                 'errors': self.errors, 'history_end': self.history_end}
