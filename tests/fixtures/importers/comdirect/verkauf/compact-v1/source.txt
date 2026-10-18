@@ -1,6 +1,7 @@
 comdirect bank AG
 Wertpapierverkauf Nr. 91159076 vom 23.07.2026
 Stk. 2,000 Muster ETF, WKN/ISIN: A1TEST/DE000A1TEST0
+NennwertZumKursvonSt.2,000 EUR50,00
 Kurswert: EUR 100,00
 Provision: EUR 1,00
 ZuIhrenGunstennachSteuern: EUR 99,00

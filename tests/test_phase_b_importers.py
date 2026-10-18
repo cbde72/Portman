@@ -5,6 +5,7 @@ import pytest
 
 from portfolio_v5.models import ImportBatch
 from portfolio_v5.pdf_plugins import ParseContext, PdfDocument, PdfPage
+from portman.repository_v09 import RepositoryV09
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -73,11 +74,89 @@ def test_ing_sale_without_fee_keeps_fee_unknown_and_equation_valid():
 def test_comdirect_unreadable_zero_quantity_is_never_booked():
     plugin = load_plugin('comdirect_ertraege.py')
     path = FIXTURES / 'comdirect/verkauf/compact-v1/source.txt'
-    text = path.read_text(encoding='utf-8').replace('Stk. 2,000', 'Stk. 0')
+    text = path.read_text(encoding='utf-8').replace('Stk. 2,000', 'Stk. 0').replace(
+        'NennwertZumKursvonSt.2,000', 'NennwertZumKursvon')
     document = PdfDocument(path, text.encode(), 'unreadable-quantity', (PdfPage(1, text),))
-    with pytest.raises(ValueError, match='nicht sicher lesbar'):
+    with pytest.raises(ValueError, match='Stückzahl fehlt sowohl'):
         plugin.parse(document, plugin.detect(document)[0],
                      ParseContext(ImportBatch(path.name, 'unreadable-quantity', source_sheet='PDF')))
+
+
+def comdirect_purchase_document(execution_line, tax_quantity='0', market='21,98'):
+    business = f'''comdirect bank AG
+Wertpapierkauf Nr. 91229890 vom 01.06.2026
+{execution_line}
+Kurswert: EUR {market}
+ZuIhrenLastenvorSteuern: EUR -{market}
+Depotnummer: 123456789
+'''
+    tax = f'''Steuerliche Behandlung: Wertpapierkauf Nr. 91229890 vom 01.06.2026
+Stk.{tax_quantity} Muster Index, WKN/ISIN: A1TEST/DE000A1TEST0
+ZuIhrenLastennachSteuern: EUR -{market}
+Valuta 03.06.2026 auf Konto mit der IBAN DE11111111111111111111
+Referenz-Nummer: ANONYMIZED1
+'''
+    return PdfDocument(Path('anonymous.pdf'), b'%PDF-anonymous', 'anonymous-hash',
+                       (PdfPage(1, business), PdfPage(2, tax)))
+
+
+@pytest.mark.parametrize('execution_line', [
+    'Nennwert Zum Kurs von St. 0,006 EUR 3.662,71',
+    'NennwertZumKursvonSt.0,006 EUR3.662,71',
+])
+def test_comdirect_trade_prefers_business_quantity_for_both_text_layouts(execution_line):
+    plugin = load_plugin('comdirect_ertraege.py')
+    source = comdirect_purchase_document(execution_line)
+    batch = plugin.parse(source, plugin.detect(source)[0],
+                         ParseContext(ImportBatch('anonymous.pdf', 'anonymous-hash', source_sheet='PDF')))
+    tx = batch.transactions[0]
+    assert (tx.quantity, tx.price, tx.gross_amount) == ('0.006', '3662.71', '21.98')
+    assert tx.field_sources['quantity'] == 'comdirect Geschäftsabrechnung · Nennwert/Zum Kurs von'
+
+
+def test_comdirect_trade_uses_positive_tax_quantity_only_after_value_check():
+    plugin = load_plugin('comdirect_ertraege.py')
+    source = comdirect_purchase_document(
+        'Nennwert Zum Kurs von EUR 73,37', tax_quantity='0,240', market='17,61')
+    batch = plugin.parse(source, plugin.detect(source)[0],
+                         ParseContext(ImportBatch('anonymous.pdf', 'secondary', source_sheet='PDF')))
+    tx = batch.transactions[0]
+    assert (tx.quantity, tx.price, tx.gross_amount) == ('0.240', '73.37', '17.61')
+    assert 'sekundär' in tx.field_sources['quantity']
+
+
+def test_comdirect_trade_rejects_quantity_value_contradiction():
+    plugin = load_plugin('comdirect_ertraege.py')
+    source = comdirect_purchase_document('Nennwert Zum Kurs von EUR 90,00', tax_quantity='0,240')
+    with pytest.raises(ValueError, match='Geschäftsabrechnung widersprüchlich'):
+        plugin.parse(source, plugin.detect(source)[0],
+                     ParseContext(ImportBatch('anonymous.pdf', 'bad-secondary', source_sheet='PDF')))
+
+
+def test_comdirect_trade_rejects_when_both_quantity_sources_are_missing():
+    plugin = load_plugin('comdirect_ertraege.py')
+    source = comdirect_purchase_document('Nennwert Zum Kurs von EUR 3.662,71', tax_quantity='0')
+    with pytest.raises(ValueError, match='Stückzahl fehlt sowohl'):
+        plugin.parse(source, plugin.detect(source)[0],
+                     ParseContext(ImportBatch('anonymous.pdf', 'missing-quantity', source_sheet='PDF')))
+
+
+def test_comdirect_trade_is_stored_under_depot_bookings(tmp_path):
+    plugin = load_plugin('comdirect_ertraege.py')
+    source = comdirect_purchase_document('NennwertZumKursvonSt.0,006 EUR3.662,71')
+    batch = plugin.parse(source, plugin.detect(source)[0],
+                         ParseContext(ImportBatch('anonymous.pdf', 'depot-booking', source_sheet='PDF')))
+    batch.documents = []
+    repo = RepositoryV09(tmp_path / 'portfolio.sqlite', backups=False)
+    try:
+        assert repo.commit_batches([batch])[0]['status'] == 'imported'
+        bookings = repo.transactions('Depot 123456789')
+        assert len(bookings) == 1
+        assert (bookings[0]['account'], bookings[0]['security'], bookings[0]['quantity']) == (
+            'Depot 123456789', 'DE000A1TEST0', '0.006')
+        assert repo.transactions('IBAN DE11111111111111111111') == []
+    finally:
+        repo.close()
 
 
 def test_ing_advance_tax_separates_tax_basis_from_cash_debit():

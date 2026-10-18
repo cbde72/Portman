@@ -213,6 +213,7 @@ def test_comdirect_trade_extracts_provision_and_settlement_identity():
     text = '''comdirect
 Wertpapierkauf Nr. 91159075 vom 23.07.2026
 Stk. 0,620 ISH.S.EUROP.MID 200 U.ETF, WKN/ISIN: 593399/DE0005933998
+Nennwert Zum Kurs von St. 0,620 EUR 66,66
 Kurswert: EUR 41,33
 Provision: EUR 0,62
 ZuIhrenLastennachSteuern: EUR -41,95
