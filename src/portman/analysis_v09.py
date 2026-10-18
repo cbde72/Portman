@@ -202,6 +202,22 @@ def fee_candidates(repo,txs=None):
 def realized_profit(repo,start,end,account=None):
     """FIFO from documented buys; never infer missing opening acquisition costs."""
     lots=defaultdict(list); rows=[]; uncertain=set()
+    def security_key(value):
+        row=repo.db.execute('SELECT security_key FROM security_master WHERE security_key=? OR isin=? OR wkn=?',
+                            (value,value,value)).fetchone()
+        return row['security_key'] if row else value
+    advance_tax=defaultdict(list)
+    for event in repo.tax_events(account):
+        if event.get('type') not in ('vorabpauschale','vorabpauschale_ausland'):
+            continue
+        try:
+            quantity=abs(Decimal(str(event.get('quantity') or 0)))
+            credit=abs(Decimal(str(event.get('taxable_income') or 0)))
+        except Exception:
+            continue
+        if quantity and credit:
+            advance_tax[(account_key(event['account']),security_key(event.get('security_ref','')))].append(
+                {'date':event.get('date',''),'quantity':quantity,'credit':credit})
     action_days={}
     for a in repo.actions('0001-01-01',end):
         keys=[(a['depot'],a['security'])]
@@ -211,8 +227,27 @@ def realized_profit(repo,start,end,account=None):
     trades=[t for t in repo.transactions(account) if t['date']<=end and t['kind'] in ('BUY','SELL','TRANSFER_IN','TRANSFER_OUT')]
     daily=defaultdict(int)
     for t in trades: daily[(t['depot'],t.get('security',''),t['currency'],t['date'])]+=1
-    def append_sale(t,cost,known):
-        rows.append(dict(date=t['date'],account=t['account'],security=t.get('security',''),currency=t['currency'],proceeds=abs(Decimal(t['amount'])),cost=cost if known else None,realized=abs(Decimal(t['amount']))-cost if known else None,status='FIFO · Buchungsbeträge, Gebührenkonvention des Belegs' if known else 'Unbekannt · Stückzahl, Kennung, Anfangsbestand, Abdeckung, Tagesreihenfolge oder Kapitalmaßnahme prüfen',source=t['source']))
+    def tax_credit(t,quantity):
+        if not quantity:
+            return None
+        pools=advance_tax[(account_key(t['account']),security_key(t.get('security','')))]
+        total=ZERO
+        for pool in pools:
+            if pool['date']>t['date'] or not pool['quantity']:
+                continue
+            used=min(quantity,pool['quantity'])
+            total+=pool['credit']*used/pool['quantity']
+            pool['credit']-=pool['credit']*used/pool['quantity']
+            pool['quantity']-=used
+        return total
+    def append_sale(t,cost,known,quantity=None):
+        credit=tax_credit(t,quantity)
+        realized=abs(Decimal(t['amount']))-cost if known else None
+        rows.append(dict(date=t['date'],account=t['account'],security=t.get('security',''),currency=t['currency'],
+            proceeds=abs(Decimal(t['amount'])),cost=cost if known else None,realized=realized,
+            advance_tax_credit=credit,
+            taxable_realized=(realized-credit if realized is not None and credit is not None else None),
+            status='FIFO · Buchungsbeträge, Gebührenkonvention des Belegs' if known else 'Unbekannt · Stückzahl, Kennung, Anfangsbestand, Abdeckung, Tagesreihenfolge oder Kapitalmaßnahme prüfen',source=t['source']))
     for t in trades:
         key=(t['depot'],t.get('security',''),t['currency']); q=Decimal(t['quantity']) if t.get('quantity') is not None else None
         action_day=action_days.get((key[0],key[1]))
@@ -234,7 +269,11 @@ def realized_profit(repo,start,end,account=None):
                 snaps=[s for s in repo.snapshots(t['account']) if s['depot']==key[0] and s['complete'] and s.get('as_of') and s['effective_date']<=t['date']]
                 empty=[s for s in snaps if not json.loads(s['payload'])['positions']]
                 known=any(repo.has_coverage(t['account'],s['effective_date'],end) and not any(x['date']<=s['effective_date'] and x['depot']==key[0] and x.get('security')==key[1] for x in repo.transactions(t['account'])) for s in empty)
-            append_sale(t,cost,known)
+            append_sale(t,cost,known,q)
+        else:
+            # Earlier sales have already consumed their proportional tax credit,
+            # even when the selected report period starts later.
+            tax_credit(t,q)
     return rows
 
 

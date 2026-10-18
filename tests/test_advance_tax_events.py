@@ -111,7 +111,7 @@ def test_tax_event_is_visible_in_depot_bookings_without_changing_holdings_or_cas
         assert (rows[0]['kind'], rows[0]['amount'], rows[0]['affects_cash']) == (
             'VORABPAUSCHALE', '0.00', False)
         assert 'Ertragsjahr 2025' in rows[0]['purpose']
-        assert repo.advance_tax_credit('Depot 12345678900', 'IE00BKM4GZ66') == 100
+        assert repo.advance_tax_credit('Depot 12345678900', 'IE00BKM4GZ66') == 70
     finally:
         repo.close()
 
@@ -179,6 +179,27 @@ def test_comdirect_tax_subaccount_is_suggested_only_for_unique_depot(tmp_path):
         repo.close()
 
 
+def test_import_preview_shows_detected_and_assigned_tax_depot(tmp_path, qapp):
+    from portman.import_preview import ImportPreviewDialog
+    repo = RepositoryV09(tmp_path / 'portfolio.sqlite', backups=False)
+    try:
+        repo.save_account('Depot 4764924', {'kind': 'Depot'})
+        batch = parse(notice())
+        batch.account_names = ['Depot 476492400']
+        batch.tax_events[0].account = 'Depot 476492400'
+        batch.documents[0].account = 'Depot 476492400'
+        batch.pdf_text = 'comdirect bank AG'
+        dialog = ImportPreviewDialog(repo, [batch])
+        source, combo = dialog.mapping_rows[0][1], dialog.mapping_rows[0][2]
+        assert source['name'] == 'Depot 476492400'
+        assert combo.currentText().startswith('Depot 4764924')
+        selected = dialog.selected_batches()[0]
+        assert selected.account_assignments == {'depot 476492400': 'depot 4764924'}
+        dialog.close()
+    finally:
+        repo.close()
+
+
 def test_tax_event_cannot_be_assigned_to_cash_account(tmp_path):
     repo = RepositoryV09(tmp_path / 'portfolio.sqlite', backups=False)
     try:
@@ -189,5 +210,29 @@ def test_tax_event_cannot_be_assigned_to_cash_account(tmp_path):
         batch.account_assignments = {'depot 12345678900': 'giro 476492400'}
         with pytest.raises(ValueError, match='nur einem aktiven Depot'):
             repo.store.import_batch(batch)
+    finally:
+        repo.close()
+
+
+def test_legacy_wrong_tax_assignment_has_safe_repair_preview(tmp_path):
+    repo = RepositoryV09(tmp_path / 'portfolio.sqlite', backups=False)
+    try:
+        repo.save_account('Depot 4764924', {'kind': 'Depot'})
+        repo.save_account('Giro 476492400', {'kind': 'Girokonto', 'number': '0476492400'})
+        batch = parse(notice())
+        batch.path = 'comdirect-tax.pdf'
+        batch.documents = []
+        batch.account_assignments = {'depot 12345678900': 'depot 4764924'}
+        iid = repo.commit_batches([batch])[0]['id']
+        with repo.db:
+            repo.db.execute('UPDATE import_account_links SET account_key=? WHERE import_id=?',
+                            ('giro 476492400', iid))
+        issue = repo.tax_assignment_issues()[0]
+        assert issue['target_name'] == 'Giro 476492400'
+        assert issue['suggested_target_key'] is None  # source number is unrelated; never guess
+        repo.reassign_imports([{'import_id': iid, 'source_key': issue['source_key'],
+                                'target_key': 'depot 4764924'}])
+        assert repo.tax_assignment_issues() == []
+        assert repo.transactions() == [] and repo.holdings() == []
     finally:
         repo.close()

@@ -563,6 +563,40 @@ def test_sale_without_quantity_remains_visible_as_unknown(repo):
     assert len(rows)==1 and rows[0]['proceeds']==150 and rows[0]['realized'] is None
 
 
+def test_advance_tax_reduces_only_later_taxable_sale_gain(repo):
+    from portfolio_v5.models import Transaction, TaxEvent
+    from portman.analysis_v09 import realized_profit
+    repo.save_account('Depot A', {'kind': 'Depot'})
+    repo.commit_batches([ImportBatch('trades','trades',transactions=[
+        Transaction('Depot A','buy','2025-01-01','BUY','-200','EUR',security='IE00BKM4GZ66',quantity='2'),
+        Transaction('Depot A','sell-1','2026-02-01','SELL','150','EUR',security='IE00BKM4GZ66',quantity='1'),
+        Transaction('Depot A','sell-2','2026-03-01','SELL','150','EUR',security='IE00BKM4GZ66',quantity='1')])])
+    repo.commit_batches([ImportBatch('tax.pdf','tax',tax_events=[TaxEvent(
+        'advance','Depot A','vorabpauschale_ausland','2026-01-02',income_year='2025',
+        security_ref='IE00BKM4GZ66',quantity='2',advance_tax_base='85.72',taxable_income='60.00')])])
+    repo.confirm_coverage('Depot A','0001-01-01','2026-04-01')
+    rows=realized_profit(repo,'2026-01-01','2026-04-01','Depot A')
+    assert [(r['cost'],r['realized'],r['advance_tax_credit'],r['taxable_realized']) for r in rows] == [
+        (Decimal('100'),Decimal('50'),Decimal('30.00'),Decimal('20.00')),
+        (Decimal('100'),Decimal('50'),Decimal('30.00'),Decimal('20.00'))]
+    assert repo.advance_tax_credit('Depot A','IE00BKM4GZ66') == Decimal('60.00')
+
+
+def test_sale_before_report_period_consumes_advance_tax_credit(repo):
+    from portfolio_v5.models import Transaction, TaxEvent
+    from portman.analysis_v09 import realized_profit
+    repo.save_account('Depot A', {'kind': 'Depot'})
+    repo.commit_batches([ImportBatch('all','all',transactions=[
+        Transaction('Depot A','buy','2025-01-01','BUY','-200','EUR',security='FUND',quantity='2'),
+        Transaction('Depot A','old-sale','2026-02-01','SELL','150','EUR',security='FUND',quantity='1'),
+        Transaction('Depot A','period-sale','2026-03-01','SELL','150','EUR',security='FUND',quantity='1')],
+        tax_events=[TaxEvent('advance','Depot A','vorabpauschale','2026-01-02',security_ref='FUND',
+            quantity='2',taxable_income='60')])])
+    repo.confirm_coverage('Depot A','0001-01-01','2026-04-01')
+    row=realized_profit(repo,'2026-02-15','2026-04-01','Depot A')[0]
+    assert row['advance_tax_credit'] == Decimal('30')
+
+
 def test_later_corporate_action_does_not_hide_earlier_realized_profit(repo):
     from portfolio_v5.models import Transaction
     from portman.analysis_v09 import realized_profit

@@ -236,11 +236,22 @@ class RepositoryV09(RepositoryV07):
                 if len(related) == 1:
                     cash = related
             linked_event = candidates[0] if len(candidates) == 1 else {}
+            depot_details = json.loads(target.get('details') or '{}')
+            cash_key = linked_event.get('cash_account') or depot_details.get('cash_account_key') or ''
+            cash_record = accounts.get(cash_key)
             row.update(account=target['name'], depot=row.get('account', ''), import_id=record['import_id'],
                        source=imports.get(record['import_id'], ''), booking_date=booking_day,
                        tax_date=tax_day, tax_year=values.get('Steuerjahr', '').strip(),
                        document_date=linked_event.get('document_date', ''),
                        income_year=linked_event.get('income_year', ''),
+                       advance_tax_base=linked_event.get('advance_tax_base', ''),
+                       partial_exemption_amount=linked_event.get('partial_exemption_amount', ''),
+                       taxable_income=linked_event.get('taxable_income', ''),
+                       paid_taxes=linked_event.get('paid_taxes', ''),
+                       security_ref=linked_event.get('security_ref', '') or wkn,
+                       cash_account=(cash_record['name'] if cash_record else
+                                     linked_event.get('cash_account', '')),
+                       linked_document_source=linked_event.get('source', ''),
                        linked_tax_event_id=linked_event.get('external_id', ''),
                        linked_transaction_id=(reference(cash[0]) if len(cash) == 1 else ''),
                        match_status=('ambiguous' if len(candidates) > 1 or len(cash) > 1 else
@@ -269,9 +280,30 @@ class RepositoryV09(RepositoryV07):
                              external_id=event.get('external_id', ''), tax_event=True))
         return rows
 
+    def tax_assignment_issues(self):
+        """Preview legacy tax imports whose confirmed target is not an active depot."""
+        from portfolio_v5.import_accounts import pdf_account_match
+        active_ids = [row[0] for row in self.db.execute('SELECT id FROM imports WHERE active=1')]
+        records = {row['account_key']: row for row in self.account_records()}
+        issues = []
+        for row in self.import_assignment_rows(active_ids):
+            if row.get('required_kind') != 'Depot':
+                continue
+            target = records.get(row['target_key'])
+            if target and target['active'] and json.loads(target.get('details') or '{}').get('kind') == 'Depot':
+                continue
+            bank = 'comdirect' if 'comdirect' in (row.get('path') or '').casefold() else ''
+            suggested, reason = pdf_account_match(
+                row['source_name'], records, required_kind='Depot', bank=bank)
+            issues.append({**row, 'issue': 'Depot-Steuerdaten sind keinem aktiven Depot zugeordnet.',
+                           'suggested_target_key': suggested,
+                           'suggested_target_name': records.get(suggested, {}).get('name', ''),
+                           'suggestion_reason': reason})
+        return issues
+
     def advance_tax_credit(self, account, security_ref, through_date='9999-12-31'):
-        """Tax-only basis available for a later sale; never part of portfolio cost or performance."""
-        return sum((abs(Decimal(str(event.get('advance_tax_base') or 0)))
+        """Previously taxed income available for a later sale; never portfolio cost or performance."""
+        return sum((abs(Decimal(str(event.get('taxable_income') or 0)))
                     for event in self.tax_events(account)
                     if event.get('type') in ('vorabpauschale', 'vorabpauschale_ausland')
                     and event.get('security_ref') == security_ref
