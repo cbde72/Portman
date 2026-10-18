@@ -19,6 +19,14 @@ def _number(value):
         return Decimal()
 
 
+def _source_number(value):
+    """Parse an unchanged German CSV number without changing its stored text."""
+    try:
+        return Decimal(str(value or '').strip().replace('.', '').replace(',', '.'))
+    except (InvalidOperation, ValueError):
+        return Decimal()
+
+
 def automatic_tax_values(repository, year):
     """Return booked gross investment income and taxes per account key."""
     records = {row['account_key']: row for row in repository.account_records()}
@@ -100,6 +108,27 @@ def automatic_tax_values(repository, year):
         partial = abs(_number(event.get('partial_exemption_amount')))
         values[key]['partial_exemption'] += partial if partial else max(Decimal(), base - taxable)
         values[key]['used_exemption'] += abs(_number(event.get('used_exemption')))
+    # CSV rows are a fallback source.  A linked PDF event is richer and wins,
+    # preventing the same Vorabpauschale from being counted twice.
+    if hasattr(repository, 'tax_detail_records'):
+        keys_by_name = {account_key(row['name']): row['account_key'] for row in records.values()}
+        for detail in repository.tax_detail_records(tax_year=year):
+            original = detail.get('original_values') or {}
+            if 'vorabpauschale' not in original.get('Vorgang', '').casefold():
+                continue
+            if detail.get('linked_tax_event_id'):
+                continue
+            key = keys_by_name.get(account_key(detail.get('account', '')))
+            if key not in records:
+                continue
+            taxable = abs(_source_number(original.get('Steuerbemessungsgrundlage')))
+            used = abs(_source_number(original.get('Veränderung FSA')))
+            taxes = abs(_source_number(original.get('Summe Steuern')))
+            values[key]['advance_tax_taxable'] += taxable
+            values[key]['advance_tax_count'] += 1
+            values[key]['capital_income'] += taxable
+            values[key]['used_exemption'] += used
+            values[key]['taxes'] += taxes
     return dict(values)
 
 

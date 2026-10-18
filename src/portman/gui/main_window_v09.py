@@ -129,12 +129,14 @@ class MainWindowV09Mixin:
             ("Aufträge / Fortschritt", self.job_center.show),
             ("Importsitzung fortsetzen", self.resume_import),
             ("CSV mit Profil importieren", self.profile_import),
+            ("comdirect-Steuerdetails importieren", self.comdirect_tax_detail_import),
+            ("Steuerliche Detailansicht", self.open_tax_detail_view),
             ("Umbuchungen / Kapitalmaßnahmen / Wechselkurse", self.open_actions),
             ("Zurück", self.go_back),
         ]:
             action = QAction(label, self)
             action.triggered.connect(callback)
-            target = self.import_menu if label in ("Importsitzung fortsetzen", "CSV mit Profil importieren") else tools_menu
+            target = self.import_menu if label in ("Importsitzung fortsetzen", "CSV mit Profil importieren", "comdirect-Steuerdetails importieren") else tools_menu
             target.addAction(action)
         self.compact_action = QAction("&Kompakte Darstellung", self)
         self.compact_action.setCheckable(True)
@@ -614,6 +616,22 @@ class MainWindowV09Mixin:
                     self.preview_parsed_import([dialog.batch])
             except Exception as error:
                 QMessageBox.warning(self, "CSV", str(error))
+
+    def comdirect_tax_detail_import(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "comdirect-Steuerdetails importieren", self.import_start_folder(), "CSV (*.csv)")
+        if not path:
+            return
+        self.remember_import_folder(path)
+        try:
+            from portfolio_v5.comdirect_tax_detail import parse_comdirect_tax_detail
+            self.preview_parsed_import([parse_comdirect_tax_detail(path)])
+        except Exception as error:
+            QMessageBox.warning(self, "comdirect-Steuerdetails", str(error))
+
+    def open_tax_detail_view(self):
+        from portman.tax_detail_view import TaxDetailDialog
+        TaxDetailDialog(self.repository, self).exec()
 
     def excel_import(self):
         from portman.excel_import_dialog import ExcelImportDialog
