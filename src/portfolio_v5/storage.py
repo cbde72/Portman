@@ -483,9 +483,15 @@ class Store:
         for target in assignments.values():
             if target not in new_accounts and (target not in records or not records[target]['active']):
                 raise ValueError('Ein gewähltes Zielkonto fehlt oder wurde gelöscht. Importvorschau erneut öffnen.')
-        for source, target in assignments.items():
-            required = required_target_kind(source_rows[source])
-            if required and (target in new_accounts or not target_compatible(records[target], required)):
+        for source, source_row in source_rows.items():
+            required = required_target_kind(source_row)
+            if not required:
+                continue
+            target = assignments.get(source, source)
+            if target == source and 'Depotstände' in source_row['kinds']:
+                continue
+            if target in new_accounts or target not in records or not records[target]['active'] \
+                    or not target_compatible(records[target], required):
                 raise ValueError(f'{source_rows[source]["name"]} enthält Depot-Steuerdaten und darf nur einem aktiven Depot zugeordnet werden.')
         if set(batch.remember_assignments) - set(assignments):
             raise ValueError('Für gemerkte Zuordnungen muss ein bestehendes Zielkonto gewählt werden.')

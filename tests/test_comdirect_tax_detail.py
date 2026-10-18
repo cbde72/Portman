@@ -45,6 +45,7 @@ def test_repeated_and_overlapping_exports_do_not_duplicate_rows(tmp_path):
     write_export(first, [advance_tax()]); write_export(second, [advance_tax()])
     repo = RepositoryV09(tmp_path / 'portfolio.sqlite', backups=False)
     try:
+        repo.save_account('Depot Test', {'kind': 'Depot'})
         repo.commit_batches([parse_comdirect_tax_detail(first, account='Depot Test')])
         assert repo.commit_batches([parse_comdirect_tax_detail(second, account='Depot Test')])[0]['status'] == 'duplicate'
         assert len(repo.tax_detail_records()) == 1
@@ -55,6 +56,7 @@ def test_pdf_event_wins_over_csv_without_quantity_or_cash_mutation(tmp_path):
     source = tmp_path / 'tax.csv'; write_export(source, [advance_tax()])
     repo = RepositoryV09(tmp_path / 'portfolio.sqlite', backups=False)
     try:
+        repo.save_account('Depot Test', {'kind': 'Depot'})
         repo.commit_batches([ImportBatch('pdf', 'pdf', account_names=['Depot Test'], tax_events=[TaxEvent(
             'pdf-event', 'Depot Test', 'vorabpauschale_ausland', '2026-01-02', tax_year='2026',
             income_year='2025', document_date='2026-01-19', security_ref='A111X9', quantity='234.356',
@@ -93,10 +95,45 @@ def test_exact_reference_links_pdf_isin_to_csv_wkn_without_master_data(tmp_path)
         repo.close()
 
 
+def test_different_references_link_by_depot_security_date_and_amount(tmp_path):
+    source = tmp_path / 'tax.csv'; write_export(source, [advance_tax()])
+    repo = RepositoryV09(tmp_path / 'portfolio.sqlite', backups=False)
+    try:
+        repo.save_account('Depot Test', {'kind': 'Depot'})
+        repo.commit_batches([ImportBatch('pdf', 'pdf', tax_events=[TaxEvent(
+            'pdf-event', 'Depot Test', 'vorabpauschale_ausland', '2026-01-02', tax_year='2026',
+            income_year='2025', security_ref='A111X9', taxable_income='96.35',
+            advance_tax_base='137.65', reference_no='ANDERE-PDF-REFERENZ')])])
+        repo.commit_batches([parse_comdirect_tax_detail(source, account='Depot Test')])
+        row = repo.tax_detail_records()[0]
+        assert row['linked_tax_event_id'] == 'pdf-event'
+        assert row['match_status'] == 'matched'
+    finally:
+        repo.close()
+
+
+def test_ambiguous_pdf_candidates_are_not_merged(tmp_path):
+    source = tmp_path / 'tax.csv'; write_export(source, [advance_tax()])
+    repo = RepositoryV09(tmp_path / 'portfolio.sqlite', backups=False)
+    try:
+        repo.save_account('Depot Test', {'kind': 'Depot'})
+        events = [TaxEvent(f'pdf-{kind}', 'Depot Test', kind, '2026-01-02', tax_year='2026',
+            income_year='2025', security_ref='A111X9', taxable_income='96.35',
+            reference_no=f'OTHER-{kind}') for kind in ('vorabpauschale', 'vorabpauschale_ausland')]
+        repo.commit_batches([ImportBatch('pdf', 'pdf', tax_events=events)])
+        repo.commit_batches([parse_comdirect_tax_detail(source, account='Depot Test')])
+        row = repo.tax_detail_records()[0]
+        assert row['linked_tax_event_id'] == ''
+        assert row['match_status'] == 'ambiguous'
+    finally:
+        repo.close()
+
+
 def test_csv_only_advance_tax_is_cash_neutral_overview_fallback(tmp_path):
     source = tmp_path / 'tax.csv'; write_export(source, [advance_tax()])
     repo = RepositoryV09(tmp_path / 'portfolio.sqlite', backups=False)
     try:
+        repo.save_account('Depot Test', {'kind': 'Depot'})
         repo.commit_batches([parse_comdirect_tax_detail(source, account='Depot Test')])
         values = automatic_tax_values(repo, 2026); item = next(iter(values.values()))
         assert item['advance_tax_taxable'] == Decimal('96.35')
@@ -122,6 +159,7 @@ def test_detail_view_exposes_all_columns_and_filters(tmp_path, qapp):
     source = tmp_path / 'tax.csv'; write_export(source, [advance_tax()])
     repo = RepositoryV09(tmp_path / 'portfolio.sqlite', backups=False)
     try:
+        repo.save_account('Depot Test', {'kind': 'Depot'})
         repo.commit_batches([parse_comdirect_tax_detail(source, account='Depot Test')])
         dialog = TaxDetailDialog(repo)
         assert dialog.model.columnCount() == 32
@@ -130,3 +168,24 @@ def test_detail_view_exposes_all_columns_and_filters(tmp_path, qapp):
         assert dialog.proxy.rowCount() == 0
         dialog.close()
     finally: repo.close()
+
+
+def test_linked_detail_exposes_pdf_tax_and_cash_context(tmp_path):
+    source = tmp_path / 'tax.csv'; write_export(source, [advance_tax()])
+    repo = RepositoryV09(tmp_path / 'portfolio.sqlite', backups=False)
+    try:
+        repo.save_account('Cash', {'kind': 'Verrechnungskonto'})
+        repo.save_account('Depot Test', {'kind': 'Depot', 'cash_account_key': 'cash'})
+        repo.commit_batches([ImportBatch('notice.pdf', 'pdf', tax_events=[TaxEvent(
+            'pdf-event', 'Depot Test', 'vorabpauschale_ausland', '2026-01-02', tax_year='2026',
+            income_year='2025', document_date='2026-01-19', security_ref='A111X9',
+            advance_tax_base='137.65', partial_exemption_amount='41.30', taxable_income='96.35',
+            paid_taxes='0.00', reference_no='ANON-REF-001')])])
+        repo.commit_batches([parse_comdirect_tax_detail(source, account='Depot Test')])
+        row = repo.tax_detail_records()[0]
+        assert (row['advance_tax_base'], row['partial_exemption_amount'], row['taxable_income']) == (
+            '137.65', '41.30', '96.35')
+        assert row['cash_account'] == 'Cash'
+        assert row['linked_document_source'] == 'notice.pdf'
+    finally:
+        repo.close()

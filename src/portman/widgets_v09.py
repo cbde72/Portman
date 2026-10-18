@@ -363,8 +363,8 @@ class AnalysisDialog(QDialog):
         populate(self.tables[8], ["Bestandteil", "Betrag EUR"], [[r["label"], amount(r["amount"])] for r in d["bridge"]])
         populate(
             self.tables[9],
-            ["Datum", "Konto", "Wertpapier", "Währung", "Verkaufserlös", "FIFO-Einstand", "Realisierter Gewinn", "Methode / Abdeckung"],
-            [[r[k] for k in ("date", "account", "security", "currency", "proceeds", "cost", "realized", "status")] for r in d["profit"]],
+            ["Datum", "Konto", "Wertpapier", "Währung", "Verkaufserlös", "FIFO-Einstand", "Realisierter Gewinn", "Angerechnete Vorabpauschale", "Steuerlicher Gewinn", "Methode / Abdeckung"],
+            [[r[k] for k in ("date", "account", "security", "currency", "proceeds", "cost", "realized", "advance_tax_credit", "taxable_realized", "status")] for r in d["profit"]],
         )
         self.group_changed()
         q = d["quality"]
