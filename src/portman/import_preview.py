@@ -119,6 +119,8 @@ class ImportPreviewDialog(QDialog):
                 if suggestion['new_name']:
                     combo.addItem('Neu anlegen: ' + suggestion['new_name'], '__new__')
                 for account in accounts:
+                    if suggestion.get('required_kind') and json.loads(account['details']).get('kind') != suggestion['required_kind']:
+                        continue
                     identifier = target_identifiers.get(account['account_key'], '')
                     combo.addItem(account['name'] + (' · ' + identifier if identifier else ''), account['account_key'])
                 target = suggestion['target_key']

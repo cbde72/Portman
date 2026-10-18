@@ -221,9 +221,9 @@ class RepositoryV09(RepositoryV07):
                 csv_taxable = None
             candidates = [event for event in tax_events
                           if account_key(event.get('account', '')) == target_key
-                          and (not security_refs or event.get('security_ref') in security_refs)
                           and ((reference_no and event.get('reference_no') == reference_no) or
-                               (event.get('date') in (tax_day, booking_day) and csv_taxable is not None
+                               ((not security_refs or event.get('security_ref') in security_refs)
+                                and event.get('date') in (tax_day, booking_day) and csv_taxable is not None
                                 and abs(Decimal(str(event.get('taxable_income') or 0))) == abs(csv_taxable)))]
             cash = [tx for tx in transactions
                     if account_key(tx.get('account', '')) == target_key

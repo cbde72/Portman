@@ -3,6 +3,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QDialogButtonBox,
     QHeaderView, QLabel, QMessageBox, QTableWidget, QTableWidgetItem, QVBoxLayout)
 from .import_combo_style import style_target_account_combo
+import json
 
 
 class ImportAssignmentDialog(QDialog):
@@ -31,6 +32,8 @@ class ImportAssignmentDialog(QDialog):
             style_target_account_combo(combo)
             combo.addItem('Zuordnung beibehalten', None)
             for account in accounts:
+                if source.get('required_kind') and json.loads(account['details']).get('kind') != source['required_kind']:
+                    continue
                 combo.addItem(account['name'], account['account_key'])
             self.table.setCellWidget(index, 3, combo)
             remember = QTableWidgetItem('')

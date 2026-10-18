@@ -46,7 +46,7 @@ def test_repeated_and_overlapping_exports_do_not_duplicate_rows(tmp_path):
     repo = RepositoryV09(tmp_path / 'portfolio.sqlite', backups=False)
     try:
         repo.commit_batches([parse_comdirect_tax_detail(first, account='Depot Test')])
-        repo.commit_batches([parse_comdirect_tax_detail(second, account='Depot Test')])
+        assert repo.commit_batches([parse_comdirect_tax_detail(second, account='Depot Test')])[0]['status'] == 'duplicate'
         assert len(repo.tax_detail_records()) == 1
     finally: repo.close()
 
@@ -73,6 +73,24 @@ def test_pdf_event_wins_over_csv_without_quantity_or_cash_mutation(tmp_path):
         assert values[key]['advance_tax_taxable'] == Decimal('96.35')
         assert values[key]['used_exemption'] == Decimal('96.35')
     finally: repo.close()
+
+
+def test_exact_reference_links_pdf_isin_to_csv_wkn_without_master_data(tmp_path):
+    source = tmp_path / 'tax.csv'; write_export(source, [advance_tax()])
+    repo = RepositoryV09(tmp_path / 'portfolio.sqlite', backups=False)
+    try:
+        repo.save_account('Depot Test', {'kind': 'Depot'})
+        repo.commit_batches([ImportBatch('pdf', 'pdf', account_names=['Depot Test'], tax_events=[TaxEvent(
+            'pdf-event', 'Depot Test', 'vorabpauschale_ausland', '2026-01-02', tax_year='2026',
+            income_year='2025', security_ref='IE00BKM4GZ66', taxable_income='96.35',
+            advance_tax_base='137.65', used_exemption='96.35', reference_no='ANON-REF-001')])])
+        repo.commit_batches([parse_comdirect_tax_detail(source, account='Depot Test')])
+        assert repo.tax_detail_records()[0]['linked_tax_event_id'] == 'pdf-event'
+        values = automatic_tax_values(repo, 2026)['depot test']
+        assert values['advance_tax_count'] == 1
+        assert values['used_exemption'] == Decimal('96.35')
+    finally:
+        repo.close()
 
 
 def test_csv_only_advance_tax_is_cash_neutral_overview_fallback(tmp_path):

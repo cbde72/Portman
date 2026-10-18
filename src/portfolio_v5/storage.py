@@ -464,8 +464,9 @@ class Store:
     def import_batch(self, batch):
         if batch.errors:
             raise ValueError('; '.join(batch.errors))
-        from .import_accounts import import_sources, rule_scope
-        sources = {r['key'] for r in import_sources(batch)}
+        from .import_accounts import import_sources, required_target_kind, rule_scope, target_compatible
+        source_rows = {r['key']: r for r in import_sources(batch)}
+        sources = set(source_rows)
         assignments = dict(batch.account_assignments)
         records = self._account_view()
         new_accounts = {account_key(name): account_name(name) for name in batch.new_accounts}
@@ -482,6 +483,10 @@ class Store:
         for target in assignments.values():
             if target not in new_accounts and (target not in records or not records[target]['active']):
                 raise ValueError('Ein gewähltes Zielkonto fehlt oder wurde gelöscht. Importvorschau erneut öffnen.')
+        for source, target in assignments.items():
+            required = required_target_kind(source_rows[source])
+            if required and (target in new_accounts or not target_compatible(records[target], required)):
+                raise ValueError(f'{source_rows[source]["name"]} enthält Depot-Steuerdaten und darf nur einem aktiven Depot zugeordnet werden.')
         if set(batch.remember_assignments) - set(assignments):
             raise ValueError('Für gemerkte Zuordnungen muss ein bestehendes Zielkonto gewählt werden.')
         from .models import transaction_validation, valid_isin
@@ -541,18 +546,27 @@ class Store:
                 by_period[period_key] = serialized
             batch.tax_events = unique
         if batch.tax_details:
-            existing_ids = {record['payload'].get('external_id')
+            existing_ids = {record['payload'].get('external_id'): record['import_id']
                             for record in self.model_records(kind='tax_details')}
             seen_ids = set()
             unique = []
+            duplicate_imports = []
             for record in batch.tax_details:
                 if not record.external_id or record.external_id in seen_ids:
                     raise ValueError('Steuerdetail benötigt eine eindeutige externe ID; Doppelimport abgewiesen.')
                 seen_ids.add(record.external_id)
                 if record.external_id not in existing_ids:
                     unique.append(record)
-                    existing_ids.add(record.external_id)
+                    existing_ids[record.external_id] = None
+                else:
+                    duplicate_imports.append(existing_ids[record.external_id])
             batch.tax_details = unique
+            if (not unique and duplicate_imports and not batch.snapshots and not batch.balances
+                    and not batch.transactions and not batch.documents and not batch.tax_events
+                    and not batch.securities and not batch.accounts and not batch.statements
+                    and not batch.cost_reports and not batch.events):
+                return {'status': 'duplicate', 'path': batch.path,
+                        'id': next(iid for iid in duplicate_imports if iid is not None)}
         payload = asdict(batch)
         identity = {'file': batch.file_hash, 'parser': PARSER_VERSION,
                     'snapshots': payload['snapshots'], 'balances': payload['balances'],
@@ -799,17 +813,27 @@ class Store:
                         continue
                     key = account_key(row['account'])
                     sources.setdefault(key, {'name': row['account'], 'tables': set()})['tables'].add(table)
+            for row in self.db.execute(
+                    "SELECT kind,payload FROM import_model_records WHERE import_id=? AND kind IN ('tax_events','tax_details')",
+                    (iid,)):
+                payload = json.loads(row['payload'])
+                name = payload.get('account', '')
+                if not name:
+                    continue
+                key = account_key(name)
+                sources.setdefault(key, {'name': name, 'tables': set()})['tables'].add(row['kind'])
             for key, source in sources.items():
                 target = links.get((iid, key), mappings.get(key, key) if 'snapshots' in source['tables'] else key)
                 record = records.get(target)
                 result.append({'import_id': iid, 'path': entry['path'], 'active': entry['active'],
                     'source_key': key, 'source_name': source['name'], 'target_key': target,
-                    'target_name': record['name'] if record else source['name']})
+                    'target_name': record['name'] if record else source['name'],
+                    'required_kind': ('Depot' if source['tables'] & {'tax_events', 'tax_details'} else '')})
         return result
 
     def reassign_imports(self, changes):
         """Update source associations together; preserve imported payloads and values."""
-        from .import_accounts import rule_scope
+        from .import_accounts import rule_scope, target_compatible
         with self.db:
             rows = {(r['import_id'], r['source_key']): r for r in self.import_assignment_rows([c['import_id'] for c in changes])}
             records = self._account_view()
@@ -822,6 +846,8 @@ class Store:
                 target = change['target_key']
                 if not records.get(target, {}).get('active'):
                     raise ValueError('Bitte ein vorhandenes, aktives Zielkonto auswählen.')
+                if rows[key]['required_kind'] and not target_compatible(records[target], rows[key]['required_kind']):
+                    raise ValueError('Depot-Steuerdaten dürfen nur einem aktiven Depot zugeordnet werden.')
                 if key in prepared:
                     raise ValueError('Quellkonto wurde mehrfach zugeordnet.')
                 prepared[key] = target

@@ -14,10 +14,26 @@ def import_sources(batch):
             key = account_key(value.account)
             item = sources.setdefault(key, {'key': key, 'name': value.account, 'kinds': set(), 'count': 0})
             item['kinds'].add(kind); item['count'] += 1
+    for kind, values in [('Steuerereignisse', batch.tax_events), ('Steuerdetails', batch.tax_details)]:
+        for value in values:
+            key = account_key(value.account)
+            item = sources.setdefault(key, {'key': key, 'name': value.account, 'kinds': set(), 'count': 0})
+            item['kinds'].add(kind); item['count'] += 1
     for name in batch.account_names:
         key = account_key(name)
         sources.setdefault(key, {'key': key, 'name': name, 'kinds': {'Kontoname'}, 'count': 0})
     return sorted(sources.values(), key=lambda r: r['name'].casefold())
+
+
+def required_target_kind(source):
+    """Return the account kind mandated by the imported facts, if any."""
+    return 'Depot' if source['kinds'] & {'Steuerereignisse', 'Steuerdetails'} else ''
+
+
+def target_compatible(record, required_kind):
+    if not required_kind:
+        return True
+    return json.loads(record.get('details') or '{}').get('kind') == required_kind
 
 
 def rule_scope(path):
@@ -30,7 +46,7 @@ def rule_scope(path):
     return str(path.parent).casefold() + '/' + family.casefold() + path.suffix.lower()
 
 
-def pdf_account_match(name, records):
+def pdf_account_match(name, records, *, required_kind='', bank=''):
     """Match bank identifiers in account details or complete numbers in names."""
     match = re.fullmatch(r'(IBAN|Konto|Depot)\s+(.+)', name, re.I)
     if not match:
@@ -57,6 +73,8 @@ def pdf_account_match(name, records):
     for key, record in records.items():
         if not record['active']:
             continue
+        if not target_compatible(record, required_kind):
+            continue
         details = json.loads(record.get('details') or '{}')
         stored_iban = iban(details.get('iban'))
         if source_iban and stored_iban == source_iban:
@@ -82,6 +100,24 @@ def pdf_account_match(name, records):
         return target, reason
     if matches:
         return None, 'Kontokennung passt zu mehreren vorhandenen Konten – bitte Ziel wählen'
+    # comdirect appends a two-digit subaccount identifier to depot numbers on
+    # tax notices.  This is deliberately bank-, source- and target-specific:
+    # no digit is removed generically, and only one existing Depot may match.
+    if bank == 'comdirect' and kind.casefold() == 'depot' and identifier.isdigit():
+        subaccount_matches = set()
+        for key, record in records.items():
+            if not record['active'] or not target_compatible(record, 'Depot'):
+                continue
+            details = json.loads(record.get('details') or '{}')
+            candidates = {number(details.get('number'))}
+            candidates.update(number(token) for token in re.findall(r'\d+', record['name']))
+            if any(candidate and identifier == candidate + identifier[-2:]
+                   for candidate in candidates):
+                subaccount_matches.add(key)
+        if len(subaccount_matches) == 1:
+            return next(iter(subaccount_matches)), 'comdirect-Depotnummer mit Unterkontokennung stimmt eindeutig überein'
+        if subaccount_matches:
+            return None, 'comdirect-Depotkennung passt zu mehreren Depots – bitte Ziel wählen'
     return None, ''
 
 
@@ -93,14 +129,24 @@ def suggest_accounts(store, batch):
     suggestions = []
     for source in import_sources(batch):
         key = source['key']
+        target_kind = required_target_kind(source)
         rule = rules.get(key)
         if rule is not None:
-            target = rule if records.get(rule, {}).get('active') else None
-            reason = 'Gespeicherte Importregel' if target else 'Gespeichertes Zielkonto gelöscht – bitte neu wählen'
+            record = records.get(rule, {})
+            target = rule if record.get('active') and target_compatible(record, target_kind) else None
+            reason = ('Gespeicherte Importregel' if target else
+                      'Gespeichertes Zielkonto ist gelöscht oder kein Depot – bitte neu wählen')
         else:
-            target, reason = pdf_account_match(source['name'], records) if batch.source_sheet == 'PDF' else (None, '')
+            banks = [name for name in ('comdirect', 'renault', 'baader', 'ing')
+                     if re.search(r'\b' + name + r'\b', batch.pdf_text, re.I)]
+            bank = banks[0] if len(banks) == 1 else ''
+            target, reason = pdf_account_match(
+                source['name'], records, required_kind=target_kind, bank=bank
+            ) if batch.source_sheet == 'PDF' else (None, '')
             if not reason:
                 target = depot_mappings.get(key, key)
+                if target in records and not target_compatible(records[target], target_kind):
+                    target = None
             if reason:
                 pass
             elif target in records and records[target]['active']:
@@ -114,6 +160,8 @@ def suggest_accounts(store, batch):
                 else:
                     target = None; reason = 'Kein bestehendes Konto erkannt – Konto aus Quelle anlegen oder Ziel wählen'
         suggestions.append({**source, 'target_key': target, 'reason': reason,
-                            'new_name': account_name(source['name']) if key not in records else None,
+                            'new_name': (account_name(source['name'])
+                                         if key not in records and not target_kind else None),
+                            'required_kind': target_kind,
                             'remembered': key in rules, 'scope': rule_scope(batch.path)})
     return suggestions

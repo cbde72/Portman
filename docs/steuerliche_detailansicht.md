@@ -42,3 +42,20 @@ Zuordnungsstatus.
 - Mehrdeutige PDF- oder Geldbuchungszuordnungen bleiben zur manuellen Prüfung
   markiert; eine automatische Auswahl unter gleichwertigen Kandidaten findet
   nicht statt.
+
+## Validierter comdirect-Export 2026
+
+Der Referenzexport wurde lokal und in einer isolierten Datenbank geprüft; die
+private CSV und die PDF gehören nicht zum Repository. Das Ergebnis stimmt mit
+den erwarteten Werten überein: 38 Einzelvorgänge, 14 Vorabpauschalen, davon 3
+steuerpflichtig, 192,24 EUR FSA-Verbrauch aus Vorabpauschalen und 0,00 EUR darauf
+gezahlte Steuer. Über alle Vorgänge ergeben sich 508,89 EUR Bemessungsgrundlage
+nach Verlustverrechnung, 411,00 EUR FSA-Verbrauch, 97,89 EUR Bemessungsgrundlage
+nach FSA, 24,47 EUR Kapitalertragsteuer, 1,32 EUR Solidaritätszuschlag und 25,79
+EUR Gesamtsteuer.
+
+Die Belastungsfelder des Originalexports sind negativ vorzeichenbehaftet. Die
+genannten Prüfwerte sind deren fachliche Absolutbeträge. Beim gemeinsamen Import
+gewinnt die reichere PDF für dasselbe Steuerereignis; die passende CSV-Zeile
+bleibt als Originaldatensatz sichtbar, wird in Übersichten aber nicht ein zweites
+Mal addiert.

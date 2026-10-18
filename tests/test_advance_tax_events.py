@@ -159,3 +159,35 @@ def test_conflicting_advance_tax_for_same_depot_is_rejected(tmp_path):
             repo.store.import_batch(conflict)
     finally:
         repo.close()
+
+
+def test_comdirect_tax_subaccount_is_suggested_only_for_unique_depot(tmp_path):
+    repo = RepositoryV09(tmp_path / 'portfolio.sqlite', backups=False)
+    try:
+        repo.save_account('Depot 4764924', {'kind': 'Depot', 'institution': 'comdirect'})
+        repo.save_account('Giro 476492400', {'kind': 'Girokonto', 'number': '0476492400'})
+        batch = parse(notice())
+        batch.account_names = ['Depot 476492400']
+        batch.tax_events[0].account = 'Depot 476492400'
+        batch.documents[0].account = 'Depot 476492400'
+        batch.pdf_text = 'comdirect bank AG'
+        suggestion = repo.import_account_suggestions(batch)[0]
+        assert suggestion['target_key'] == 'depot 4764924'
+        assert suggestion['required_kind'] == 'Depot'
+        assert 'Unterkontokennung' in suggestion['reason']
+    finally:
+        repo.close()
+
+
+def test_tax_event_cannot_be_assigned_to_cash_account(tmp_path):
+    repo = RepositoryV09(tmp_path / 'portfolio.sqlite', backups=False)
+    try:
+        repo.save_account('Depot 4764924', {'kind': 'Depot'})
+        repo.save_account('Giro 476492400', {'kind': 'Girokonto', 'number': '0476492400'})
+        batch = parse(notice())
+        batch.documents = []
+        batch.account_assignments = {'depot 12345678900': 'giro 476492400'}
+        with pytest.raises(ValueError, match='nur einem aktiven Depot'):
+            repo.store.import_batch(batch)
+    finally:
+        repo.close()
