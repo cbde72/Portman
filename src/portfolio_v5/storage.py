@@ -512,6 +512,34 @@ class Store:
                 batch.warnings.extend(source + ': ' + problem for problem in advisory)
         from .comdirect_identity import preserve_booking_ids
         batch = preserve_booking_ids(self, batch)
+        if batch.tax_events:
+            existing_events = [record['payload'] for record in self.model_records(kind='tax_events')]
+            by_id = {event.get('external_id'): event for event in existing_events if event.get('external_id')}
+            by_period = {(account_key(event.get('account', '')), event.get('security_ref', ''),
+                          str(event.get('income_year') or ''), event.get('type', '')): event
+                         for event in existing_events}
+            unique = []
+            seen_ids = set()
+            for event in batch.tax_events:
+                serialized = asdict(event)
+                if not event.external_id or event.external_id in seen_ids:
+                    raise ValueError('Steuerereignis benötigt eine eindeutige externe ID; Doppelimport abgewiesen.')
+                seen_ids.add(event.external_id)
+                old = by_id.get(event.external_id)
+                if old is not None:
+                    # Derselbe Steuerbeleg darf als Dokument erneut auftauchen, aber nicht erneut gezählt werden.
+                    continue
+                period_key = (account_key(event.account), event.security_ref,
+                              str(event.income_year or ''), event.type)
+                conflict = by_period.get(period_key)
+                if conflict is not None:
+                    raise ValueError(
+                        f'Für {event.security_ref or "das Wertpapier"} im Depot {event.account} ist für das '
+                        f'Ertragsjahr {event.income_year or "unbekannt"} bereits eine Vorabpauschale gespeichert.')
+                unique.append(event)
+                by_id[event.external_id] = serialized
+                by_period[period_key] = serialized
+            batch.tax_events = unique
         payload = asdict(batch)
         identity = {'file': batch.file_hash, 'parser': PARSER_VERSION,
                     'snapshots': payload['snapshots'], 'balances': payload['balances'],

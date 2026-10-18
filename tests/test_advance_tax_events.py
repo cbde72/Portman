@@ -1,0 +1,161 @@
+import importlib.util
+from pathlib import Path
+
+import pytest
+
+from portfolio_v5.models import ImportBatch
+from portfolio_v5.pdf_plugins import ParseContext, PdfDocument, PdfPage
+from portman.repository_v09 import RepositoryV09
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def plugin():
+    path = ROOT / 'pdf_plugins' / 'comdirect_ertraege.py'
+    spec = importlib.util.spec_from_file_location('advance_tax_regression', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.plugin
+
+
+def notice(*, used='70,00', after='0,00', kapst='0,00', soli='0,00', kist='0,00', paid='0,00',
+           reference='ANONYMIZED2025'):
+    payment = ('' if paid == '0,00' else
+               '\nDie Belastung erfolgt mit Valuta 05.01.2026 auf Konto EUR mit der IBAN '
+               'DE11 1111 1111 1111 1111 11')
+    text = f'''comdirect bank AG
+Datum: 19.01.2026
+Referenz-Nummer: {reference}
+Depotnummer: 123456789 00
+Steuerliche Behandlung: Vorabpauschale Ausland vom 02.01.2026
+Stk. 234,356 Muster ETF, WKN / ISIN: A111X9 / IE00BKM4GZ66
+Steuerbemessungsgrundlage vor Verlustverrechnung EUR 70,00
+in Anspruch genommener Freistellungsauftrag EUR {used}
+Steuerbemessungsgrundlage nach Verlustverrechnung EUR {after}
+Kapitalertragsteuer EUR {kapst}
+Solidaritätszuschlag EUR {soli}
+Kirchensteuer EUR {kist}
+abgeführte Steuern EUR {paid}
+Vorabpauschale EUR 100,00
+Teilfreistellung (30%) EUR -30,00
+Zu Ihren Lasten nach Steuern: EUR -{paid}{payment}
+'''
+    balances = '''Verrechnungssalden in EUR
+Gewinne / Verluste aus Aktien sonstige Gewinne / Verluste anrechenbare ausländische Quellensteuer verfügbarer Freistellungsauftrag
+2026
+0,00
+0,00
+14,64
+110,99
+0,00
+0,00
+396,36
+300,01
+Hinweise zur Ermittlung der Steuerbemessungsgrundlage
+'''
+    return PdfDocument(Path('anonymous-tax.pdf'), b'%PDF-anonymous', 'anonymous-tax',
+                       (PdfPage(1, text), PdfPage(2, balances)))
+
+
+def parse(source, file_hash='anonymous-tax'):
+    importer = plugin()
+    detected = importer.detect(source)[0]
+    return importer.parse(source, detected, ParseContext(
+        ImportBatch(str(source.path), file_hash, source_sheet='PDF')))
+
+
+def test_fully_exempt_advance_tax_is_a_cash_neutral_tax_event():
+    batch = parse(notice())
+    event = batch.tax_events[0]
+    assert batch.transactions == []
+    assert (event.date, event.income_year, event.document_date, event.tax_year) == (
+        '2026-01-02', '2025', '2026-01-19', '2026')
+    assert (event.advance_tax_base, event.partial_exemption_amount, event.taxable_income) == (
+        '100.00', '30.00', '70.00')
+    assert (event.used_exemption, event.loss_offset, event.paid_taxes) == ('70.00', '0.00', '0.00')
+    assert (event.other_loss_pot_before, event.other_loss_pot_after,
+            event.allowance_before, event.allowance_after) == ('14.64', '110.99', '396.36', '300.01')
+
+
+def test_partly_exempt_advance_tax_links_the_real_tax_payment():
+    batch = parse(notice(used='40,00', after='30,00', kapst='7,50', soli='0,41', paid='7,91'))
+    event, payment = batch.tax_events[0], batch.transactions[0]
+    assert (event.used_exemption, event.paid_taxes, event.related_transaction_id) == (
+        '40.00', '7.91', payment.external_id)
+    assert (payment.account, payment.amount, payment.kind, payment.affects_cash) == (
+        'IBAN DE11111111111111111111', '-7.91', 'TAX', True)
+    assert payment.depot_account == event.account == 'Depot 12345678900'
+
+
+def test_taxed_advance_tax_keeps_tax_components_separate():
+    batch = parse(notice(used='0,00', after='70,00', kapst='17,50', soli='0,96', paid='18,46'))
+    event = batch.tax_events[0]
+    assert (event.capital_gains_tax, event.solidarity_surcharge, event.church_tax,
+            event.paid_taxes) == ('17.50', '0.96', '0.00', '18.46')
+    assert [(item.kind, item.amount) for item in batch.transactions[0].tax_items] == [
+        ('kapitalertragsteuer', '17.50'), ('solidaritaetszuschlag', '0.96'), ('kirchensteuer', '0.00')]
+
+
+def test_tax_event_is_visible_in_depot_bookings_without_changing_holdings_or_cash(tmp_path):
+    repo = RepositoryV09(tmp_path / 'portfolio.sqlite', backups=False)
+    try:
+        repo.save_account('Depot 12345678900', {'kind': 'Depot', 'institution': 'comdirect'})
+        batch = parse(notice())
+        batch.documents = []
+        assert repo.commit_batches([batch])[0]['status'] == 'imported'
+        assert repo.transactions() == []
+        assert repo.holdings() == []
+        rows = repo.tax_event_bookings('Depot 12345678900')
+        assert len(rows) == 1
+        assert (rows[0]['kind'], rows[0]['amount'], rows[0]['affects_cash']) == (
+            'VORABPAUSCHALE', '0.00', False)
+        assert 'Ertragsjahr 2025' in rows[0]['purpose']
+        assert repo.advance_tax_credit('Depot 12345678900', 'IE00BKM4GZ66') == 100
+    finally:
+        repo.close()
+
+
+def test_depot_bookings_dialog_shows_advance_tax_event(tmp_path):
+    from PySide6.QtWidgets import QApplication
+    from portman.account_bookings_dialog import AccountBookingsDialog
+
+    QApplication.instance() or QApplication([])
+    repo = RepositoryV09(tmp_path / 'portfolio.sqlite', backups=False)
+    try:
+        repo.save_account('Depot 12345678900', {'kind': 'Depot', 'institution': 'comdirect'})
+        batch = parse(notice()); batch.documents = []
+        repo.commit_batches([batch])
+        dialog = AccountBookingsDialog(repo, 'Depot 12345678900')
+        assert dialog.model.rowCount() == 1
+        assert dialog.model.item(0, 2).text() == 'VORABPAUSCHALE · nur Depot'
+        assert 'Ertragsjahr 2025' in dialog.model.item(0, 7).text()
+        dialog.close()
+    finally:
+        repo.close()
+
+
+def test_duplicate_advance_tax_is_not_counted_twice(tmp_path):
+    repo = RepositoryV09(tmp_path / 'portfolio.sqlite', backups=False)
+    try:
+        repo.save_account('Depot 12345678900', {'kind': 'Depot', 'institution': 'comdirect'})
+        first, duplicate = parse(notice(), 'first'), parse(notice(), 'second')
+        first.documents = duplicate.documents = []
+        assert repo.commit_batches([first])[0]['status'] == 'imported'
+        assert repo.commit_batches([duplicate])[0]['status'] == 'imported'
+        assert len(repo.tax_events('Depot 12345678900', income_year=2025)) == 1
+    finally:
+        repo.close()
+
+
+def test_conflicting_advance_tax_for_same_depot_is_rejected(tmp_path):
+    repo = RepositoryV09(tmp_path / 'portfolio.sqlite', backups=False)
+    try:
+        repo.save_account('Depot 12345678900', {'kind': 'Depot', 'institution': 'comdirect'})
+        first = parse(notice(), 'first'); first.documents = []
+        conflict = parse(notice(reference='ANONYMIZED-CORRECTION'), 'conflict'); conflict.documents = []
+        repo.commit_batches([first])
+        with pytest.raises(ValueError, match='Ertragsjahr 2025 bereits'):
+            repo.store.import_batch(conflict)
+    finally:
+        repo.close()

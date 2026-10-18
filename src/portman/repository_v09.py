@@ -159,6 +159,59 @@ class RepositoryV09(RepositoryV07):
             rows.append(t)
         return rows
 
+    @cached_read
+    def tax_events(self, account=None, income_year=None):
+        """Return immutable tax facts mapped to their current depot, deduplicated by event id."""
+        links = self.store._import_links()
+        mappings = self.store._depot_mappings()
+        records = {row['account_key']: row for row in self.account_records() if row['active']}
+        imports = {row['id']: row['path'] for row in self.db.execute(
+            'SELECT id,path FROM imports WHERE active=1')}
+        latest = {}
+        for record in self.store.model_records(kind='tax_events'):
+            event = dict(record['payload'])
+            source_key = account_key(event.get('account', ''))
+            target_key = links.get((record['import_id'], source_key), mappings.get(source_key, source_key))
+            target = records.get(target_key)
+            if target is None:
+                continue
+            event.update(account=target['name'], depot=event.get('account', ''), import_id=record['import_id'],
+                         source=imports.get(record['import_id'], ''))
+            identity = event.get('external_id') or json.dumps([
+                target_key, event.get('security_ref'), event.get('income_year'), event.get('date'), event.get('type')])
+            latest[identity] = event
+        result = list(latest.values())
+        if account:
+            result = [event for event in result if account_key(event['account']) == account_key(account)]
+        if income_year is not None:
+            result = [event for event in result if str(event.get('income_year') or '') == str(income_year)]
+        return sorted(result, key=lambda event: (event.get('date', ''), event.get('external_id', '')))
+
+    def tax_event_bookings(self, account):
+        """Project tax facts into the depot booking view without creating transactions."""
+        rows = []
+        for event in self.tax_events(account):
+            details = [f"Vorabpauschale Ertragsjahr {event.get('income_year') or '?'}",
+                       f"Basis {event.get('advance_tax_base') or 'unbekannt'} {event.get('currency') or 'EUR'}",
+                       f"steuerpflichtig {event.get('taxable_income') or 'unbekannt'}",
+                       f"Freistellungsauftrag {event.get('used_exemption') or '0.00'}",
+                       f"Verlustverrechnung {event.get('loss_offset') or '0.00'}",
+                       f"gezahlte Steuern {event.get('paid_taxes') or '0.00'}"]
+            rows.append(dict(event, kind='VORABPAUSCHALE', amount='0.00', affects_cash=False,
+                             value_date=event.get('date', ''), security=event.get('security_ref', ''),
+                             purpose=' · '.join(details), counterparty='Steuerereignis',
+                             taxes=event.get('paid_taxes'), fees=None, gross_income=None,
+                             external_id=event.get('external_id', ''), tax_event=True))
+        return rows
+
+    def advance_tax_credit(self, account, security_ref, through_date='9999-12-31'):
+        """Tax-only basis available for a later sale; never part of portfolio cost or performance."""
+        return sum((abs(Decimal(str(event.get('advance_tax_base') or 0)))
+                    for event in self.tax_events(account)
+                    if event.get('type') in ('vorabpauschale', 'vorabpauschale_ausland')
+                    and event.get('security_ref') == security_ref
+                    and event.get('date', '') <= through_date), Decimal())
+
     def depot_payment_accounts(self, depot_key):
         """Return the legacy default plus additional allowed cash accounts."""
         record = next((r for r in self.account_records() if r['account_key'] == depot_key and r['active']), None)

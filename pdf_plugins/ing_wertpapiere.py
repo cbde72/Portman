@@ -2,7 +2,7 @@
 import base64
 import re
 
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP
 
 from portfolio_v5.models import (BankDocument, BankTransaction, FeeItem, Kind, Position, SecurityInfo,
                                  Snapshot, TaxEvent, TaxItem, Transaction,
@@ -89,7 +89,7 @@ TAX_SETTLEMENT_IBAN = re.compile(r'(?:Gegenkonto|Abrechnungs-IBAN)\s+(?P<iban>DE
 class IngWertpapierePlugin:
     plugin_id = 'user.ing-wertpapiere'
     bank_name = 'ING'
-    version = '1.2'
+    version = '1.3'
     document_types = ('Dividendengutschrift, Wertpapierabrechnung Kauf/Verkauf, Vorabpauschale, '
                       'nachträgliche Verlustverrechnung, Jahresdepotauszug')
 
@@ -324,15 +324,33 @@ class IngWertpapierePlugin:
             raise ValueError('Steuerkomponenten der Vorabpauschale passen nicht zur Kontobelastung.')
         account = 'Depot ' + depot.group('id')
         isin = security.group('isin')
-        event_id = 'pdf-ing-advance-' + digest([account, isin, c['valuta'], qty, taxable.group('amount')])
+        income_year = str(int(c['valuta'][:4]) - 1)
+        event_id = 'pdf-ing-advance-' + digest([account, isin, income_year, c['valuta'], qty, taxable.group('amount')])
+        transaction_id = event_id + '-tax'
+        component_values = dict(components)
+        advance_base = (Decimal(qty) * Decimal(correction_number(per_unit.group('amount')))).quantize(
+            Decimal('0.01'), rounding=ROUND_HALF_UP)
+        letter_date = LETTER_DATE.search(text)
+        balances = {key: money(match.group('a')) for key, pattern in TAX_PAGE.items()
+                    for match in [pattern.search(text)] if match}
         batch.tax_events.append(TaxEvent(
             external_id=event_id, account=account, type='vorabpauschale', date=c['valuta'],
-            tax_year=c['valuta'][:4], security_ref=isin, quantity=qty,
+            tax_year=c['valuta'][:4], income_year=income_year,
+            document_date=parse_date(letter_date.group('date')) if letter_date else c['valuta'],
+            security_ref=isin, quantity=qty, currency='EUR', advance_tax_base=f'{advance_base:.2f}',
             taxable_income=money(taxable.group('amount')), per_unit=correction_number(per_unit.group('amount')),
             partial_exemption_amount=(money(ADVANCE_PARTIAL.search(text).group('amount'))
-                                      if ADVANCE_PARTIAL.search(text) else None)))
+                                      if ADVANCE_PARTIAL.search(text) else None),
+            capital_gains_tax=component_values.get('kapitalertragsteuer'),
+            solidarity_surcharge=component_values.get('solidaritaetszuschlag'),
+            church_tax=component_values.get('kirchensteuer'), paid_taxes=amount,
+            allowance_before=balances.get('allowance_before'), allowance_after=balances.get('allowance_after'),
+            withholding_pot_before=balances.get('withholding_pot_before'),
+            withholding_pot_after=balances.get('withholding_pot_after'),
+            reference_no=extract_bank_reference(text), related_transaction_id=transaction_id,
+            cash_account=c['iban']))
         batch.transactions.append(BankTransaction(
-            account=account, external_id=event_id + '-tax', date=c['valuta'], value_date=c['valuta'],
+            account=account, external_id=transaction_id, date=c['valuta'], value_date=c['valuta'],
             kind=Kind.TAX, amount='-' + amount, currency='EUR', security=isin, quantity=qty,
             taxes=amount, tax_items=[TaxItem(name, value) for name, value in components],
             cash_account=c['iban'], depot_account=account, security_ref=isin, affects_cash=False,
