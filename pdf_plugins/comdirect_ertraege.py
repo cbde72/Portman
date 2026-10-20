@@ -51,14 +51,16 @@ TRADE_FEES = {
 TRADE_LINE = re.compile(
     r'Stk\.\s*(?P<qty>\d[\d.]*(?:,\d+)?)\s*(?P<name>.+?)\s*,?\s*WKN/ISIN\s*:\s*'
     r'(?P<wkn>[A-Z0-9]{6})\s*/\s*(?P<isin>[A-Z]{2}[A-Z0-9]{9}\d)', re.I | re.S)
-TRADE_DAY = re.compile(r'Wertpapier(?P<type>kauf|verkauf)\s*Nr\.?\s*(?P<order>\d+)\s*vom\s*(?P<d>\d{2}\.\d{2}\.\d{4})', re.I)
+TRADE_DAY = re.compile(
+    r'(?:Wertpapier(?P<type>kauf|verkauf)|(?P<generic>Gesch.ftsvorgang))\s*Nr\.?\s*'
+    r'(?P<order>\d+)\s*vom\s*(?P<d>\d{2}\.\d{2}\.\d{4})', re.I)
 TRADE_SETTLEMENT = re.compile(
     r'Valuta\s*(?P<d>\d{2}\.\d{2}\.\d{4}).{0,80}?IBAN\s*(?P<iban>DE\d{20})|'
     r'Valuta.{0,80}?(?P<iban2>DE\d{20})\s*EUR\s*(?P<d2>\d{2}\.\d{2}\.\d{4})', re.I | re.S)
 TRADE_TOTAL = re.compile(r'ZuIhren(?P<direction>Lasten|Gunsten)(?:nach|vor)Steuern\s*:\s*EUR\s*-?\s*(?P<a>' + AMOUNT + ')', re.I)
 TRADE_MARKET = re.compile(r'Kurswert\s*:?\s*EUR\s*(?P<a>' + AMOUNT + ')', re.I)
 TRADE_EXECUTION = re.compile(
-    r'Nennwert\s*Zum\s*Kurs\s*von\s*(?:St\.\s*(?P<qty>\d[\d.]*(?:,\d+)?)\s*)?'
+    r'Nennwert\s*Zum\s*(?:Misch)?Kurs\s*von\s*(?:St\.\s*(?P<qty>\d[\d.]*(?:,\d+)?)\s*)?'
     r'EUR\s*(?P<price>\d[\d.]*(?:,\d+)?)\s*Kurswert\s*:?\s*EUR\s*(?P<market>' + AMOUNT + ')',
     re.I)
 TRADE_DEPOT = re.compile(r'Depot(?:nummer|nr\.)\s*:?\s*(?P<n>\d+)', re.I)
@@ -538,7 +540,8 @@ class ComdirectErtraegePlugin:
         depot = TRADE_DEPOT.search(compact)
         if not all((security, trade, settlement, total, depot)):
             raise ValueError('Wertpapier, Geschäftstag, Valuta, IBAN oder Endbetrag nicht erkannt.')
-        kind = Kind.BUY if trade.group('type').lower() == 'kauf' else Kind.SELL
+        trade_type = trade.group('type') or TRADE_MARKER.search(text).group('type')
+        kind = Kind.BUY if trade_type.lower() == 'kauf' else Kind.SELL
         expected_direction = 'Lasten' if kind == Kind.BUY else 'Gunsten'
         if total.group('direction').lower() != expected_direction.lower():
             raise ValueError(f'Wirtschaftliche Zahlungsrichtung widerspricht {kind}: '
@@ -559,18 +562,21 @@ class ComdirectErtraegePlugin:
         market = TRADE_MARKET.search(compact)
         gross = execution_market or (money(market.group('a')) if market else None)
         tax_total_match = TRADE_TAX_TOTAL.search(compact)
-        taxes = money(tax_total_match.group('a')) if tax_total_match else '0.00'
+        # A missing tax total is unknown.  Only a printed zero is evidence for
+        # 0.00 EUR, and that distinction must survive the import unchanged.
+        taxes = money(tax_total_match.group('a')) if tax_total_match else None
         tax_items = [TaxItem(name, money(match.group('a'))) for name, pattern in TRADE_TAX_ITEMS.items()
                      for match in [pattern.search(compact)] if match and Decimal(money(match.group('a'))) != 0]
         documented_tax_total = sum((Decimal(item.amount) for item in tax_items), Decimal())
-        if tax_items and abs(documented_tax_total - Decimal(taxes)) > Decimal('0.01'):
+        if tax_items and taxes is not None and abs(documented_tax_total - Decimal(taxes)) > Decimal('0.01'):
             raise ValueError('Steuerkomponenten passen nicht zur ausgewiesenen Steuersumme.')
         if fee_matches:
             fee_items = [FeeItem(kind, money(match.group('a'))) for kind, match in fee_matches]
             provision = money(sum((Decimal(item.amount) for item in fee_items), Decimal()))
         elif gross is not None:
-            provision_value = ((Decimal(amount) - Decimal(gross) - Decimal(taxes)) if kind == Kind.BUY
-                               else (Decimal(gross) - Decimal(taxes) - Decimal(amount)))
+            tax_value = Decimal(taxes or '0')
+            provision_value = ((Decimal(amount) - Decimal(gross) - tax_value) if kind == Kind.BUY
+                               else (Decimal(gross) - tax_value - Decimal(amount)))
             if provision_value < Decimal('-0.01'):
                 raise ValueError('Kurswert, Steuern und Endbetrag widersprechen der Zahlungsrichtung.')
             provision = money(max(provision_value, Decimal()))
@@ -581,8 +587,9 @@ class ComdirectErtraegePlugin:
         expected_total = (Decimal(gross) + Decimal(provision) if kind == Kind.BUY
                           else Decimal(gross) - Decimal(provision)) if gross is not None and provision is not None else None
         if expected_total is not None:
-            expected_total = (expected_total + Decimal(taxes) if kind == Kind.BUY
-                              else expected_total - Decimal(taxes))
+            tax_value = Decimal(taxes or '0')
+            expected_total = (expected_total + tax_value if kind == Kind.BUY
+                              else expected_total - tax_value)
         if expected_total is not None and abs(expected_total - Decimal(amount)) > Decimal('0.01'):
             batch.warnings.append('Kurswert, Provision und Endbetrag stimmen nicht überein; Abrechnung bitte prüfen.')
         booking_text = f'{name}\nWPKNR: {wkn} ISIN: {isin}'
@@ -598,7 +605,7 @@ class ComdirectErtraegePlugin:
             account=account, external_id=external_id, date=trade_day, value_date=valuta,
             kind=kind, amount=('-' if kind == Kind.BUY else '') + amount, currency='EUR', security=isin,
             quantity=qty, fees=provision,
-            taxes=taxes if Decimal(taxes) else None,
+            taxes=taxes,
             fee_items=fee_items,
             tax_items=tax_items,
             gross_amount=gross, price=price, trade_date=trade_day, pay_date=valuta,
@@ -607,6 +614,8 @@ class ComdirectErtraegePlugin:
             transaction_reference=reference, operation='Wertpapiere', booking_text=booking_text,
             purpose=purpose, raw_text=purpose,
             field_sources={'fees': 'comdirect Wertpapierabrechnung · Provision',
+                           **({'taxes': 'comdirect Wertpapierabrechnung · abgeführte Steuern'}
+                              if tax_total_match else {}),
                            'quantity': quantity_source,
                            **({'price': 'comdirect Geschäftsabrechnung · Zum Kurs von'} if price else {}),
                            'security': 'comdirect Wertpapierabrechnung · WKN/ISIN',

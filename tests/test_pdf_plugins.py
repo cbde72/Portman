@@ -237,3 +237,76 @@ Referenz-Nummer: 24INLL4XX5T001NI
     assert tx.cash_account == 'IBAN DE84200411330476492400'
     assert tx.affects_cash is False
     assert batch.securities[0].wkn == '593399'
+
+
+@pytest.mark.parametrize(('heading', 'course_label', 'wkn', 'isin', 'quantity', 'price',
+                          'gross', 'fee', 'total'), (
+    ('Wertpapierkauf', 'Mischkurs', 'A111X9', 'IE00BKM4GZ66', '0,630', '48,401',
+     '30,49', '0,46', '30,95'),
+    ('Geschäftsvorgang', 'Kurs', 'A0S9GB', 'DE000A0S9GB0', '0,147', '121,20',
+     '17,82', '0,27', '18,09'),
+    ('Wertpapierkauf', 'Mischkurs', '716460', 'DE0007164600', '0,221', '129,52',
+     '28,62', '0,43', '29,05'),
+))
+def test_comdirect_2026_trade_layout_variants(
+        heading, course_label, wkn, isin, quantity, price, gross, fee, total):
+    """Regression coverage for the three formerly rejected 2026 statements."""
+    import importlib.util
+    path = Path(__file__).resolve().parents[1] / 'pdf_plugins' / 'comdirect_ertraege.py'
+    spec = importlib.util.spec_from_file_location('comdirect_trade_2026_test', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    text = f'''comdirect
+Wertpapierkauf
+Geschäftstag : 23.09.2026
+Nennwert Zum {course_label} von
+St. {quantity} EUR {price}
+Kurswert : EUR {gross}
+Provision : EUR {fee}
+{heading} Nr. 91037031 vom 23.09.2026
+Stk. {quantity} TEST NAME, WKN/ISIN: {wkn}/{isin}
+ZuIhrenLastenvorSteuern: EUR -{total}
+Kapitalertragsteuer EUR 0,00
+Solidaritätszuschlag EUR 0,00
+Kirchensteuer EUR 0,00
+abgeführteSteuern EUR 0,00
+DieBelastungerfolgtmitValuta25.09.2026aufKontoEURmitderIBANDE84200411330476492400
+Depotnummer: 476492400
+Referenz-Nummer: 14INPOPLO9C001CJ
+'''
+    parsed_document = document(text)
+    detection = module.plugin.detect(parsed_document)[0]
+    batch = module.plugin.parse(
+        parsed_document, detection, ParseContext(ImportBatch('trade.pdf', 'hash', source_sheet='PDF')))
+
+    tx = batch.transactions[0]
+    assert (tx.security, tx.quantity, tx.price) == (isin, quantity.replace(',', '.'), price.replace(',', '.'))
+    assert (tx.gross_amount, tx.fees, tx.taxes, tx.amount) == (
+        gross.replace(',', '.'), fee.replace(',', '.'), '0.00', '-' + total.replace(',', '.'))
+    assert tx.field_sources['taxes'] == 'comdirect Wertpapierabrechnung · abgeführte Steuern'
+
+
+def test_comdirect_trade_keeps_missing_tax_total_unknown():
+    import importlib.util
+    path = Path(__file__).resolve().parents[1] / 'pdf_plugins' / 'comdirect_ertraege.py'
+    spec = importlib.util.spec_from_file_location('comdirect_trade_unknown_tax_test', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    text = '''comdirect
+Wertpapierkauf Nr. 91159075 vom 23.07.2026
+Stk. 0,620 TEST, WKN/ISIN: 593399/DE0005933998
+Nennwert Zum Kurs von St. 0,620 EUR 66,66
+Kurswert: EUR 41,33
+Provision: EUR 0,62
+ZuIhrenLastennachSteuern: EUR -41,95
+Valuta 27.07.2026 auf Konto mit der IBAN DE84200411330476492400
+Depotnummer: 476492400
+Referenz-Nummer: 24INLL4XX5T001NI
+'''
+    parsed_document = document(text)
+    detection = module.plugin.detect(parsed_document)[0]
+    batch = module.plugin.parse(
+        parsed_document, detection, ParseContext(ImportBatch('trade.pdf', 'hash', source_sheet='PDF')))
+
+    assert batch.transactions[0].taxes is None
+    assert 'taxes' not in batch.transactions[0].field_sources
