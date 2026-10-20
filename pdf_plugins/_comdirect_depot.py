@@ -22,11 +22,23 @@ def append_depot(batch, pages):
         if pending:
             if not pending.name:
                 raise ValueError('Finanzreport: Wertpapiername fehlt: ' + pending.wkn)
+            if re.search(r'(?:^|\s|[·|])(?:Vorgang|Verwendungszweck)\s*:', pending.name, re.I):
+                raise ValueError('Finanzreport: Buchungstext als Wertpapiername erkannt: ' + pending.wkn)
             positions.append(pending)
             pending = None
 
     day = report_date(text)
     for row, line in enumerate(lines, 1):
+        # Account sections and booking rows can follow the depot without a
+        # reliably extracted total line.  They must never extend a pending
+        # security name.
+        if active and (re.fullmatch(
+                r'(?:Girokonto|Tagesgeld PLUS(?:-Konto)?|Tagesgeldkonto|Verrechnungskonto|O&F-Konto)(?: .*)?',
+                line) or (not POSITION.fullmatch(line) and re.search(
+                    r'\b(?:Vorgang|Verwendungszweck|WPKNR|ISIN)\s*:', line, re.I))):
+            finish()
+            active = False
+            continue
         if line == 'Depot' or line.startswith(('Depotbestand', 'Jahresdepotabstimmung')):
             active = True
             continue

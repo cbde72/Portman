@@ -56,8 +56,10 @@ def advance_holdings(rows, snapshots, transactions, as_of):
             positions.pop(key, None)
             continue
         if p is None:
+            from .security_names import preferred_security_name
             p = dict(key=tx['security'], isin=tx['security'].removeprefix('ISIN:'), wkn='',
-                name=tx.get('purpose') or tx['security'], asset_type='Sonstiges', cost=None,
+                name=preferred_security_name(tx.get('purpose'), fallback=tx['security']),
+                asset_type='Sonstiges', cost=None,
                 account=tx['account'], depot=tx['depot'], snapshot_id=baseline['id'] if baseline else None, row=0,
                 value=None, currency=tx['currency'], quote_date=None, source=tx['source'])
             positions[key] = p

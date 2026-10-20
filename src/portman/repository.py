@@ -471,6 +471,7 @@ class PortfolioRepository:
                     (key, merged['asset_type'], merged['region'], merged['cap_size']))
 
     def sync_security_master(self):
+        from .security_names import best_security_name, preferred_security_name
         positions = [p for snap in self.store.snapshots()
                      for p in json.loads(snap['payload'])['positions']]
         # A security may first be known only by WKN and receive its ISIN in a
@@ -506,7 +507,17 @@ class PortfolioRepository:
             if old:
                 try: names.update(json.loads(old['original_names']))
                 except Exception: pass
-            canonical = (old['canonical_name'] if old else None) or meta.get('display_name') or p['name'] or key
+            # A reviewed master/metadata name outranks imported aliases.  Bad
+            # booking prose is never promoted to the display name, while raw
+            # aliases remain preserved in original_names for auditability.
+            # Existing names are never auto-repaired here: changing reviewed
+            # databases requires the explicit repair preview/apply workflow.
+            canonical = old['canonical_name'] if old else preferred_security_name(
+                meta.get('display_name'), fallback='')
+            if not old and not canonical:
+                canonical = best_security_name(
+                    [p['name'], *names],
+                    fallback=p['isin'] or ('WKN:' + p['wkn'] if p['wkn'] else key))
             rows.append((key, p['isin'], p['wkn'], canonical, p['type'], json.dumps(sorted(names), ensure_ascii=False),
                          meta.get('region', 'Unbekannt'), meta.get('cap_size', 'Unbekannt'), meta.get('beta', 1),
                          meta.get('volatility', 15), meta.get('dividend_yield', 0)))
@@ -520,6 +531,7 @@ class PortfolioRepository:
         if 'assets' in self.__dict__:
             self.assets.sync()
     def save_metadata(self, holdings):
+        from .security_names import preferred_security_name
         with self.store.db:
             for h in holdings:
                 existing = (self.db.execute('SELECT security_key FROM security_master WHERE isin=?', (h.isin,)).fetchone()
@@ -533,19 +545,22 @@ class PortfolioRepository:
                 override = self.db.execute('SELECT * FROM security_classifications WHERE security_key=?', (key,)).fetchone()
                 classification = {field: base[field] if base and override and override[field] is not None else getattr(h, field)
                                   for field in ('asset_type', 'region', 'cap_size')}
+                saved_name = preferred_security_name(
+                    h.name, base['canonical_name'] if base else None,
+                    fallback=h.isin or ('WKN:' + h.wkn if h.wkn else key))
                 self.store.db.execute('''INSERT INTO security_metadata(security_key,region,cap_size,beta,volatility,dividend_yield,display_name,updated_at)
                   VALUES(?,?,?,?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(security_key) DO UPDATE SET
                   region=excluded.region,cap_size=excluded.cap_size,beta=excluded.beta,
                   volatility=excluded.volatility,dividend_yield=excluded.dividend_yield,
                   display_name=excluded.display_name,updated_at=CURRENT_TIMESTAMP''',
-                  (key,classification['region'],classification['cap_size'],h.beta,h.volatility,h.dividend_yield,h.name))
+                  (key,classification['region'],classification['cap_size'],h.beta,h.volatility,h.dividend_yield,saved_name))
                 self.store.db.execute('''INSERT INTO security_master
                   (security_key,isin,wkn,canonical_name,asset_type,region,cap_size,beta,volatility,dividend_yield)
                   VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(security_key) DO UPDATE SET
                   canonical_name=excluded.canonical_name,asset_type=excluded.asset_type,region=excluded.region,
                   cap_size=excluded.cap_size,beta=excluded.beta,volatility=excluded.volatility,
                   dividend_yield=excluded.dividend_yield,updated_at=CURRENT_TIMESTAMP''',
-                  (key,h.isin,h.wkn,h.name,classification['asset_type'],classification['region'],classification['cap_size'],h.beta,h.volatility,h.dividend_yield))
+                  (key,h.isin,h.wkn,saved_name,classification['asset_type'],classification['region'],classification['cap_size'],h.beta,h.volatility,h.dividend_yield))
     def migrate_legacy_metadata(self,path):
         path=Path(path); marker='legacy_metadata_migrated'
         if self.store.db.execute('SELECT 1 FROM meta WHERE key=?',(marker,)).fetchone() or not path.exists(): return 0
