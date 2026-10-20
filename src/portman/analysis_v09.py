@@ -186,15 +186,29 @@ def grouped_contributions(data,dimension):
 
 
 def fee_candidates(repo,txs=None):
-    txs=repo.transactions() if txs is None else txs; links=repo.fee_links(include_invalid=True)
+    # Only valid links prove "already counted": an invalidated link brings
+    # the double count — and with it the candidate — back into scope.
+    txs=repo.transactions() if txs is None else txs; links=repo.fee_links()
     linked={(r['aux_ref'],r['field']) for r in links}; used={r['fee_ref'] for r in links}; index=defaultdict(list)
+    def day(t):
+        for key in ('value_date','date'):
+            value=t.get(key)
+            if not value: continue
+            try: return date.fromisoformat(value)
+            except (TypeError, ValueError): continue
+        return None
     for t in txs:
-        if t['kind'] in ('FEE','TAX') and reference(t) not in used: index[(t['account'],t['date'],t['currency'],t['kind'],abs(Decimal(t['amount'])))].append(t)
+        if t['kind'] in ('FEE','TAX') and reference(t) not in used: index[(t['account'],t['currency'],t['kind'],abs(Decimal(t['amount'])))].append(t)
     out=[]
     for t in txs:
         for field,kind in (('fees','FEE'),('taxes','TAX')):
             if t['kind']==kind or t.get(field) is None or (reference(t),field) in linked: continue
-            for other in index[(t['account'],t['date'],t['currency'],kind,abs(Decimal(t[field])) )]:
+            for other in index[(t['account'],t['currency'],kind,abs(Decimal(t[field])))]:
+                # Buchungs- und Valutatag dürfen wie im Belegabgleich bis zu
+                # drei Tage auseinanderliegen; ein exakter Tag treibt sonst
+                # einen dauerhaften stillen Doppelzähler.
+                other_day, own_day = day(other), day(t)
+                if other_day is None or own_day is None or abs((other_day-own_day).days) > 3: continue
                 out.append(dict(aux_ref=reference(t),fee_ref=reference(other),field=field,account=t['account'],day=t['date'],amount=t[field],currency=t['currency'],source=t['source'],other_source=other['source']))
     return out
 

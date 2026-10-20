@@ -173,6 +173,17 @@ def test_dividend_with_gross_income_reports_gross_and_net_warning(repo):
     assert any('separat abgerechneten Steuern' in issue['title'] for issue in result['issues'])
 
 
+def test_gross_basis_dividend_counts_booked_amount_as_documented_gross(repo):
+    result = analyze(repo, [('2026-01-01', 100), ('2026-01-11', 95)], [
+        BankTransaction('A', 'div', '2026-01-11', 'DIVIDEND', '12', 'EUR', income_basis='gross')])
+
+    # A gross-basis booking documents the booked amount itself as gross
+    # (comdirect, docs/pdf-import.md) instead of reporting "unknown gross".
+    assert result['gross_dividends'] == Decimal('12')
+    assert result['dividends'] == Decimal('12')
+    assert result['dividends_net_complete'] is False
+
+
 def test_daily_index_covers_every_day_and_matches_twr_series(repo):
     result = analyze(repo, [('2026-01-01', '100'), ('2026-01-31', '110'), ('2026-03-15', '121')])
     start, end = date.fromisoformat(result['start']), date.fromisoformat(result['end'])

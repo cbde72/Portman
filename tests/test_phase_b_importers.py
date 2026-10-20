@@ -72,6 +72,24 @@ def test_ing_sale_without_fee_is_documented_zero_and_equation_valid():
     assert [(item.kind, item.amount) for item in tx.fee_items] == [('entgelt', '0.00')]
 
 
+def test_ing_sale_splits_tax_components_out_of_the_fee():
+    plugin = load_plugin('ing_wertpapiere.py')
+    path = FIXTURES / 'ing/verkauf/current-v1/source.txt'
+    text = path.read_text(encoding='utf-8').replace(
+        'Endbetrag zu Ihren Gunsten EUR 99,00',
+        'Kapitalertragsteuer EUR 0,50\nEndbetrag zu Ihren Gunsten EUR 98,50')
+    document = PdfDocument(path, text.encode(), 'tax-sale', (PdfPage(1, text),))
+    batch = plugin.parse(document, plugin.detect(document)[0],
+                         ParseContext(ImportBatch(path.name, 'tax-sale', source_sheet='PDF')))
+    tx = batch.transactions[0]
+    # Kurswert 100 - Steuer 0,50 - Entgelt 1,00 = Endbetrag 98,50: die Steuer
+    # darf nicht als Entgelt übernommen werden (Gebührensumme widersprüchlich).
+    assert (tx.kind, tx.amount, tx.gross_amount) == ('SELL', '98.50', '100.00')
+    assert (tx.fees, tx.taxes) == ('1.00', '0.50')
+    assert [(item.kind, item.amount) for item in tx.tax_items] == [('kapitalertragsteuer', '0.50')]
+    assert any('EUR Steuern übernommen' in warning for warning in batch.warnings)
+
+
 def test_comdirect_unreadable_zero_quantity_is_never_booked():
     plugin = load_plugin('comdirect_ertraege.py')
     path = FIXTURES / 'comdirect/verkauf/compact-v1/source.txt'

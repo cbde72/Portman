@@ -263,23 +263,39 @@ class IngWertpapierePlugin:
         if not executed or total is None or qty is None:
             raise ValueError('Datum, Betrag oder Stückzahl ungültig.')
 
-        # Entgelte ergeben sich als Differenz Endbetrag - Kurswert (ING weist sie je nach Ordertyp unterschiedlich aus)
+        # Entgelte ergeben sich als Differenz Endbetrag - Kurswert abzüglich
+        # der ausgewiesenen Steuerkomponenten (ING weist sie je nach Ordertyp
+        # unterschiedlich aus; Steuern sind keine Gebühr und würden sonst als
+        # Entgelt übernommen — docs/fee_analysis.md).
         market = MARKET_VALUE.search(text)
-        fees = None
+        components = [(name, money(match.group('amount'))) for name, pattern in TAX_COMPONENTS.items()
+                      for match in [pattern.search(text)] if match]
+        tax_total = sum((Decimal(value) for _, value in components), Decimal())
+        taxes = f'{tax_total:.2f}' if tax_total else None
+        fees, deviation = None, None
         if market:
             diff = ((Decimal(total) - Decimal(money(market.group('amount')))) if kind == Kind.BUY
                     else (Decimal(money(market.group('amount'))) - Decimal(total)))
             if diff < Decimal('-0.004'):
                 raise ValueError('Endbetrag und Kurswert widersprechen der wirtschaftlichen Zahlungsrichtung.')
-            fees = f'{diff:.2f}'
+            if diff - tax_total < Decimal('-0.004'):
+                raise ValueError('Steuerkomponenten übertreffen die Differenz von Endbetrag und Kurswert.')
+            deviation, fees = diff, f'{diff - tax_total:.2f}'
             price = PRICE.search(text)
             if price and abs(float(correction_number(price.group('amount'))) * float(qty)
                              - float(money(market.group('amount')))) > 0.02:
                 batch.warnings.append('Kurs × Stückzahl passt nicht zum Kurswert; bitte am Original prüfen.')
         else:
             batch.warnings.append('Kurswert nicht erkannt; Entgelte nicht prüfbar.')
-        if fees is not None and Decimal(fees):
-            batch.warnings.append(f'Endbetrag weicht vom Kurswert um {fees} EUR ab; als Entgelt übernommen.')
+        if deviation and fees is not None and Decimal(fees):
+            if tax_total:
+                batch.warnings.append(f'Endbetrag weicht vom Kurswert um {deviation:.2f} EUR ab; '
+                                      f'{fees} EUR Entgelt und {tax_total:.2f} EUR Steuern übernommen.')
+            else:
+                batch.warnings.append(f'Endbetrag weicht vom Kurswert um {fees} EUR ab; als Entgelt übernommen.')
+        elif deviation and tax_total:
+            batch.warnings.append(f'Endbetrag weicht vom Kurswert um {deviation:.2f} EUR ab; '
+                                  'vollständig als Steuer übernommen.')
 
         account = 'Depot ' + depot.group('id')
         amount = ('-' if kind == Kind.BUY else '') + total
@@ -291,9 +307,10 @@ class IngWertpapierePlugin:
             account=account,
             external_id='pdf-ing-order-' + digest([account, order.group('order'), isin, executed, qty]),
             date=executed, kind=kind, amount=amount, currency='EUR',
-            security=isin, quantity=qty, fees=fees, row=c['row'],
+            security=isin, quantity=qty, fees=fees, taxes=taxes, row=c['row'],
             gross_amount=money(market.group('amount')) if market else None,
             fee_items=[FeeItem('provision' if PROVISION.search(text) else 'entgelt', fees)] if fees is not None else [],
+            tax_items=[TaxItem(name, value) for name, value in components],
             price=correction_number(price.group('amount')) if price else None, price_currency='EUR' if price else '',
             trade_date=executed, executed_at=(f"{executed}T{execution.group('time')}"
                                                if execution.group('time') else ''), pay_date=c['valuta'],

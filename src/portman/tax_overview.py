@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QDialog, QDialogButtonBox, QHB
 
 from portfolio_v5.accounts import account_key
 from .institutions import account_institution
+from .income_basis import dividend_amounts, gross_income_amount
 
 
 def _number(value):
@@ -40,7 +41,10 @@ def automatic_tax_values(repository, year):
     for tx in repository.transactions():
         if tx.get('date', '')[:4] != str(year):
             continue
-        if (tx.get('gross_currency') or tx.get('currency') or 'EUR') != 'EUR':
+        # Only the booked amounts enter these sums; a foreign-currency
+        # documented gross describes the original document, not the EUR
+        # booking, so it never gates the row.
+        if (tx.get('currency') or 'EUR') != 'EUR':
             continue
         key = tx.get('performance_depot_key') or name_keys.get(
             account_key(tx.get('account', '')), account_key(tx.get('account', '')))
@@ -54,8 +58,8 @@ def automatic_tax_values(repository, year):
                           if (item.get('kind') if isinstance(item, dict) else item.kind)
                           in ('solidaritaetszuschlag', 'solidaritätszuschlag')), Decimal())
         if kind in ('DIVIDEND', 'DISTRIBUTION'):
-            fees, taxes = abs(_number(tx.get('fees'))), abs(_number(tx.get('taxes')))
-            gross = _number(tx.get('gross_income')) or (_number(tx.get('amount')) + fees + taxes)
+            taxes = abs(_number(tx.get('taxes')))
+            _, gross = dividend_amounts(tx)
             values[key]['capital_income'] += gross
             # The overview column shows cash actually received, matching the
             # net interest credits shown for bank accounts.
@@ -64,7 +68,7 @@ def automatic_tax_values(repository, year):
             values[key]['withholding_tax'] += abs(_number(tx.get('withholding_tax')))
             values[key]['solidarity_surcharge'] += solidarity
         elif kind == 'INTEREST':
-            interest = _number(tx.get('gross_income')) or _number(tx.get('amount'))
+            interest = gross_income_amount(tx) or _number(tx.get('amount'))
             values[key]['interest'] += interest
             values[key]['capital_income'] += interest
             values[key]['taxes'] += abs(_number(tx.get('taxes')))

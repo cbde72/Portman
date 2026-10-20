@@ -64,6 +64,22 @@ def test_automatic_tax_values_assign_dividends_to_depot_and_interest_to_account(
     assert values['giro']['taxes'] == Decimal('3')
 
 
+def test_foreign_gross_currency_keeps_the_eur_booking_in_the_overview():
+    class ForeignRepository(Repository):
+        def transactions(self):
+            return [{'date': '2026-05-31', 'kind': 'DIVIDEND', 'account': 'Tagesgeld',
+                     'performance_depot_key': 'depot', 'amount': '75', 'gross_income': '100',
+                     'gross_currency': 'USD', 'taxes': '10', 'currency': 'EUR'}]
+
+    values = automatic_tax_values(ForeignRepository(), 2026)
+
+    # The USD document no longer drops the EUR booking; capital income is the
+    # EUR reconstruction (75 + 10) instead of an USD amount in an EUR sum.
+    assert values['depot']['dividends'] == Decimal('75')
+    assert values['depot']['capital_income'] == Decimal('85')
+    assert values['depot']['taxes'] == Decimal('10')
+
+
 def test_interest_uses_saved_account_key_instead_of_derived_name_key():
     class ImportedKeyRepository:
         def account_records(self):

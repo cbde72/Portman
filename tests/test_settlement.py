@@ -216,6 +216,25 @@ class SettlementTests(unittest.TestCase):
         self.assertFalse(result['dividends_net_complete'])
         self.assertTrue(any('Steuern' in issue['title'] for issue in result['issues']))
 
+    def test_linked_separate_fee_counts_once_in_security_performance(self):
+        self.put([self.dividend(amount='290', gross_income='400', taxes='100', fees='10'),
+                  BankTransaction('Cash', 'fee-notice', '2025-06-01', 'FEE', '-10', 'EUR',
+                                  security=ISIN)])
+        self.store.confirm_coverage('Depot', '2025-01-01', '2025-12-31')
+        dividend = next(row for row in self.repo.transactions() if row['kind'] == 'DIVIDEND')
+        fee = next(row for row in self.repo.transactions() if row['kind'] == 'FEE')
+        # Without the link the fee is counted twice: embedded in the net
+        # dividend credit and again as the separate cash booking.
+        double = security_performance(self.store, 'Depot', '2025-01-01', '2025-12-31')
+        self.assertEqual(double['profit'], Decimal('380'))
+        self.repo.confirm_fee(reference(dividend), 'fees', reference(fee),
+                              'Gebühr aus derselben Abrechnung')
+        self.store.confirm_coverage('Depot', '2025-01-01', '2025-12-31')
+        result = security_performance(self.store, 'Depot', '2025-01-01', '2025-12-31')
+        # 400 gross - 100 taxes - 10 fee = 290 credit; the strict view adds
+        # the embedded tax back once and keeps the fee exactly once.
+        self.assertEqual(result['profit'], Decimal('390'))
+
     def test_reinvestment_does_not_double_return(self):
         self.put([self.dividend(account='Depot'),
             BankTransaction('Depot', 'reinvestment', '2025-12-31', 'kauf', '-300', 'EUR', security=ISIN, quantity='1')])

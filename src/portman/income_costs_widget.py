@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDateEdit, QHBoxLay
 
 from portfolio_v5.accounts import account_key
 from portman.chart_style import PALETTE, create_figure, get_current_colors, style_axis
+from portman.income_basis import dividend_amounts
 from portman.repository_v09 import reference
 from portman.safe_canvas import SafeFigureCanvas
 
@@ -51,14 +52,14 @@ def income_cost_rows(repository, depot_key, security=None, as_of='9999-12-31', s
             fees = abs(amount)
         if kind == 'TAX' and not taxes:
             taxes = abs(amount)
-        gross = _decimal(tx.get('gross_income')) if kind == 'DIVIDEND' else Decimal()
-        if kind == 'DIVIDEND' and not gross:
-            gross = amount + fees + taxes
+        # A foreign-currency documented gross and a gross-basis booking must
+        # not be summed as if they were the booked net/booking currency.
+        net, gross = dividend_amounts(tx) if kind == 'DIVIDEND' else (Decimal(), Decimal())
         result.append({
             'date': tx.get('date', ''), 'kind': kind, 'security': tx.get('security') or '',
             'description': tx.get('purpose') or tx.get('booking_text') or tx.get('counterparty') or '',
             'currency': tx.get('currency') or 'EUR',
-            'net_dividend': amount if kind == 'DIVIDEND' else Decimal(),
+            'net_dividend': net,
             'gross_dividend': gross, 'fees': fees, 'taxes': taxes,
         })
     return sorted(result, key=lambda row: (row['date'], row['kind']), reverse=True)
@@ -343,17 +344,17 @@ class IncomeCostsWidget(QWidget):
                 bottoms = [positive_bottom[i] if value >= 0 else negative_bottom[i]
                            for i, value in enumerate(values)]
                 label = position_names.get(security, security or 'Ohne Zuordnung')
-                bars = axis.bar(years, values, bottom=bottoms, width=.65,
+                bars = axis.bar([int(year) for year in years], values, bottom=bottoms, width=.65,
                                  color=PALETTE[index % len(PALETTE)], label=label)
                 legend_handles.setdefault(label, bars[0])
                 for i, value in enumerate(values):
                     if value >= 0: positive_bottom[i] += value
                     else: negative_bottom[i] += value
-            for i, year in enumerate(years):
+            for year in years:
                 total = sum(float(value) for value in data[currency][year].values())
                 offset = 4 if total >= 0 else -10
                 axis.annotate(f'{total:,.2f}'.replace(',', 'X').replace('.', ',').replace('X', '.'),
-                              (i, total), xytext=(0, offset), textcoords='offset points',
+                              (int(year), total), xytext=(0, offset), textcoords='offset points',
                               ha='center', va='bottom' if total >= 0 else 'top', fontsize=7,
                               color=colors['text'])
             axis.axhline(0, color=colors['grid'], linewidth=.8)

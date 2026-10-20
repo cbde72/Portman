@@ -357,10 +357,15 @@ class PerformanceService:
                 dividends += amount
                 if t.get("income_basis") == "gross":
                     dividend_net_complete = False
-                if t.get('gross_income') is None or t.get('gross_currency') != 'EUR':
-                    gross_complete = False
+                documented = t.get('gross_income')
+                if documented not in (None, '') and t.get('gross_currency') == 'EUR':
+                    gross_dividends += Decimal(str(documented))
+                elif t.get('income_basis') == 'gross':
+                    # A gross-basis booking documents the booked amount itself
+                    # as the gross credit (comdirect, docs/pdf-import.md).
+                    gross_dividends += amount
                 else:
-                    gross_dividends += Decimal(t['gross_income'])
+                    gross_complete = False
             fees += Decimal(t.get("fees") or 0)
             taxes += Decimal(t.get("taxes") or 0)
         gross_dividends = gross_dividends if gross_complete else None

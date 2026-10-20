@@ -486,6 +486,39 @@ def test_fee_candidates_exclude_consumed_counterpart(repo):
     assert fee_candidates(repo)==[]
 
 
+def test_fee_candidates_match_with_three_day_valuta_skew(repo):
+    from portfolio_v5.models import Transaction
+    from portman.analysis_v09 import fee_candidates
+    repo.commit_batches([ImportBatch('fees','fees',transactions=[
+        Transaction('A','buy1','2026-01-10','BUY','-100','EUR',security='TEST',quantity='1',fees='2'),
+        Transaction('A','fee','2026-01-12','FEE','-2','EUR')])])
+    candidates = fee_candidates(repo)
+    assert [(c['field'], c['amount']) for c in candidates] == [('fees', '2')]
+
+
+def test_fee_candidates_never_bridge_more_than_three_days(repo):
+    from portfolio_v5.models import Transaction
+    from portman.analysis_v09 import fee_candidates
+    repo.commit_batches([ImportBatch('fees','fees',transactions=[
+        Transaction('A','buy1','2026-01-10','BUY','-100','EUR',security='TEST',quantity='1',fees='2'),
+        Transaction('A','fee','2026-01-15','FEE','-2','EUR')])])
+    assert fee_candidates(repo)==[]
+
+
+def test_revoked_fee_link_reopens_the_candidate(repo):
+    from portfolio_v5.models import Transaction
+    from portman.analysis_v09 import fee_candidates
+    repo.commit_batches([ImportBatch('fees','fees',transactions=[
+        Transaction('A','buy1','2026-01-10','BUY','-100','EUR',security='TEST',quantity='1',fees='2'),
+        Transaction('A','fee','2026-01-10','FEE','-2','EUR')])])
+    a,b=repo.transactions(); repo.confirm_fee(reference(a),'fees',reference(b),'Geprüft')
+    assert fee_candidates(repo)==[]
+    # An invalidated link no longer hides the candidate: the analysis counts
+    # the fee twice again, so the proposal must come back.
+    repo.revoke_fee(reference(a),'fees')
+    assert len(fee_candidates(repo))==1
+
+
 def test_recurring_equal_amounts_with_different_decimal_precision(repo):
     from portman.analysis_v09 import recurring_candidates
     repo.commit_batches([booking('a','a','10','A','2026-01-01'),booking('b','b','10.0','A','2026-02-01'),booking('c','c','10.00','A','2026-03-01')])

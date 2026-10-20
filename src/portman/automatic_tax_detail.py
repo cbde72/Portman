@@ -5,6 +5,7 @@ from decimal import Decimal, InvalidOperation
 from portfolio_v5.accounts import account_key
 from portfolio_v5.comdirect_tax_detail import COLUMNS, date_value
 from .institutions import account_institution
+from .income_basis import gross_income_amount
 from .repository_v09 import reference
 
 
@@ -107,7 +108,7 @@ def _transaction_values(repository, tx, realized=None):
     labels = {'DIVIDEND': 'Dividende', 'DISTRIBUTION': 'Ausschüttung', 'INTEREST': 'Zinsertrag',
               'SELL': 'Wertpapierverkauf', 'TAX': 'Steuerabzug', 'TAX_REFUND': 'Steuererstattung'}
     taxes = abs(Decimal(str(tx.get('taxes') or 0)))
-    gross = tx.get('gross_income') or tx.get('gross_amount')
+    gross = gross_income_amount(tx) or tx.get('gross_amount')
     values.update({'Steuerjahr': tx.get('date', '')[:4], 'Buchungstag': _day(tx.get('date')),
         'Steuerliches Datum': _day(tx.get('date')), 'Referenznummer': tx.get('transaction_reference') or tx.get('external_id', ''),
         'Vorgang': labels[tx['kind']], 'Stück/Nominale': _de(tx.get('quantity')),

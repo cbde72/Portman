@@ -301,9 +301,37 @@ def performance_transactions(store, transactions, account=None):
                 cash_allocations[row['cash_ref']] += Decimal(row['allocated_amount'])
     except Exception:
         pass  # Older repositories without the additive reconciliation table.
+    # A linked standalone FEE/TAX row only proves an amount already embedded
+    # in its primary booking's net settlement (docs/fee_analysis.md).  Drop
+    # such evidence rows from the flows — mirroring repository.fee_links()
+    # validation — but only while both sides sit inside this boundary, so the
+    # counted fee stays exactly the economic one.
+    linked_fee_rows = set()
+    try:
+        links = [dict(row) for row in store.db.execute('SELECT aux_ref,field,fee_ref FROM fee_links')]
+    except Exception:
+        links = []  # Older repositories without the fee-link table.
+    originals = {tx_ref(tx): tx for tx in transactions}
+    for link in links:
+        aux, fee = originals.get(link['aux_ref']), originals.get(link['fee_ref'])
+        field = link['field']
+        if (not aux or not fee or link['aux_ref'] == link['fee_ref']
+                or fee['kind'] != ('FEE' if field == 'fees' else 'TAX')):
+            continue
+        try:
+            matches = (aux['account'] == fee['account'] and aux['currency'] == fee['currency']
+                       and aux.get(field) is not None
+                       and abs(Decimal(aux[field])) == abs(Decimal(fee['amount'])))
+        except Exception:
+            matches = False
+        if matches:
+            linked_fee_rows.add(link['fee_ref'])
     owners = None
     for original in transactions:
-        cash_allocation = cash_allocations.get(tx_ref(original), Decimal())
+        ref = tx_ref(original)
+        if ref in linked_fee_rows:
+            continue
+        cash_allocation = cash_allocations.get(ref, Decimal())
         if cash_allocation:
             original_amount = Decimal(original['amount'])
             remaining = abs(original_amount) - cash_allocation
