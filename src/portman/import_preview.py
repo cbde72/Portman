@@ -4,10 +4,34 @@ from pathlib import Path
 import json
 import re
 from .import_combo_style import style_target_account_combo
+from .security_names import preferred_security_name
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QDialogButtonBox,
  QHeaderView, QLabel, QMessageBox, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout,
  QApplication, QPushButton, QTextEdit, QWidget, QHBoxLayout, QLineEdit, QCheckBox)
+
+
+def security_display_names(repository, batches):
+    """Resolve identifiers for preview display without changing source records."""
+    names = {}
+
+    def remember(record, name):
+        valid = preferred_security_name(name, fallback='')
+        if not valid:
+            return
+        for value in (record.get('key'), record.get('security_key'), record.get('isin'), record.get('wkn')):
+            value = str(value or '').strip().upper()
+            if value:
+                names.setdefault(value, valid)
+                if len(value) == 6:
+                    names.setdefault('WKN:' + value, valid)
+
+    for record in repository.metadata().values():
+        remember(record, record.get('canonical_name'))
+    for batch in batches:
+        for security in batch.securities:
+            remember(vars(security), security.name)
+    return names
 
 
 class ImportPreviewDialog(QDialog):
@@ -15,6 +39,7 @@ class ImportPreviewDialog(QDialog):
         super().__init__(parent)
         self.repo = repository
         self.batches = batches
+        self.security_display_names = security_display_names(repository, batches)
         self.mapping_rows = []
         self.pdf_booking_rows = []
         self.setWindowTitle('Import prüfen und Konten / Depots zuordnen')
@@ -25,6 +50,7 @@ class ImportPreviewDialog(QDialog):
             note.setText(display_dates(note.text() + ' PDF-Buchungen bitte im gleichnamigen Reiter prüfen; OCR-Buchungen müssen dort ausdrücklich ausgewählt werden.'))
         note.setWordWrap(True)
         layout.addWidget(note)
+
         if any(self.always_sync_depot(batch) for batch in batches):
             depot_note = QLabel('comdirect-Depotbestände werden bei diesem Import immer vollständig synchronisiert.')
             depot_note.setWordWrap(True)
@@ -247,6 +273,10 @@ class ImportPreviewDialog(QDialog):
         self.import_summary.setText(f'{len(selected)} Dateien ausgewählt · {bookings} Buchungen · {positions} Positionen\n'
                                     f'{active - unresolved} von {active} Kontozuordnungen erledigt · {unresolved} offen')
         if hasattr(self, 'pdf_booking_search'): self.refresh_pdf_bookings()
+
+    def security_display_name(self, identifier):
+        value = str(identifier or '').strip()
+        return self.security_display_names.get(value.upper(), value)
 
     def copy_import_messages(self):
         messages = []

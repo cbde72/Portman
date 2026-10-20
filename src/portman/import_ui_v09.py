@@ -31,6 +31,75 @@ from .jobs_v09 import run_job
 from PySide6.QtGui import QColor, QPainter, QPen
 
 
+def render_pdf_evidence(path, page_number, needle, regions=()):
+    """Render one PDF page and release every pdfium object in reverse order."""
+    import pypdfium2 as pdfium
+    import re
+
+    document = source = bitmap = textpage = search = pil_image = rgb_image = None
+    try:
+        document = pdfium.PdfDocument(path)
+        index = min(max(0, int(page_number) - 1), len(document) - 1)
+        source = document[index]
+        bitmap = source.render(scale=1.25)
+        pil_image = bitmap.to_pil()
+        rgb_image = pil_image.convert("RGB")
+        qimage = QImage(
+            rgb_image.tobytes(), rgb_image.width, rgb_image.height,
+            rgb_image.width * 3, QImage.Format.Format_RGB888).copy()
+
+        textpage = source.get_textpage()
+        if needle:
+            search = textpage.search(needle[:40], match_case=False)
+            hit = search.get_next()
+            if hit:
+                start, count = hit
+                painter = QPainter(qimage)
+                try:
+                    painter.setPen(QPen(QColor("#e8a500"), 2))
+                    painter.setBrush(QColor(255, 220, 0, 65))
+                    height = source.get_height()
+                    for character in range(start, start + count):
+                        left, bottom, right, top = textpage.get_charbox(character)
+                        painter.drawRect(
+                            int(left * 1.25), int((height - top) * 1.25),
+                            max(2, int((right - left) * 1.25)),
+                            max(2, int((top - bottom) * 1.25)))
+                finally:
+                    painter.end()
+        if regions:
+            words = {word.casefold() for word in re.findall(r"\w{4,}", needle)}
+            painter = QPainter(qimage)
+            try:
+                painter.setPen(QPen(QColor("#e8a500"), 2))
+                painter.setBrush(QColor(255, 220, 0, 65))
+                for region in regions:
+                    if words & {word.casefold() for word in re.findall(r"\w{4,}", region["text"])}:
+                        left, top, right, bottom = region["box"]
+                        painter.drawRect(int(left * 1.25), int(top * 1.25),
+                                         int((right - left) * 1.25), int((bottom - top) * 1.25))
+            finally:
+                painter.end()
+        return qimage
+    finally:
+        for resource in (search, textpage, bitmap, source, document):
+            if resource is not None:
+                try:
+                    resource.close()
+                except Exception:
+                    pass
+        if rgb_image is not None:
+            try:
+                rgb_image.close()
+            except Exception:
+                pass
+        if pil_image is not None and pil_image is not rgb_image:
+            try:
+                pil_image.close()
+            except Exception:
+                pass
+
+
 class ImportWizard(ImportPreviewDialog):
     def __init__(self, repo, session, summaries, parent=None):
         self.session = session
@@ -52,7 +121,8 @@ class ImportWizard(ImportPreviewDialog):
                 continue
             for t in b.transactions:
                 self.tx_rows.append((b.path, t.account, t.external_id))
-                rows.append(["", b.path, t.account, t.date, getattr(t, "value_date", ""), t.kind, t.security, t.quantity, t.amount, t.currency])
+                rows.append(["", b.path, t.account, t.date, getattr(t, "value_date", ""), t.kind,
+                             self.security_display_name(t.security), t.quantity, t.amount, t.currency])
         populate(self.all_transactions, ["Übernehmen", "Datei", "Konto", "Datum", "Valuta", "Art", "Wertpapier", "Stück", "Betrag", "Währung"], rows)
         for i in range(len(rows)):
             item = self.all_transactions.item(i, 0)
@@ -264,7 +334,10 @@ class ImportWizard(ImportPreviewDialog):
                 ("balances", ["Konto", "Saldo vorher", "Saldo nachher"]),
                 ("transaction_rows", ["Datei", "Datum", "Konto", "Art", "Wertpapier", "Stück", "Betrag", "Währung"]),
             ]:
-                populate(self.detail_tables[key], headers, data[key])
+                rows = data[key]
+                if key == "transaction_rows":
+                    rows = [[*row[:4], self.security_display_name(row[4]), *row[5:]] for row in rows]
+                populate(self.detail_tables[key], headers, rows)
             self.review_note.setText(
                 f"{len(data['results'])} Dateien · {data['transactions']} ausgewählte Buchungen. Zuordnungen und Auswirkungen sind geprüft. Mit „Jetzt importieren“ speichern oder die Auswahl ändern."
             )
@@ -337,8 +410,6 @@ class ImportWizard(ImportPreviewDialog):
                 + json.dumps(evidence, ensure_ascii=False, indent=2)
             )
             try:
-                import pypdfium2 as pdfium
-
                 regions = []
                 if evidence.get("ocr"):
                     from portfolio_v5.pdf_ocr import ocr_page_regions
@@ -349,48 +420,9 @@ class ImportWizard(ImportPreviewDialog):
                         "OCR-Textstellen lokalisieren",
                         lambda job: ocr_page_regions(batch.path, max(0, int(evidence.get("page", 1)) - 1)),
                     )
-                with pdfium.PdfDocument(batch.path) as document:
-                    index = max(0, int(evidence.get("page", 1)) - 1)
-                    with document[min(index, len(document) - 1)] as source:
-                        bitmap = source.render(scale=1.25)
-                        image = bitmap.to_pil().convert("RGB")
-                        qimage = QImage(image.tobytes(), image.width, image.height, image.width * 3, QImage.Format.Format_RGB888).copy()
-                        # Locate the extracted booking text in the native text layer when available.
-                        textpage = source.get_textpage()
-                        needle = str(evidence.get("text") or self.pdf_bookings_table.item(row, 6).text()).strip()
-                        if needle:
-                            search = textpage.search(needle[:40], match_case=False)
-                            hit = search.get_next()
-                            if hit:
-                                index, count = hit
-                                painter = QPainter(qimage)
-                                painter.setPen(QPen(QColor("#e8a500"), 2))
-                                painter.setBrush(QColor(255, 220, 0, 65))
-                                for n in range(index, index + count):
-                                    left, bottom, right, top = textpage.get_charbox(n)
-                                    painter.drawRect(
-                                        int(left * 1.25),
-                                        int((source.get_height() - top) * 1.25),
-                                        max(2, int((right - left) * 1.25)),
-                                        max(2, int((top - bottom) * 1.25)),
-                                    )
-                                painter.end()
-                            search.close()
-                        textpage.close()
-                        if regions:
-                            import re
-
-                            words = {w.casefold() for w in re.findall(r"\w{4,}", needle)}
-                            painter = QPainter(qimage)
-                            painter.setPen(QPen(QColor("#e8a500"), 2))
-                            painter.setBrush(QColor(255, 220, 0, 65))
-                            for region in regions:
-                                if words & {w.casefold() for w in re.findall(r"\w{4,}", region["text"])}:
-                                    left, top, right, bottom = region["box"]
-                                    painter.drawRect(int(left * 1.25), int(top * 1.25), int((right - left) * 1.25), int((bottom - top) * 1.25))
-                            painter.end()
-                        page.setPixmap(QPixmap.fromImage(qimage))
-                        bitmap.close()
+                needle = str(evidence.get("text") or self.pdf_bookings_table.item(row, 6).text()).strip()
+                qimage = render_pdf_evidence(batch.path, evidence.get("page", 1), needle, regions)
+                page.setPixmap(QPixmap.fromImage(qimage))
             except Exception as error:
                 page.clear()
                 page.setText("Originalseite nicht darstellbar: " + str(error))
