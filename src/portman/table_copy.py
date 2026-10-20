@@ -12,11 +12,15 @@ def table_text(table, *, selected_only=False):
                if not table.isColumnHidden(header.logicalIndex(i))]
     rows = [[model.headerData(c, Qt.Orientation.Horizontal) or '' for c in columns]]
     if selected_only:
-        selected = sorted({index.row() for index in table.selectionModel().selectedIndexes()})
-        if not selected:
+        indexes = table.selectionModel().selectedIndexes()
+        if not indexes:
             return ''
-        rows.extend([model.index(r, c).data() if model.index(r, c).data() is not None else '' for c in columns]
-                    for r in selected if not table.isRowHidden(r))
+        selected_rows = sorted({index.row() for index in indexes})
+        selected_columns = [c for c in columns if any(index.column() == c for index in indexes)]
+        selected = {(index.row(), index.column()) for index in indexes}
+        rows = [[model.headerData(c, Qt.Orientation.Horizontal) or '' for c in selected_columns]]
+        rows.extend([model.index(r, c).data() if (r, c) in selected and model.index(r, c).data() is not None else ''
+                     for c in selected_columns] for r in selected_rows if not table.isRowHidden(r))
     elif hasattr(model, 'rows'):
         from .tables_v09 import display
         rows.extend([display(row[c]) for c in columns] for row in model.rows)

@@ -67,12 +67,19 @@ class TablePreferences:
             if table.receivers(SIGNAL('customContextMenuRequested(QPoint)')):
                 table.customContextMenuRequested.disconnect()
             table.customContextMenuRequested.connect(lambda point,t=table:self.menu(t,point))
-    def menu(self,table,point):
+            # Column selection belongs on every header section as well as in
+            # the table body; users should not have to aim below the heading.
+            header.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            if header.receivers(SIGNAL('customContextMenuRequested(QPoint)')):
+                header.customContextMenuRequested.disconnect()
+            header.customContextMenuRequested.connect(lambda point,t=table:self.menu(t,point,header=True))
+    def menu(self,table,point,header=False):
         menu=QMenu(table)
         for c in range(table.model().columnCount()):
             action=menu.addAction(str(table.model().headerData(c,Qt.Orientation.Horizontal))); action.setCheckable(True); action.setChecked(not table.isColumnHidden(c))
             action.toggled.connect(lambda checked,column=c:table.setColumnHidden(column,not checked))
-        menu.exec(table.viewport().mapToGlobal(point))
+        target = table.horizontalHeader() if header else table.viewport()
+        menu.exec(target.mapToGlobal(point))
     def save(self):
         self.window.settings['tables_v09']={key:{column:dict(width=t.columnWidth(i),hidden=t.isColumnHidden(i),order=t.horizontalHeader().visualIndex(i)) for i,column in enumerate(t.property('column_ids_v09'))} for key,t in self.tables.items() if t.property('column_ids_v09')}
 

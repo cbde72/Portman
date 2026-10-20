@@ -179,7 +179,7 @@ class AccountBookingsDialog(QDialog):
             'Summe (EUR)', 'Gegenpartei', 'Verwendungszweck', 'Wertpapier', 'Quelle', 'Buchungs-ID',
             'Bruttoertrag', 'Gebühren', 'Steuern gesamt', 'Effektiver Steuersatz', 'Quellensteuer', 'Solidaritätszuschlag',
             'Quellenstaat', 'Quellensteuersatz', 'Vorgang / Referenz',
-            'Verknüpfte Belege / Dublettenstatus'])
+            'Verknüpfte Belege / Dublettenstatus', 'Kurswert', 'Abrechnungsbetrag'])
         self.wallet = False
         self.load_transactions()
         self.proxy = QSortFilterProxyModel(self)
@@ -190,7 +190,7 @@ class AccountBookingsDialog(QDialog):
         self.table = QTableView()
         self.table.setModel(self.proxy)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setSortingEnabled(True)
         self.table.sortByColumn(0, Qt.SortOrder.AscendingOrder)
@@ -247,6 +247,16 @@ class AccountBookingsDialog(QDialog):
                 source += self.repository.tax_event_bookings(self.account)
             self.transactions = sorted(source, key=lambda tx: tx['date'])
             reviewed = self.repository.reviewed_duplicates() if hasattr(self.repository, 'reviewed_duplicates') else set()
+            metadata = self.repository.metadata()
+            def security_label(tx):
+                identifier = str(tx.get('security') or '').removeprefix('ISIN:')
+                if not identifier: return ''
+                record = (metadata.get(identifier) or metadata.get('WKN:' + identifier)
+                          or next((value for value in metadata.values()
+                                   if identifier in (value.get('isin'), value.get('wkn'))), {}))
+                name = record.get('canonical_name') or identifier
+                wkn = record.get('wkn') or ''
+                return name + (f' · WKN {wkn}' if wkn else '')
             self.wallet = any(p.get('asset_type') == 'Krypto' for p in self.repository.holdings(account=self.account)) or any(
                 tx.get('external_id', '').startswith('crypto-csv-') for tx in self.transactions)
             if self.wallet: self.model.setHeaderData(5, Qt.Orientation.Horizontal, 'Käufe − Verkäufe (EUR)')
@@ -259,7 +269,7 @@ class AccountBookingsDialog(QDialog):
                 status = ' · '.join(value for value in (status, duplicate_status) if value)
                 values = [tx['date'], tx.get('value_date', ''), tx['kind'] if tx.get('affects_cash', True) else tx['kind'] + ' · nur Depot',
                     format(Decimal(tx['amount']), '.2f').replace('.', ','), tx['currency'], '', tx.get('counterparty', ''),
-                    tx.get('purpose', ''), tx.get('security') or '', Path(tx.get('source', '')).name, tx['external_id'],
+                    tx.get('purpose', ''), security_label(tx), Path(tx.get('source', '')).name, tx['external_id'],
                     (str(tx['gross_income']) + ' ' + tx.get('gross_currency', '')) if tx.get('gross_income') is not None else '',
                     (str(tx['fees']) + ' ' + tx['currency']) if tx.get('fees') is not None else '',
                     (str(tx['taxes']) + ' ' + tx['currency']) if tx.get('taxes') is not None else '',
@@ -269,7 +279,9 @@ class AccountBookingsDialog(QDialog):
                     tx.get('withholding_country') or '',
                     (str(tx['withholding_tax_rate']) + ' %') if tx.get('withholding_tax_rate') is not None else '',
                     tx.get('transaction_reference') or tx.get('bank_reference') or tx.get('document_reference') or '',
-                    '\n'.join(([status] if status else []) + [Path(s.get('source', '')).name for s in sources])]
+                    '\n'.join(([status] if status else []) + [Path(s.get('source', '')).name for s in sources]),
+                    (str(tx['gross_amount']) + ' ' + tx['currency']) if tx.get('gross_amount') is not None else '',
+                    (str(abs(Decimal(tx['amount']))) + ' ' + tx['currency']) if tx['kind'] in ('BUY', 'SELL') else '']
                 items = [QStandardItem(display_dates(str(value))) for value in values]
                 for item in items:
                     item.setToolTip(item.text()); item.setData(item.text().casefold(), Qt.ItemDataRole.UserRole)

@@ -137,6 +137,9 @@ class HistoryWidget(QWidget):
         from .state_history_widget import StateHistoryWidget
         self.state_history = StateHistoryWidget(repository, account_getter, self)
         self.tabs.addTab(self.state_history, 'Bestandsverlauf')
+        from .fee_analysis_widget import FeeAnalysisWidget
+        self.fee_analysis = FeeAnalysisWidget(repository, self)
+        self.tabs.addTab(self.fee_analysis, 'Gebührenauswertung')
         self.refresh()
 
     def assign_selected_imports(self):
@@ -189,7 +192,7 @@ class HistoryWidget(QWidget):
         self.data_changed.emit()
     def refresh(self):
         if getattr(self.repo,'defer_initial_views',False): return
-        self.refresh_wealth();self.refresh_compare();self.refresh_transactions();self.refresh_audit();self.bank_archive.refresh();self.state_history.refresh()
+        self.refresh_wealth();self.refresh_compare();self.refresh_transactions();self.refresh_audit();self.bank_archive.refresh();self.state_history.refresh();self.fee_analysis.refresh()
     def refresh_wealth(self):
         data=self.repo.wealth_series(self.ret.isChecked(),self.prop.isChecked(),self.debt.isChecked(),account=self.account_getter());cats=['Liquidität','Festgeld','Wertpapiere','Altersvorsorge','Immobilie (Schätzung)','Schulden'];fill(self.wealth_table,[(r['period'],euro(r['total']),*[euro(r['categories'].get(c,0)) for c in cats]) for r in data]);self.fig.clear();ax=self.fig.add_subplot(111)
         if data:

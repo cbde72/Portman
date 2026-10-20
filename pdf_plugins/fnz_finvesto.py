@@ -131,7 +131,7 @@ class FnzFinvestoPlugin:
             if not booked or Decimal(quantity) <= 0 or Decimal(amount) <= 0 or not valid_isin(row.group('isin')):
                 raise ValueError('FNZ-Umsatz enthält ungültiges Datum, ISIN, Stückzahl oder Betrag.')
             fee = FEE.search(body)
-            fees = money(fee.group('amount')) if fee and Decimal(money(fee.group('amount'))) else None
+            fees = money(fee.group('amount')) if fee else None
             payment = PAYMENT.search(body)
             cash_amount = money(payment.group('amount')) if payment else amount
             expected_payment = Decimal(amount) + (Decimal(fees) if kind == 'BUY' and fees else Decimal())
@@ -144,7 +144,7 @@ class FnzFinvestoPlugin:
                 amount=('-' if kind == 'BUY' else '') + cash_amount, currency=currency,
                 security=row.group('isin'), security_ref=row.group('isin'), quantity=quantity,
                 gross_amount=amount,
-                fees=fees, fee_items=[FeeItem('transaktionsentgelt', fees)] if fees else [],
+                fees=fees, fee_items=[FeeItem('transaktionsentgelt', fees)] if fees is not None else [],
                 document_reference=reference.group('ref'), transaction_reference=reference.group('ref'),
                 depot_account=account, pay_date=booked, **extra))
             batch.securities.append(SecurityInfo(key=row.group('isin'), isin=row.group('isin'),
