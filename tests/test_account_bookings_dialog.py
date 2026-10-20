@@ -2,9 +2,9 @@ import os
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QItemSelectionModel, Qt
 from PySide6.QtWidgets import QApplication, QTreeWidgetItem, QScrollArea
-from portfolio_v5.models import ImportBatch, BankTransaction
+from portfolio_v5.models import ImportBatch, BankTransaction, Position, Snapshot
 from portman.repository import PortfolioRepository
 from portman.accounts_widget import AccountsWidget
 from portman.account_bookings_dialog import AccountBookingsDialog, TransactionEditDialog
@@ -122,3 +122,29 @@ def test_numeric_date_sort_and_selected_rows_copy(tmp_path):
     assert QApplication.clipboard().text().splitlines() == copied
     dialog.close()
     repo.close()
+
+
+def test_single_booking_cell_can_be_copied(tmp_path):
+    from portman.table_copy import copy_selected_rows
+    QApplication.instance() or QApplication([])
+    repo = PortfolioRepository(tmp_path / 'cell-copy.sqlite')
+    repo.commit_batches([ImportBatch('source', 'hash', transactions=[
+        BankTransaction('A', 'one', '2020-01-01', 'BANK_BOOKING', '1', 'EUR', purpose='Einzelzelle')])])
+    dialog = AccountBookingsDialog(repo, 'A')
+    dialog.table.selectionModel().select(dialog.proxy.index(0, 7),
+        QItemSelectionModel.SelectionFlag.Select)
+    copy_selected_rows(dialog.table)
+    assert QApplication.clipboard().text().splitlines() == ['Verwendungszweck', 'Einzelzelle']
+    dialog.close(); repo.close()
+
+
+def test_security_column_shows_name_and_wkn_instead_of_raw_isin(tmp_path):
+    QApplication.instance() or QApplication([])
+    repo = PortfolioRepository(tmp_path / 'security-name.sqlite')
+    repo.commit_batches([ImportBatch('source', 'hash', snapshots=[Snapshot('Depot', '2020-01', '2020-01-01', 'PDF', [
+        Position('US0378331005', 'Apple Inc.', isin='US0378331005', wkn='865985', quantity='1', value='100')])],
+        transactions=[BankTransaction('Depot', 'buy', '2020-01-01', 'BUY', '-100', 'EUR',
+                                      security='US0378331005', quantity='1')])])
+    dialog = AccountBookingsDialog(repo, 'Depot')
+    assert dialog.model.item(0, 8).text() == 'Apple Inc. · WKN 865985'
+    dialog.close(); repo.close()

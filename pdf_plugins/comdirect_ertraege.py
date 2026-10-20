@@ -42,7 +42,12 @@ AMOUNT = r'[0-9]{1,3}(?:\.[0-9]{3})*,\d{2}|\d+,\d{2}'
 # extracted without spaces.  These patterns therefore use stable ASCII labels
 # and accept both compact and normally spaced text.
 TRADE_MARKER = re.compile(r'Wertpapier(?P<type>kauf|verkauf)', re.I)
-TRADE_FEE = re.compile(r'Provision\s*:?\s*EUR\s*(?:-\s*)?(?P<a>' + AMOUNT + ')', re.I)
+TRADE_FEES = {
+    'provision': re.compile(r'Provision\s*:?\s*EUR\s*(?:-\s*)?(?P<a>' + AMOUNT + ')', re.I),
+    'orderentgelt': re.compile(r'Orderentgelt\s*:?\s*EUR\s*(?:-\s*)?(?P<a>' + AMOUNT + ')', re.I),
+    'handelsplatzgebuehr': re.compile(r'(?:Handelsplatzgeb.hr|B.rsengeb.hr)\s*:?\s*EUR\s*(?:-\s*)?(?P<a>' + AMOUNT + ')', re.I),
+    'fremdspesen': re.compile(r'(?:Fremdspesen|fremde\s+Spesen)\s*:?\s*EUR\s*(?:-\s*)?(?P<a>' + AMOUNT + ')', re.I),
+}
 TRADE_LINE = re.compile(
     r'Stk\.\s*(?P<qty>\d[\d.]*(?:,\d+)?)\s*(?P<name>.+?)\s*,?\s*WKN/ISIN\s*:\s*'
     r'(?P<wkn>[A-Z0-9]{6})\s*/\s*(?P<isin>[A-Z]{2}[A-Z0-9]{9}\d)', re.I | re.S)
@@ -524,7 +529,8 @@ class ComdirectErtraegePlugin:
     def _trade(self, document, batch):
         text = document.text
         compact = re.sub(r'[ \t]+', '', text)
-        fee = TRADE_FEE.search(compact)
+        fee_matches = [(kind, pattern.search(compact)) for kind, pattern in TRADE_FEES.items()]
+        fee_matches = [(kind, match) for kind, match in fee_matches if match]
         security = TRADE_LINE.search(text) or TRADE_LINE.search(compact)
         trade = TRADE_DAY.search(compact)
         settlement = TRADE_SETTLEMENT.search(compact)
@@ -559,16 +565,19 @@ class ComdirectErtraegePlugin:
         documented_tax_total = sum((Decimal(item.amount) for item in tax_items), Decimal())
         if tax_items and abs(documented_tax_total - Decimal(taxes)) > Decimal('0.01'):
             raise ValueError('Steuerkomponenten passen nicht zur ausgewiesenen Steuersumme.')
-        if fee:
-            provision = money(fee.group('a'))
+        if fee_matches:
+            fee_items = [FeeItem(kind, money(match.group('a'))) for kind, match in fee_matches]
+            provision = money(sum((Decimal(item.amount) for item in fee_items), Decimal()))
         elif gross is not None:
             provision_value = ((Decimal(amount) - Decimal(gross) - Decimal(taxes)) if kind == Kind.BUY
                                else (Decimal(gross) - Decimal(taxes) - Decimal(amount)))
             if provision_value < Decimal('-0.01'):
                 raise ValueError('Kurswert, Steuern und Endbetrag widersprechen der Zahlungsrichtung.')
             provision = money(max(provision_value, Decimal()))
+            fee_items = [FeeItem('entgelt', provision)]
         else:
             provision = None
+            fee_items = []
         expected_total = (Decimal(gross) + Decimal(provision) if kind == Kind.BUY
                           else Decimal(gross) - Decimal(provision)) if gross is not None and provision is not None else None
         if expected_total is not None:
@@ -588,9 +597,9 @@ class ComdirectErtraegePlugin:
         batch.transactions.append(BankTransaction(
             account=account, external_id=external_id, date=trade_day, value_date=valuta,
             kind=kind, amount=('-' if kind == Kind.BUY else '') + amount, currency='EUR', security=isin,
-            quantity=qty, fees=provision if provision and Decimal(provision) else None,
+            quantity=qty, fees=provision,
             taxes=taxes if Decimal(taxes) else None,
-            fee_items=[FeeItem('provision', provision)] if provision and Decimal(provision) else [],
+            fee_items=fee_items,
             tax_items=tax_items,
             gross_amount=gross, price=price, trade_date=trade_day, pay_date=valuta,
             cash_account=cash_account, depot_account=account, affects_cash=False,

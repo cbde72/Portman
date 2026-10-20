@@ -1,4 +1,5 @@
 """Sourced asset, listing, depot and transaction details with dated edits."""
+from decimal import Decimal
 from PySide6.QtCore import Qt, QDate
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel, QLineEdit,
     QPushButton, QComboBox, QDateEdit, QTabWidget, QTableWidget, QTableWidgetItem, QScrollArea,
@@ -95,12 +96,17 @@ class AssetDetailsDialog(QDialog):
         self.listing_table = None; self.refresh_listings()
         self.tabs.addTab(self.listing_page, 'Notierungen')
         self.trades = self.registry.transactions(key)
-        self.trade_table = table(['Datum', 'Depot', 'Art', 'Stücke', 'Buchungsbetrag', 'Währung',
-            'Anschaffungskosten inkl. enthaltener Kosten', 'Kosten je Stück inkl. Kosten', 'Gebühren laut Import',
-            'Steuern laut Import', 'Kauftranche-UUID', 'Import-ID', 'Quelldokument-Hash', 'Quelle'],
-            [[t['date'], t['depot'], t['kind'], t.get('quantity'), t['amount'], t['currency'],
-              t.get('acquisition_cost'), t.get('unit_cost_including_fees'), t.get('fees'), t.get('taxes'),
+        self.trade_table = table(['Datum', 'Depot', 'Art', 'Stücke', 'Kurswert', 'Gebühren', 'Steuern',
+            'Abrechnungsbetrag', 'Währung', 'Anschaffungskosten inkl. enthaltener Kosten',
+            'Kosten je Stück inkl. Kosten', 'Kauftranche-UUID', 'Import-ID', 'Quelldokument-Hash', 'Quelle'],
+            [[t['date'], t['depot'], t['kind'], t.get('quantity'), t.get('gross_amount'),
+              t.get('fees'), t.get('taxes'), abs(Decimal(t['amount'])), t['currency'],
+              t.get('acquisition_cost'), t.get('unit_cost_including_fees'),
               t['lot_uuid'], t['import_id'], t['document_hash'], t.get('source')] for t in self.trades])
+        from .widgets_v09 import table_tools
+        table_tools(self.trade_table)
+        self.trade_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectItems)
+        self.trade_table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self.tabs.addTab(self.trade_table, 'Kauftranchen / Buchungen')
         contexts = [(f"{t['date']} · {t['depot']} · {t['kind']} · {t['external_id']}", t['reference']) for t in self.trades]
         self.tabs.addTab(FactEditor(self.registry, key, 'trade', contexts), 'Belegdetails / Erträge')

@@ -2,7 +2,7 @@ import base64
 import re
 from decimal import Decimal
 
-from portfolio_v5.models import (BankDocument, BankTransaction, Position, SecurityInfo, Snapshot,
+from portfolio_v5.models import (BankDocument, BankTransaction, FeeItem, Position, SecurityInfo, Snapshot,
                                  TaxEvent, TaxItem, Transaction, parse_date, valid_isin)
 from portfolio_v5.importers import asset_type
 
@@ -223,7 +223,8 @@ def parse_baader_portfolio(batch, pages, content):
         tx = BankTransaction(account, 'baader-trade-' + depot + '-' + reference, day,
             'BUY' if kind == 'Kauf' else 'SELL', str(amount), settlement[3],
             security=isin, quantity=str(quantity), value_date=parse_date(settlement[2]) or '',
-            fees=str(fees), taxes=str(taxes),
+            fees=str(fees), taxes=str(taxes), gross_amount=str(gross),
+            fee_items=[FeeItem('mindermengenzuschlag', str(fees))],
             purpose=nominal[2].strip(), bank_reference=reference, document_reference=reference,
             booking_text=f'Nominale STK {quantity} · Kurs {nominal[3]} {number(nominal[4])} · Kurswert {settlement[3]} {gross}',
             raw_text=nominal[0].strip() + '\n' + f'Kurswert {settlement[3]} {gross}', affects_cash=False)

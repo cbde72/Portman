@@ -58,7 +58,7 @@ def test_ing_sale_extracts_fee_and_positive_net_amount():
     assert (tx.quantity, tx.price, tx.cash_account) == ('2.00', '50.00', 'IBAN DE11111111111111111111')
 
 
-def test_ing_sale_without_fee_keeps_fee_unknown_and_equation_valid():
+def test_ing_sale_without_fee_is_documented_zero_and_equation_valid():
     plugin = load_plugin('ing_wertpapiere.py')
     path = FIXTURES / 'ing/verkauf/current-v1/source.txt'
     text = path.read_text(encoding='utf-8').replace('Provision EUR 1,00\n', '').replace(
@@ -67,8 +67,9 @@ def test_ing_sale_without_fee_keeps_fee_unknown_and_equation_valid():
     batch = plugin.parse(document, plugin.detect(document)[0],
                          ParseContext(ImportBatch(path.name, 'no-fee-sale', source_sheet='PDF')))
     tx = batch.transactions[0]
-    assert (tx.kind, tx.amount, tx.gross_amount, tx.fees, tx.fee_items) == (
-        'SELL', '100.00', '100.00', None, [])
+    assert (tx.kind, tx.amount, tx.gross_amount, tx.fees) == (
+        'SELL', '100.00', '100.00', '0.00')
+    assert [(item.kind, item.amount) for item in tx.fee_items] == [('entgelt', '0.00')]
 
 
 def test_comdirect_unreadable_zero_quantity_is_never_booked():
@@ -123,6 +124,28 @@ def test_comdirect_trade_uses_positive_tax_quantity_only_after_value_check():
     tx = batch.transactions[0]
     assert (tx.quantity, tx.price, tx.gross_amount) == ('0.240', '73.37', '17.61')
     assert 'sekundär' in tx.field_sources['quantity']
+
+
+def test_comdirect_trade_keeps_typed_fee_components_including_foreign_costs():
+    plugin = load_plugin('comdirect_ertraege.py')
+    source = comdirect_purchase_document(
+        'Nennwert Zum Kurs von St. 0,006 EUR 3.662,71', market='21,98')
+    pages = list(source.pages)
+    pages[0] = PdfPage(1, pages[0].text.replace(
+        'Kurswert: EUR 21,98',
+        'Kurswert: EUR 21,98\nProvision: EUR 0,43\nOrderentgelt: EUR 0,20\n'
+        'Handelsplatzgebühr: EUR 0,10\nFremdspesen: EUR 0,05').replace(
+            'ZuIhrenLastenvorSteuern: EUR -21,98', 'ZuIhrenLastenvorSteuern: EUR -22,76'))
+    pages[1] = PdfPage(2, pages[1].text.replace(
+        'ZuIhrenLastennachSteuern: EUR -21,98', 'ZuIhrenLastennachSteuern: EUR -22,76'))
+    document = PdfDocument(source.path, source.content, source.file_hash, tuple(pages))
+    batch = plugin.parse(document, plugin.detect(document)[0],
+                         ParseContext(ImportBatch('fees.pdf', 'typed-fees', source_sheet='PDF')))
+    tx = batch.transactions[0]
+    assert tx.fees == '0.78'
+    assert [(item.kind, item.amount) for item in tx.fee_items] == [
+        ('provision', '0.43'), ('orderentgelt', '0.20'),
+        ('handelsplatzgebuehr', '0.10'), ('fremdspesen', '0.05')]
 
 
 def test_comdirect_trade_rejects_quantity_value_contradiction():

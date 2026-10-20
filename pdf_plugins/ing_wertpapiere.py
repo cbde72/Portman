@@ -271,14 +271,14 @@ class IngWertpapierePlugin:
                     else (Decimal(money(market.group('amount'))) - Decimal(total)))
             if diff < Decimal('-0.004'):
                 raise ValueError('Endbetrag und Kurswert widersprechen der wirtschaftlichen Zahlungsrichtung.')
-            fees = f'{diff:.2f}' if abs(diff) > 0.004 else None
+            fees = f'{diff:.2f}'
             price = PRICE.search(text)
             if price and abs(float(correction_number(price.group('amount'))) * float(qty)
                              - float(money(market.group('amount')))) > 0.02:
                 batch.warnings.append('Kurs × Stückzahl passt nicht zum Kurswert; bitte am Original prüfen.')
         else:
             batch.warnings.append('Kurswert nicht erkannt; Entgelte nicht prüfbar.')
-        if fees:
+        if fees is not None and Decimal(fees):
             batch.warnings.append(f'Endbetrag weicht vom Kurswert um {fees} EUR ab; als Entgelt übernommen.')
 
         account = 'Depot ' + depot.group('id')
@@ -293,7 +293,7 @@ class IngWertpapierePlugin:
             date=executed, kind=kind, amount=amount, currency='EUR',
             security=isin, quantity=qty, fees=fees, row=c['row'],
             gross_amount=money(market.group('amount')) if market else None,
-            fee_items=[FeeItem('provision' if PROVISION.search(text) else 'entgelt', fees)] if fees else [],
+            fee_items=[FeeItem('provision' if PROVISION.search(text) else 'entgelt', fees)] if fees is not None else [],
             price=correction_number(price.group('amount')) if price else None, price_currency='EUR' if price else '',
             trade_date=executed, executed_at=(f"{executed}T{execution.group('time')}"
                                                if execution.group('time') else ''), pay_date=c['valuta'],

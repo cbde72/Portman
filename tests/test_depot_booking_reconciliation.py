@@ -47,6 +47,10 @@ def test_direct_giro_purchase_is_uniquely_reconciled_and_counted_once(tmp_path):
         assert len(repo.booking_links()) == 1
         economic = performance_transactions(repo.store, repo.transactions(), 'Depot')
         assert [(row['kind'], Decimal(row['amount'])) for row in economic] == [('BUY', Decimal('-100'))]
+        from portman.fee_analysis import fee_rows
+        # The same reference/date/amount/account evidence is exposed in the fee ledger.
+        fee = fee_rows(repo)[0]
+        assert fee['cash_match'] == 'Vollständig abgeglichen'
     finally:
         repo.close()
 
