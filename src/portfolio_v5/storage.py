@@ -472,6 +472,9 @@ class Store:
         new_accounts = {account_key(name): account_name(name) for name in batch.new_accounts}
         for tx in batch.transactions:
             depot_key = getattr(tx, 'performance_depot_key', '')
+            if depot_key:
+                tx.performance_depot_key = assignments.get(depot_key, depot_key)
+                depot_key = tx.performance_depot_key
             if depot_key and (depot_key not in records or not records[depot_key]['active']):
                 raise ValueError('Das zugeordnete Performance-Depot fehlt oder ist inaktiv.')
         if set(new_accounts) - sources or any(not name for name in new_accounts.values()):
@@ -524,8 +527,20 @@ class Store:
         from .comdirect_identity import preserve_booking_ids
         batch = preserve_booking_ids(self, batch)
         if batch.tax_events:
-            existing_events = [record['payload'] for record in self.model_records(kind='tax_events')]
+            event_records = self.model_records(kind='tax_events')
+            existing_events = [record['payload'] for record in event_records]
             by_id = {event.get('external_id'): event for event in existing_events if event.get('external_id')}
+            record_by_id = {record['payload'].get('external_id'): record for record in event_records
+                            if record['payload'].get('external_id')}
+            incoming = {event.external_id: asdict(event) for event in batch.tax_events if event.external_id}
+            if incoming and all(by_id.get(identifier) == payload for identifier, payload in incoming.items()):
+                old_imports = {record_by_id[identifier]['import_id'] for identifier in incoming}
+                if len(old_imports) == 1:
+                    old_import = next(iter(old_imports))
+                    report = self.db.execute('SELECT report FROM imports WHERE id=? AND active=1',
+                                             (old_import,)).fetchone()
+                    if report and json.loads(report['report']).get('source_sha256') == batch.file_hash:
+                        return {'status': 'duplicate', 'path': batch.path, 'id': old_import}
             advance_types = {'vorabpauschale', 'vorabpauschale_ausland'}
             by_period = {(account_key(event.get('account', '')), event.get('security_ref', ''),
                           str(event.get('income_year') or ''), event.get('type', '')): event

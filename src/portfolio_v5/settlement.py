@@ -290,6 +290,7 @@ def performance_transactions(store, transactions, account=None):
                           ensure_ascii=False, separators=(',', ':'))
     active_refs = {tx_ref(tx) for tx in transactions}
     cash_allocations = defaultdict(Decimal)
+    reconciled_notice_refs = set()
     try:
         for row in store.db.execute(
                 "SELECT depot_ref,cash_ref,allocated_amount FROM transaction_reconciliations "
@@ -299,6 +300,7 @@ def performance_transactions(store, transactions, account=None):
             # remain visible instead of being silently consumed by a remote link.
             if row['depot_ref'] in active_refs and row['cash_ref'] in active_refs:
                 cash_allocations[row['cash_ref']] += Decimal(row['allocated_amount'])
+                reconciled_notice_refs.add(row['depot_ref'])
     except Exception:
         pass  # Older repositories without the additive reconciliation table.
     # A linked standalone FEE/TAX row only proves an amount already embedded
@@ -330,6 +332,10 @@ def performance_transactions(store, transactions, account=None):
     for original in transactions:
         ref = tx_ref(original)
         if ref in linked_fee_rows:
+            continue
+        if (original.get('kind') in ('TAX', 'FEE')
+                and not original.get('affects_cash', True)
+                and ref not in reconciled_notice_refs):
             continue
         cash_allocation = cash_allocations.get(ref, Decimal())
         if cash_allocation:

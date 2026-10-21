@@ -540,7 +540,7 @@ class ComdirectErtraegePlugin:
                 kind=Kind.TAX, amount='-' + values['paid'], currency='EUR', security=isin,
                 taxes=values['paid'], tax_items=tax_items, cash_account=cash_account,
                 depot_account=depot_account, performance_depot_key=account_key(depot_account),
-                security_ref=isin, affects_cash=True, bank_reference=reference_no,
+                security_ref=isin, affects_cash=False, bank_reference=reference_no,
                 document_reference=reference_no, transaction_reference=reference_no,
                 booking_text='comdirect Steuerabzug Investment-Ausschüttung',
                 purpose=f'Steuerabzug Investment-Ausschüttung · {name}',

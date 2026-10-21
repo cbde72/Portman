@@ -1,9 +1,15 @@
 import importlib.util
+from decimal import Decimal
 from pathlib import Path
 
-from portfolio_v5.models import BankTransaction, ImportBatch, Kind
+import pytest
+
+from portfolio_v5.accounts import account_key
+from portfolio_v5.models import BankTransaction, ImportBatch, Kind, SecurityInfo
 from portfolio_v5.pdf_plugins import ParseContext, PdfDocument, PdfPage
+from portfolio_v5.settlement import performance_transactions
 from portman.repository_v09 import RepositoryV09
+from portman.tax_overview import automatic_tax_values
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -63,6 +69,7 @@ def test_reference_notice_is_structured_without_second_distribution():
             event.church_tax, event.paid_taxes) == ('1.59', '0.08', '0.00', '1.67')
     assert (tax.kind, tax.amount, tax.taxes, tax.account) == (
         Kind.TAX, '-1.67', '1.67', 'IBAN DE71200411330476492440')
+    assert tax.affects_cash is False
     assert not any(tx.kind in (Kind.DIVIDEND, Kind.DISTRIBUTION) for tx in batch.transactions)
     assert batch.securities[0].wkn == 'A0H074'
     assert batch.documents[0].content_b64
@@ -102,7 +109,7 @@ def test_existing_distribution_is_not_duplicated_and_reimport_is_idempotent(tmp_
         _, duplicate = parse(notice())
         duplicate.documents = []
         result = repo.commit_batches([duplicate])[0]
-        assert result['transactions'] == 0
+        assert result['status'] == 'duplicate'
         transactions = repo.transactions()
         assert sum(tx['kind'] == Kind.DIVIDEND for tx in transactions) == 1
         assert sum(tx['kind'] == Kind.TAX for tx in transactions) == 1
@@ -123,5 +130,86 @@ def test_multiple_distributions_in_one_tax_year_remain_distinct(tmp_path):
         assert repo.commit_batches([second])[0]['status'] == 'imported'
         assert len(repo.tax_events()) == 2
         assert sum(tx['kind'] == Kind.TAX for tx in repo.transactions()) == 2
+    finally:
+        repo.close()
+
+
+def _integration_repo(path):
+    repo = RepositoryV09(path, backups=False)
+    for name in ('IBAN DE71200411330476492440',):
+        repo.save_account(name, {'kind': 'Verrechnungskonto', 'institution': 'comdirect'})
+    repo.save_account('Depot 4764924', {
+        'kind': 'Depot', 'institution': 'comdirect',
+        'cash_account_key': account_key('IBAN DE71200411330476492440')})
+    return repo
+
+
+def _tax_batch():
+    _, batch = parse(notice())
+    batch.account_assignments = {'depot 476492400': 'depot 4764924'}
+    return batch
+
+
+def _finance_batch():
+    dividend = BankTransaction(
+        'IBAN DE71200411330476492440', 'statement-a0h074', '2026-09-15', Kind.DIVIDEND,
+        '7.43', 'EUR', security='WKN:A0H074', quantity='27.051', taxes='1.67',
+        gross_income='9.10', gross_currency='EUR', income_basis='net',
+        performance_depot_key='depot 4764924', bank_reference='0S5C29F709I0G',
+        booking_text='ERTRAEGNISGUTSCHRIFT A0H074', affects_cash=True)
+    return ImportBatch(
+        'finance.pdf', 'finance-a0h074', source_sheet='PDF', transactions=[dividend],
+        securities=[SecurityInfo('WKN:A0H074', identifier_type='wkn', wkn='A0H074',
+                                 name='IS.DJ AS.PAC.S.D.50 U.ETF')])
+
+
+@pytest.mark.parametrize('order', [('tax', 'finance'), ('finance', 'tax')])
+def test_sqlite_integration_maps_links_and_is_idempotent_in_both_orders(tmp_path, order):
+    repo = _integration_repo(tmp_path / ('-'.join(order) + '.sqlite'))
+    try:
+        batches = {'tax': _tax_batch, 'finance': _finance_batch}
+        first_results = [repo.commit_batches([batches[name]()])[0] for name in order]
+        assert all(result['status'] == 'imported' for result in first_results)
+
+        tax = next(tx for tx in repo.transactions() if tx['kind'] == Kind.TAX)
+        dividend = next(tx for tx in repo.transactions() if tx['kind'] == Kind.DIVIDEND)
+        assert tax['performance_depot_key'] == dividend['performance_depot_key'] == 'depot 4764924'
+        assert tax['affects_cash'] is False
+        assert len(repo.fee_links()) == 1
+
+        economic = [tx for tx in performance_transactions(repo.store, repo.transactions())
+                    if tx['date'] == '2026-09-15']
+        assert [(tx['kind'], tx['amount']) for tx in economic] == [(Kind.DIVIDEND, '7.43')]
+        values = automatic_tax_values(repo, 2026)['depot 4764924']
+        assert (values['capital_income'], values['dividends'], values['taxes'],
+                values['partial_exemption']) == (
+                    Decimal('9.10'), Decimal('7.43'), Decimal('1.67'), Decimal('2.73'))
+
+        details = [row for row in repo.tax_detail_records()
+                   if row['original_values']['Referenznummer'] == '0S5C29F709I0G']
+        assert len(details) == 1
+        detail = details[0]
+        assert detail['linked_tax_event_id']
+        assert detail['original_values']['Vorgang'] == 'Investment-Ausschüttung Inland'
+        assert (detail['original_values']['Betrag Brutto'],
+                detail['original_values']['Steuerbemessungsgrundlage'],
+                detail['original_values']['Verlust Sonstige'],
+                detail['original_values']['Summe Steuern'],
+                detail['original_values']['Gewinn/Verlust nach Steuern']) == (
+                    '9,10', '6,37', '-2,73', '-1,67', '7,43')
+
+        counts_before = tuple(repo.db.execute(query).fetchone()[0] for query in (
+            'SELECT COUNT(*) FROM imports WHERE active=1',
+            'SELECT COUNT(*) FROM transactions',
+            'SELECT COUNT(*) FROM bank_documents',
+            "SELECT COUNT(*) FROM import_model_records WHERE kind='tax_events'"))
+        repeated = [repo.commit_batches([batches[name]()])[0] for name in order]
+        assert all(result['status'] == 'duplicate' for result in repeated)
+        counts_after = tuple(repo.db.execute(query).fetchone()[0] for query in (
+            'SELECT COUNT(*) FROM imports WHERE active=1',
+            'SELECT COUNT(*) FROM transactions',
+            'SELECT COUNT(*) FROM bank_documents',
+            "SELECT COUNT(*) FROM import_model_records WHERE kind='tax_events'"))
+        assert counts_after == counts_before
     finally:
         repo.close()
