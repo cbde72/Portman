@@ -6,6 +6,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from portfolio_v5.models import (BankDocument, BankTransaction, FeeItem, Kind, SecurityInfo,
                                  TaxEvent, TaxItem, correction_number, digest, money, parse_date)
 from portfolio_v5.pdf_plugins import Detection
+from portfolio_v5.accounts import account_key
 
 DIVIDEND_KIND = Kind.DIVIDEND      # Dividenden und Fonds-Ausschüttungen
 OTHER_KIND = Kind.BANK_BOOKING     # Einlösungen: einfache, nicht klassifizierte Gutschrift
@@ -176,6 +177,34 @@ ADVANCE_TAX_SETTLEMENT = re.compile(
 ADVANCE_TAX_DEPOT = re.compile(r'Depotnummer:\s*(?P<n>\d+(?:\s+\d+)?)', re.I)
 ADVANCE_TAX_REFERENCE = re.compile(r'Referenz-Nummer:\s*(?P<r>[A-Z0-9\s]+?)(?=Depotnummer:|\n\s*\n)', re.I)
 
+# Separate comdirect tax notices for fund distributions are often extracted
+# without spaces and with damaged umlaut encoding. The original text remains
+# untouched as evidence; only a compact copy is used for field recognition.
+INVESTMENT_TAX_TITLE = re.compile(
+    r'SteuerlicheBehandlung:(?P<origin>Inl.ndische|Ausl.ndische)Investment-Aussch.ttungvom'
+    r'(?P<date>\d{2}\.\d{2}\.\d{4})', re.I)
+INVESTMENT_TAX_SECURITY = re.compile(
+    r'Stk\.(?P<qty>\d[\d.]*(?:,\d+)?)(?P<name>.+?),WKN/ISIN:'
+    r'(?P<wkn>[A-Z0-9]{6})/(?P<isin>[A-Z]{2}[A-Z0-9]{9}\d)', re.I)
+INVESTMENT_TAX_GROSS = re.compile(r'ZuIhrenGunstenvorSteuern:EUR(?P<a>' + AMOUNT + r')', re.I)
+INVESTMENT_TAX_PARTIAL = re.compile(
+    r'Teilfreistellung\((?P<rate>[\d,.]+)%\)EUR-?(?P<a>' + AMOUNT + r')', re.I)
+INVESTMENT_TAX_TAXABLE = re.compile(
+    r'Steuerbemessungsgrundlage(?:vorVerlustverrechnung)?(?:\(\d+\))?EUR(?P<a>' + AMOUNT + r')', re.I)
+INVESTMENT_TAX_COMPONENTS = {
+    'capital_gains_tax': re.compile(r'KapitalertragsteuerEUR-?(?P<a>' + AMOUNT + r')', re.I),
+    'solidarity_surcharge': re.compile(r'Solidarit.tszuschlagEUR-?(?P<a>' + AMOUNT + r')', re.I),
+    'church_tax': re.compile(r'KirchensteuerEUR-?(?P<a>' + AMOUNT + r')', re.I),
+}
+INVESTMENT_TAX_PAID = re.compile(r'abgef.hrteSteuernEUR-?(?P<a>' + AMOUNT + r')', re.I)
+INVESTMENT_TAX_NET = re.compile(r'ZuIhrenGunstennachSteuern:EUR(?P<a>' + AMOUNT + r')', re.I)
+INVESTMENT_TAX_SETTLEMENT = re.compile(
+    r'DieGutschrifterfolgtmitValuta(?P<date>\d{2}\.\d{2}\.\d{4})aufKontoEURmitderIBAN'
+    r'(?P<iban>DE\d{20})', re.I)
+INVESTMENT_TAX_DEPOT = re.compile(r'Depotnummer:(?P<n>\d+)', re.I)
+INVESTMENT_TAX_REFERENCE = re.compile(r'Referenz-Nummer:(?P<r>[A-Z0-9]{16})', re.I)
+INVESTMENT_TAX_DOCUMENT_DATE = re.compile(r'Datum:(?P<d>\d{2}\.\d{2}\.\d{4})', re.I)
+
 
 def _advance_tax_balances(document):
     """Read the eight before/after balances in comdirect's reconciliation table."""
@@ -279,15 +308,22 @@ def split_name_wkn(rest):
 class ComdirectErtraegePlugin:
     plugin_id = 'user.comdirect-ertraege'
     bank_name = 'comdirect'
-    version = '1.2'
+    version = '1.3'
     document_types = ('Dividendengutschrift, Ertragsgutschrift, Einlösung, Wertpapierabrechnung Kauf/Verkauf, '
-                      'Steuermitteilung Vorabpauschale')
+                      'Steuermitteilung Vorabpauschale, Steuermitteilung Investment-Ausschüttung')
 
     def detect(self, document):
         text = document.text
         if not re.search(r'comdirect', text, re.I):
             return []
         result = []
+        compact = re.sub(r'\s+', '', text)
+        investment_title = INVESTMENT_TAX_TITLE.search(compact)
+        if investment_title and INVESTMENT_TAX_SECURITY.search(compact):
+            origin = 'inländische' if investment_title.group('origin').lower().startswith('inl') else 'ausländische'
+            result.append(Detection(0.99, f'comdirect Steuermitteilung {origin} Investment-Ausschüttung',
+                                    'investment_ausschuettung',
+                                    'comdirect, Investment-Ausschüttung und Wertpapierkennung erkannt'))
         if ADVANCE_TAX_TITLE.search(text) and ADVANCE_TAX_SECURITY.search(text):
             result.append(Detection(0.99, 'comdirect Steuermitteilung Vorabpauschale', 'vorabpauschale',
                                     'comdirect, Vorabpauschale und Wertpapierkennung erkannt'))
@@ -306,6 +342,8 @@ class ComdirectErtraegePlugin:
         return result
 
     def parse(self, document, detection, context):
+        if detection.handler_id == 'investment_ausschuettung':
+            return self._investment_distribution_tax(document, context.batch)
         if detection.handler_id == 'vorabpauschale':
             return self._advance_tax(document, context.batch)
         if detection.handler_id in ('wertpapierkauf', 'wertpapierverkauf'):
@@ -432,6 +470,95 @@ class ComdirectErtraegePlugin:
                                   + ' in diesem PDF nicht lesbar; übrige Felder wurden übernommen. Bitte am Original prüfen.')
         if page.used_ocr:
             batch.warnings.append('Seite per OCR gelesen; Betrag, Stückzahl und ISIN bitte am Original prüfen.')
+        return batch
+
+    def _investment_distribution_tax(self, document, batch):
+        text = document.text
+        compact = re.sub(r'\s+', '', text)
+        title = INVESTMENT_TAX_TITLE.search(compact)
+        security = INVESTMENT_TAX_SECURITY.search(compact)
+        gross = INVESTMENT_TAX_GROSS.search(compact)
+        partial = INVESTMENT_TAX_PARTIAL.search(compact)
+        taxable = INVESTMENT_TAX_TAXABLE.search(compact)
+        paid = INVESTMENT_TAX_PAID.search(compact)
+        net = INVESTMENT_TAX_NET.search(compact)
+        settlement = INVESTMENT_TAX_SETTLEMENT.search(compact)
+        depot = INVESTMENT_TAX_DEPOT.search(compact)
+        reference = INVESTMENT_TAX_REFERENCE.search(compact)
+        if not all((title, security, gross, partial, taxable, paid, net, settlement, depot, reference)):
+            raise ValueError('Investment-Ausschüttung, Wertpapier, Steuerbasis, Steuern oder Gutschrift nicht vollständig erkannt.')
+
+        treatment_date = parse_date(title.group('date'))
+        value_date = parse_date(settlement.group('date'))
+        document_date_match = INVESTMENT_TAX_DOCUMENT_DATE.search(compact)
+        document_date = parse_date(document_date_match.group('d')) if document_date_match else treatment_date
+        values = {key: money(match.group('a')) for key, match in (
+            ('gross', gross), ('partial', partial), ('taxable', taxable), ('paid', paid), ('net', net))}
+        if not treatment_date or not value_date or any(value is None for value in values.values()):
+            raise ValueError('Datum oder Betrag der Investment-Ausschüttung ist ungültig.')
+        if abs(Decimal(values['gross']) - Decimal(values['partial']) - Decimal(values['taxable'])) > Decimal('0.01'):
+            raise ValueError('Bruttoausschüttung minus Teilfreistellung passt nicht zur Steuerbemessungsgrundlage.')
+        if abs(Decimal(values['gross']) - Decimal(values['paid']) - Decimal(values['net'])) > Decimal('0.01'):
+            raise ValueError('Bruttoausschüttung minus Gesamtsteuer passt nicht zur Nettoauszahlung.')
+
+        components = {name: money(match.group('a')) for name, pattern in INVESTMENT_TAX_COMPONENTS.items()
+                      for match in [pattern.search(compact)] if match}
+        if not components:
+            raise ValueError('Keine Steuerkomponenten der Investment-Ausschüttung erkannt.')
+        component_total = sum((Decimal(value) for value in components.values()), Decimal())
+        if abs(component_total - Decimal(values['paid'])) > Decimal('0.01'):
+            raise ValueError('Kapitalertragsteuer, Solidaritätszuschlag und Kirchensteuer passen nicht zur Gesamtsteuer.')
+
+        isin, wkn = security.group('isin').upper(), security.group('wkn').upper()
+        qty = correction_number(security.group('qty'))
+        name = ' '.join(security.group('name').split())
+        depot_account = 'Depot ' + depot.group('n')
+        cash_account = 'IBAN ' + settlement.group('iban')
+        reference_no = reference.group('r')
+        origin = 'inland' if title.group('origin').lower().startswith('inl') else 'ausland'
+        event_id = 'pdf-comdirect-investment-distribution-tax-' + digest(
+            [depot_account, isin, treatment_date, values['gross'], values['paid'], reference_no])
+        payment_id = event_id + '-payment' if Decimal(values['paid']) else ''
+        batch.tax_events.append(TaxEvent(
+            external_id=event_id, account=depot_account,
+            type='investment_ausschuettung_' + origin, date=treatment_date,
+            tax_year=treatment_date[:4], income_year=treatment_date[:4], document_date=document_date,
+            security_ref=isin, quantity=qty, currency='EUR', taxable_income=values['taxable'],
+            partial_exemption_amount=values['partial'], after_partial_exemption=values['taxable'],
+            partial_exemption_rate=correction_number(partial.group('rate')),
+            capital_gains_tax=components.get('capital_gains_tax'),
+            solidarity_surcharge=components.get('solidarity_surcharge'),
+            church_tax=components.get('church_tax'), paid_taxes=values['paid'],
+            reference_no=reference_no, related_transaction_id=payment_id, cash_account=cash_account))
+        if payment_id:
+            tax_items = [TaxItem(kind, components[key]) for kind, key in (
+                ('kapitalertragsteuer', 'capital_gains_tax'),
+                ('solidaritaetszuschlag', 'solidarity_surcharge'),
+                ('kirchensteuer', 'church_tax')) if key in components]
+            batch.transactions.append(BankTransaction(
+                account=cash_account, external_id=payment_id, date=treatment_date, value_date=value_date,
+                kind=Kind.TAX, amount='-' + values['paid'], currency='EUR', security=isin,
+                taxes=values['paid'], tax_items=tax_items, cash_account=cash_account,
+                depot_account=depot_account, performance_depot_key=account_key(depot_account),
+                security_ref=isin, affects_cash=False, bank_reference=reference_no,
+                document_reference=reference_no, transaction_reference=reference_no,
+                booking_text='comdirect Steuerabzug Investment-Ausschüttung',
+                purpose=f'Steuerabzug Investment-Ausschüttung · {name}',
+                raw_text=f'Brutto {values["gross"]} EUR · Steuern {values["paid"]} EUR · Netto {values["net"]} EUR',
+                field_sources={'taxes': 'comdirect Steuermitteilung · abgeführte Steuern',
+                               'value_date': 'comdirect Steuermitteilung · Valuta',
+                               'security': 'comdirect Steuermitteilung · WKN/ISIN'}))
+        batch.securities.append(SecurityInfo(key=isin, isin=isin, wkn=wkn, name=name, quote_currency='EUR'))
+        batch.documents.append(BankDocument(
+            depot_account, batch.file_hash + ':' + depot_account, document.path.name, document_date,
+            base64.b64encode(document.content).decode('ascii'),
+            document_type='Steuermitteilung Investment-Ausschüttung', bank_name='comdirect',
+            document_no=reference_no, page_count=len(document.pages), extraction_method='PDF-Text',
+            linked_ids=[event_id, *([payment_id] if payment_id else [])]))
+        batch.account_names.extend([depot_account, cash_account])
+        batch.warnings.append(
+            f'Separate Steuermitteilung: Brutto {values["gross"]} EUR, Steuer {values["paid"]} EUR, '
+            f'Netto {values["net"]} EUR. Keine zweite Ausschüttung erzeugt.')
         return batch
 
     def _advance_tax(self, document, batch):

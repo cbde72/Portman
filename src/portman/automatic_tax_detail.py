@@ -69,12 +69,23 @@ def _row(values, *, external_id, institution, account, source_format, source,
 
 def _event_values(repository, event):
     values = _blank(); name, wkn = _security(repository, event.get('security_ref', ''))
-    kind = 'Vorabpauschale Ausland' if event.get('type') == 'vorabpauschale_ausland' else 'Vorabpauschale'
+    event_type = event.get('type')
+    labels = {'vorabpauschale': 'Vorabpauschale', 'vorabpauschale_ausland': 'Vorabpauschale Ausland',
+              'investment_ausschuettung_inland': 'Investment-Ausschüttung Inland',
+              'investment_ausschuettung_ausland': 'Investment-Ausschüttung Ausland'}
+    kind = labels.get(event_type, event_type or 'Steuerereignis')
+    distribution = str(event_type or '').startswith('investment_ausschuettung_')
+    gross = ((Decimal(str(event.get('taxable_income') or 0))
+              + Decimal(str(event.get('partial_exemption_amount') or 0))) if distribution
+             else event.get('advance_tax_base'))
+    net = ((gross - Decimal(str(event.get('paid_taxes') or 0))) if distribution else
+           (Decimal(str(event['taxable_income'])) - Decimal(str(event['paid_taxes']))
+            if event.get('taxable_income') is not None and event.get('paid_taxes') is not None else None))
     values.update({'Steuerjahr': str(event.get('tax_year') or event.get('date', '')[:4]),
         'Buchungstag': _day(event.get('document_date') or event.get('date')),
         'Steuerliches Datum': _day(event.get('date')), 'Referenznummer': event.get('reference_no', ''),
         'Vorgang': kind, 'Stück/Nominale': _de(event.get('quantity')), 'Bezeichnung': name, 'WKN': wkn,
-        'Betrag Brutto': _de(event.get('advance_tax_base')),
+        'Betrag Brutto': _de(gross),
         'Gewinn/Verlust': _de(event.get('taxable_income')),
         'Gewinn Sonstige': _de(event.get('taxable_income')),
         'Verlust Sonstige': _de(-abs(Decimal(str(event['partial_exemption_amount'])))) if event.get('partial_exemption_amount') else '',
@@ -93,9 +104,7 @@ def _event_values(repository, event):
                           if event.get('church_tax') is not None else ''),
         'Summe Steuern': (_de(-abs(Decimal(str(event['paid_taxes']))))
                           if event.get('paid_taxes') is not None else ''),
-        'Gewinn/Verlust nach Steuern': (_de(Decimal(str(event['taxable_income']))
-                                            - Decimal(str(event['paid_taxes'])))
-                                         if event.get('taxable_income') is not None and event.get('paid_taxes') is not None else ''),
+        'Gewinn/Verlust nach Steuern': _de(net),
         'Umsatz anrechenbarer Quellensteuer': _de(event.get('creditable_withholding')),
         'Steuerbemessungsgrundlage': _de(event.get('taxable_income')),
         'Gewinn/Verlust Aktien (Saldo)': _de(event.get('equity_loss_pot_after')),
@@ -150,8 +159,21 @@ def automatic_tax_detail_records(repository, imported):
         item['conflicts'] = conflicts
         if conflicts: item['match_status'] = 'conflict'
         result.append(item)
-    for event in repository.tax_events():
+    events = repository.tax_events()
+    all_transactions = repository.transactions()
+    by_external = {tx.get('external_id'): tx for tx in all_transactions if tx.get('external_id')}
+    fee_to_aux = {row['fee_ref']: row['aux_ref'] for row in repository.fee_links()}
+    event_by_aux = {}
+    for event in events:
+        tax = by_external.get(event.get('related_transaction_id'))
+        if tax is not None:
+            aux = fee_to_aux.get(reference(tax))
+            if aux:
+                event_by_aux[aux] = event
+    for event in events:
         if event.get('external_id') in linked_events:
+            continue
+        if event in event_by_aux.values():
             continue
         account = event['account']; key = account_key(account); record = records.get(key, {})
         values = _event_values(repository, event)
@@ -161,11 +183,10 @@ def automatic_tax_detail_records(repository, imported):
             institution=account_institution(record, records), account=account,
             source_format='automatic_tax_event_v1', source=event.get('source', ''),
             linked_event=event['external_id'], provenance=provenance))
-    related = {event.get('related_transaction_id') for event in repository.tax_events()
+    related = {event.get('related_transaction_id') for event in events
                if event.get('related_transaction_id')}
     from .analysis_v09 import realized_profit
     realized_index = {}
-    all_transactions = repository.transactions()
     analysis_end = max((tx.get('date', '') for tx in all_transactions), default='9999-12-31')
     for gain in realized_profit(repository, '0001-01-01', analysis_end):
         key = (account_key(gain['account']), gain['date'], gain['security'], gain['proceeds'])
@@ -182,11 +203,20 @@ def automatic_tax_detail_records(repository, imported):
                                     abs(Decimal(str(tx['amount'])))), [])
         safe_gain = gains[0] if len(gains) == 1 else None
         values = _transaction_values(repository, tx, safe_gain)
+        linked_event = event_by_aux.get(ref)
+        if linked_event:
+            event_values = _event_values(repository, linked_event)
+            for column in ('Vorgang', 'BMG nach VV', 'Verlust Sonstige',
+                           'Kapitalertragssteuer', 'Solidaritätszuschlag', 'Kirchensteuer',
+                           'Steuerbemessungsgrundlage'):
+                if event_values.get(column) not in (None, ''):
+                    values[column] = event_values[column]
         record = records.get(account_key(tx['account']), {})
         provenance = {column: {'status': 'document', 'source': tx.get('source', '')}
                       for column in COLUMNS if values[column] != ''}
         result.append(_row(values, external_id='auto-tx:'+ref,
             institution=account_institution(record, records), account=tx['account'],
             source_format='automatic_transaction_v1', source=tx.get('source', ''),
+            linked_event=linked_event.get('external_id', '') if linked_event else '',
             linked_transaction=ref, provenance=provenance))
     return sorted(result, key=lambda row: (row.get('tax_date', ''), row.get('external_id', '')))

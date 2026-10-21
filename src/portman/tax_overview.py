@@ -92,7 +92,9 @@ def automatic_tax_values(repository, year):
     seen_events = set()
     for record in store.model_records(kind='tax_events'):
         event = record['payload']
-        if event.get('type') not in ('vorabpauschale', 'vorabpauschale_ausland') or str(
+        event_type = event.get('type')
+        if event_type not in ('vorabpauschale', 'vorabpauschale_ausland',
+                              'investment_ausschuettung_inland', 'investment_ausschuettung_ausland') or str(
                 event.get('tax_year') or event.get('date', '')[:4]) != str(year):
             continue
         identity = event.get('external_id') or (event.get('account'), event.get('date'), event.get('security_ref'))
@@ -102,6 +104,9 @@ def automatic_tax_values(repository, year):
         source_key = account_key(event.get('account', ''))
         key = links.get((record['import_id'], source_key), mappings.get(source_key, source_key))
         if key not in records or (event.get('currency') or 'EUR') != 'EUR':
+            continue
+        if event_type.startswith('investment_ausschuettung_'):
+            values[key]['partial_exemption'] += abs(_number(event.get('partial_exemption_amount')))
             continue
         base = abs(_number(event.get('advance_tax_base')))
         taxable = abs(_number(event.get('taxable_income')))

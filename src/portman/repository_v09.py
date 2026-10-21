@@ -103,6 +103,96 @@ class RepositoryV09(RepositoryV07):
         finally:
             self.db.execute(f'PRAGMA busy_timeout={int(timeout)}')
 
+    def commit_batches(self, batches):
+        results = super().commit_batches(batches)
+        if any(result.get('status') in ('imported', 'duplicate') for result in results):
+            warnings = self._link_investment_distribution_taxes()
+            for result in results:
+                if result.get('status') == 'imported':
+                    result.setdefault('warnings', []).extend(warnings)
+        return results
+
+    def _link_investment_distribution_taxes(self):
+        """Link a separate tax notice to one fully evidenced net dividend."""
+        events = [event for event in self.tax_events()
+                  if event.get('type') in ('investment_ausschuettung_inland',
+                                           'investment_ausschuettung_ausland')
+                  and event.get('related_transaction_id')]
+        if not events:
+            return []
+        transactions = self.transactions()
+        by_external = {tx.get('external_id'): tx for tx in transactions if tx.get('external_id')}
+        existing_fee_refs = {row['fee_ref'] for row in self.db.execute('SELECT fee_ref FROM fee_links')}
+
+        security_aliases = {}
+        imported_securities = [record['payload'] for record in self.store.model_records(kind='securities')]
+        wkn_to_isin = {
+            str(security['wkn']).upper(): str(security['isin']).upper()
+            for security in imported_securities if security.get('wkn') and security.get('isin')}
+        for security in imported_securities:
+            aliases = [security.get(field) for field in ('key', 'isin', 'wkn')]
+            aliases = [str(value).removeprefix('ISIN:').removeprefix('WKN:').upper()
+                       for value in aliases if value]
+            if aliases:
+                canonical = (str(security.get('isin') or wkn_to_isin.get(str(security.get('wkn', '')).upper())
+                                 or aliases[0])
+                             .removeprefix('ISIN:').removeprefix('WKN:').upper())
+                for alias in aliases:
+                    security_aliases[alias] = wkn_to_isin.get(alias, canonical)
+
+        def security_identity(value):
+            value = str(value or '').removeprefix('ISIN:').removeprefix('WKN:').upper()
+            if value in security_aliases:
+                return security_aliases[value]
+            row = self.db.execute(
+                'SELECT security_key,isin,wkn FROM security_master '
+                'WHERE security_key=? OR isin=? OR wkn=?', (value, value, value)).fetchone()
+            return ((row['isin'] or row['security_key']) if row else value).upper()
+
+        warnings = []
+        with self.db:
+            for event in events:
+                tax = by_external.get(event['related_transaction_id'])
+                if tax is None:
+                    continue
+                tax_ref = reference(tax)
+                if tax_ref in existing_fee_refs:
+                    continue
+                gross = (Decimal(str(event.get('taxable_income') or 0))
+                         + Decimal(str(event.get('partial_exemption_amount') or 0)))
+                paid = Decimal(str(event.get('paid_taxes') or 0))
+                net = gross - paid
+                event_security = security_identity(event.get('security_ref'))
+                event_depot = account_key(event.get('account', ''))
+                candidates = []
+                for tx in transactions:
+                    if tx.get('kind') not in ('DIVIDEND', 'DISTRIBUTION') or tx.get('external_id') == tax.get('external_id'):
+                        continue
+                    tx_gross = tx.get('gross_income') or tx.get('gross_amount')
+                    evidence = (
+                        tx.get('date') == event.get('date')
+                        and account_key(tx.get('account', '')) == account_key(event.get('cash_account', ''))
+                        and account_key(tx.get('performance_depot_key', '')) == event_depot
+                        and security_identity(tx.get('security')) == event_security
+                        and tx_gross not in (None, '') and Decimal(str(tx_gross)) == gross
+                        and Decimal(str(tx.get('amount'))) == net
+                        and tx.get('taxes') not in (None, '') and abs(Decimal(str(tx['taxes']))) == paid
+                        and bool(tx.get('bank_reference') or tx.get('document_reference'))
+                        and bool(event.get('reference_no')))
+                    if evidence:
+                        candidates.append(tx)
+                if len(candidates) == 1:
+                    self.db.execute('INSERT OR IGNORE INTO fee_links VALUES(?,?,?,?)',
+                                    (reference(candidates[0]), 'taxes', tax_ref,
+                                     'Automatisch: comdirect Investment-Ausschüttung, Netto und Steuer belegt'))
+                    existing_fee_refs.add(tax_ref)
+                else:
+                    warnings.append(
+                        f'Prüfhinweis: Steuermitteilung {event.get("reference_no") or event["external_id"]} '
+                        f'konnte nicht eindeutig einer Ausschüttung zugeordnet werden ({len(candidates)} Treffer); '
+                        'keine automatische wirtschaftliche Zusammenführung.')
+        return warnings
+
     def backup(self, reason='manual', label=''):
         return backup_database(self.db, self.backup_folder, reason, label=label)
 
