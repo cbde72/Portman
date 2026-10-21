@@ -526,9 +526,10 @@ class Store:
         if batch.tax_events:
             existing_events = [record['payload'] for record in self.model_records(kind='tax_events')]
             by_id = {event.get('external_id'): event for event in existing_events if event.get('external_id')}
+            advance_types = {'vorabpauschale', 'vorabpauschale_ausland'}
             by_period = {(account_key(event.get('account', '')), event.get('security_ref', ''),
                           str(event.get('income_year') or ''), event.get('type', '')): event
-                         for event in existing_events}
+                         for event in existing_events if event.get('type') in advance_types}
             unique = []
             seen_ids = set()
             for event in batch.tax_events:
@@ -542,14 +543,15 @@ class Store:
                     continue
                 period_key = (account_key(event.account), event.security_ref,
                               str(event.income_year or ''), event.type)
-                conflict = by_period.get(period_key)
+                conflict = by_period.get(period_key) if event.type in advance_types else None
                 if conflict is not None:
                     raise ValueError(
                         f'Für {event.security_ref or "das Wertpapier"} im Depot {event.account} ist für das '
                         f'Ertragsjahr {event.income_year or "unbekannt"} bereits eine Vorabpauschale gespeichert.')
                 unique.append(event)
                 by_id[event.external_id] = serialized
-                by_period[period_key] = serialized
+                if event.type in advance_types:
+                    by_period[period_key] = serialized
             batch.tax_events = unique
         if batch.tax_details:
             existing_ids = {record['payload'].get('external_id'): record['import_id']
