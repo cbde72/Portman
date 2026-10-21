@@ -116,11 +116,27 @@ class RepositoryV09(RepositoryV07):
         """Link a separate tax notice to one fully evidenced net dividend."""
         events = [event for event in self.tax_events()
                   if event.get('type') in ('investment_ausschuettung_inland',
-                                           'investment_ausschuettung_ausland')
-                  and event.get('related_transaction_id')]
+                                           'investment_ausschuettung_ausland',
+                                           'dividende_inland')
+                  and (event.get('related_transaction_id') or event.get('type') == 'dividende_inland')]
         if not events:
             return []
         transactions = self.transactions()
+        # Finanzreports store their source rows unchanged as BANK_BOOKING.
+        # Resolve the same deterministic security-booking view used by the UI
+        # here as well; otherwise a tax notice imported in the same batch can
+        # never see the derived dividend.
+        from portfolio_v5.settlement import infer_security_booking
+        inference_context = {}
+        resolved_transactions = []
+        for transaction in transactions:
+            transaction = dict(transaction)
+            if transaction.get('kind') == 'BANK_BOOKING':
+                inferred = infer_security_booking(self.store, transaction, inference_context)
+                if inferred:
+                    transaction.update(inferred)
+            resolved_transactions.append(transaction)
+        transactions = resolved_transactions
         by_external = {tx.get('external_id'): tx for tx in transactions if tx.get('external_id')}
         existing_fee_refs = {row['fee_ref'] for row in self.db.execute('SELECT fee_ref FROM fee_links')}
 
@@ -153,10 +169,13 @@ class RepositoryV09(RepositoryV07):
         with self.db:
             for event in events:
                 tax = by_external.get(event['related_transaction_id'])
-                if tax is None:
+                ordinary_dividend = event.get('type') == 'dividende_inland'
+                if ordinary_dividend and tax is not None:
                     continue
-                tax_ref = reference(tax)
-                if tax_ref in existing_fee_refs:
+                if tax is None and not ordinary_dividend:
+                    continue
+                tax_ref = reference(tax) if tax is not None else ''
+                if tax_ref and tax_ref in existing_fee_refs:
                     continue
                 gross = (Decimal(str(event.get('taxable_income') or 0))
                          + Decimal(str(event.get('partial_exemption_amount') or 0)))
@@ -166,26 +185,47 @@ class RepositoryV09(RepositoryV07):
                 event_depot = account_key(event.get('account', ''))
                 candidates = []
                 for tx in transactions:
-                    if tx.get('kind') not in ('DIVIDEND', 'DISTRIBUTION') or tx.get('external_id') == tax.get('external_id'):
+                    if (tx.get('kind') not in ('DIVIDEND', 'DISTRIBUTION')
+                            or (tax is not None and tx.get('external_id') == tax.get('external_id'))):
                         continue
                     tx_gross = tx.get('gross_income') or tx.get('gross_amount')
+                    tx_days = [date.fromisoformat(value) for value in
+                               (tx.get('date'), tx.get('value_date')) if value]
+                    event_day = date.fromisoformat(event.get('date'))
+                    date_matches = any(abs((day - event_day).days) <= 3 for day in tx_days)
                     evidence = (
-                        tx.get('date') == event.get('date')
+                        date_matches
                         and account_key(tx.get('account', '')) == account_key(event.get('cash_account', ''))
                         and account_key(tx.get('performance_depot_key', '')) == event_depot
                         and security_identity(tx.get('security')) == event_security
                         and tx_gross not in (None, '') and Decimal(str(tx_gross)) == gross
                         and Decimal(str(tx.get('amount'))) == net
-                        and tx.get('taxes') not in (None, '') and abs(Decimal(str(tx['taxes']))) == paid
+                        and ((ordinary_dividend and paid == 0 and tx.get('taxes') in (None, '', '0', '0.00'))
+                             or (tx.get('taxes') not in (None, '')
+                                 and abs(Decimal(str(tx['taxes']))) == paid))
                         and bool(tx.get('bank_reference') or tx.get('document_reference'))
                         and bool(event.get('reference_no')))
                     if evidence:
                         candidates.append(tx)
                 if len(candidates) == 1:
-                    self.db.execute('INSERT OR IGNORE INTO fee_links VALUES(?,?,?,?)',
-                                    (reference(candidates[0]), 'taxes', tax_ref,
-                                     'Automatisch: comdirect Investment-Ausschüttung, Netto und Steuer belegt'))
-                    existing_fee_refs.add(tax_ref)
+                    if ordinary_dividend:
+                        record = self.db.execute(
+                            "SELECT import_id,ordinal,payload FROM import_model_records "
+                            "WHERE kind='tax_events' AND json_extract(payload,'$.external_id')=?",
+                            (event['external_id'],)).fetchone()
+                        if record:
+                            payload = json.loads(record['payload'])
+                            payload['related_transaction_id'] = candidates[0]['external_id']
+                            self.db.execute(
+                                "UPDATE import_model_records SET payload=? "
+                                "WHERE import_id=? AND kind='tax_events' AND ordinal=?",
+                                (json.dumps(payload, ensure_ascii=False, separators=(',', ':')),
+                                 record['import_id'], record['ordinal']))
+                    else:
+                        self.db.execute('INSERT OR IGNORE INTO fee_links VALUES(?,?,?,?)',
+                                        (reference(candidates[0]), 'taxes', tax_ref,
+                                         'Automatisch: comdirect Investment-Ausschüttung, Netto und Steuer belegt'))
+                        existing_fee_refs.add(tax_ref)
                 else:
                     warnings.append(
                         f'Prüfhinweis: Steuermitteilung {event.get("reference_no") or event["external_id"]} '
