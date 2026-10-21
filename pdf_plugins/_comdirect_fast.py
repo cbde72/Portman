@@ -44,8 +44,9 @@ def booking_columns(tx, lines, anchors, batch=None):
         if getattr(tx, field):
             tx.field_sources[field] = 'comdirect Finanzreport · Tabellenspalte'
     enrich_details(tx)
-    from pdf_plugins._comdirect_finanzreport_core import enrich_interest_closing
+    from pdf_plugins._comdirect_finanzreport_core import enrich_interest_closing, stabilize_booking_references
     enrich_interest_closing(tx, batch)
+    stabilize_booking_references(tx)
 
 
 def try_fast_finanzreport(path, content):

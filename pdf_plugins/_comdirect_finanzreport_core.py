@@ -14,6 +14,28 @@ HEADING = re.compile(ACCOUNT + r'(?: (?:Dispositionskredit|ec |girocard).*)?$')
 BOOKING_AMOUNT = re.compile(r'[+-]' + NUM)
 
 
+def _stable_booking_reference(value):
+    """Keep only references that can identify a booking across imports."""
+    value = ' '.join((value or '').split()).strip(' ·;|:')
+    folded = value.casefold()
+    if (not value or folded in {'belastung', 'gutschrift', 'entgelt', 'ntgelt'}
+            or re.fullmatch(r'konto\s+\d+', folded)):
+        return ''
+    # Ordinary words leaked from a flattened table are descriptions, not IDs.
+    if not any(char.isdigit() for char in value) and not re.search(r'[-_/]', value):
+        return ''
+    return value
+
+
+def stabilize_booking_references(tx):
+    """Remove column artefacts after either Finanzreport extraction path."""
+    tx.bank_reference = _stable_booking_reference(tx.bank_reference)
+    tx.document_reference = _stable_booking_reference(tx.document_reference)
+    tx.transaction_reference = _stable_booking_reference(tx.transaction_reference)
+    if not tx.transaction_reference:
+        tx.transaction_reference = tx.document_reference or tx.bank_reference
+
+
 def enrich_interest_closing(tx, batch=None):
     """Structure comdirect's whitespace-poor quarterly interest closing text."""
     # Coordinate-based extraction may repair the logical booking columns after
@@ -111,6 +133,7 @@ def flush_pending(pending, batch, occurrences):
     tx, page, row = pending
     enrich_interest_closing(tx, batch)
     enrich_details(tx)
+    stabilize_booking_references(tx)
     identity = digest([tx.account, tx.date, tx.value_date, tx.amount, tx.purpose])
     occurrences[identity] += 1
     tx.external_id = f'comdirect-pdf-{identity}-{occurrences[identity]}'

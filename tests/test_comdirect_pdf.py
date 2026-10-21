@@ -7,6 +7,33 @@ from pdf_plugins._comdirect_finanzreport_core import parse_finanzreport, is_fina
 from portman.repository import PortfolioRepository
 
 
+@pytest.mark.parametrize('value', (':', 'Belastung', 'ntgelt', 'Konto 476492405'))
+def test_comdirect_finanzreport_rejects_unstable_booking_references(value):
+    from pdf_plugins._comdirect_finanzreport_core import _stable_booking_reference
+    assert _stable_booking_reference(value) == ''
+
+
+@pytest.mark.parametrize('value', ('REF 123/45-AB', '0SIN8K01DPG003GV', '91182283'))
+def test_comdirect_finanzreport_keeps_stable_booking_references(value):
+    from pdf_plugins._comdirect_finanzreport_core import _stable_booking_reference
+    assert _stable_booking_reference(value) == value
+
+
+def test_comdirect_fast_path_filters_reference_column_artifact():
+    from pdf_plugins._comdirect_fast import booking_columns
+    tx = BankTransaction('IBAN DE89370400440532013000', 'id', '2026-09-01',
+                         'BANK_BOOKING', '-1.00', 'EUR', purpose='Einkauf')
+    lines = [[
+        {'origin': (10, 10), 'text': '02.09.2026'},
+        {'origin': (110, 10), 'text': 'Belastung'},
+    ]]
+
+    booking_columns(tx, lines, (100, 200, 300, 400))
+
+    assert tx.bank_reference == ''
+    assert tx.transaction_reference == ''
+
+
 def report():
     return ["""comdirect
 Finanzreport Nr. 1 per 01.02.2021
