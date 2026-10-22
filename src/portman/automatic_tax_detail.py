@@ -72,9 +72,11 @@ def _event_values(repository, event):
     event_type = event.get('type')
     labels = {'vorabpauschale': 'Vorabpauschale', 'vorabpauschale_ausland': 'Vorabpauschale Ausland',
               'investment_ausschuettung_inland': 'Investment-Ausschüttung Inland',
-              'investment_ausschuettung_ausland': 'Investment-Ausschüttung Ausland'}
+              'investment_ausschuettung_ausland': 'Investment-Ausschüttung Ausland',
+              'dividende_inland': 'Dividende Inland'}
     kind = labels.get(event_type, event_type or 'Steuerereignis')
-    distribution = str(event_type or '').startswith('investment_ausschuettung_')
+    distribution = (str(event_type or '').startswith('investment_ausschuettung_')
+                    or event_type == 'dividende_inland')
     gross = ((Decimal(str(event.get('taxable_income') or 0))
               + Decimal(str(event.get('partial_exemption_amount') or 0))) if distribution
              else event.get('advance_tax_base'))

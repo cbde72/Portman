@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from portfolio_v5.accounts import account_key
-from portfolio_v5.models import BankTransaction, ImportBatch, Kind, SecurityInfo
+from portfolio_v5.models import BankTransaction, ImportBatch, Kind, Position, SecurityInfo, Snapshot
 from portfolio_v5.pdf_plugins import ParseContext, PdfDocument, PdfPage
 from portfolio_v5.settlement import performance_transactions
 from portman.repository_v09 import RepositoryV09
@@ -56,6 +56,22 @@ def parse(source):
     return detection, importer.parse(source, detection, ParseContext(batch))
 
 
+def dividend_notice():
+    text = '''comdirect bank AG Datum: 27.05.2026 Depotnummer:476492400
+Referenz-Nummer:1SINHRMXMUV005VO
+SteuerlicheBehandlung:InländischeDividendevom27.05.2026
+Stk.3,878FRESENIUSSE+CO.KGAAO.N.,WKN/ISIN:578560/DE0005785604
+ZuIhrenGunstenvorSteuern:EUR4,07
+SteuerbemessungsgrundlagevorVerlustverrechnungEUR4,07
+inAnspruchgenommenerFreistellungsauftragEUR4,07
+SteuerbemessungsgrundlagenachVerlustverrechnungEUR0,00
+KapitalertragsteuerEUR0,00 SolidaritätszuschlagEUR0,00 KirchensteuerEUR0,00
+abgeführteSteuernEUR0,00 ZuIhrenGunstennachSteuern:EUR4,07
+DieGutschrifterfolgtmitValuta27.05.2026aufKontoEURmitderIBANDE71200411330476492440'''
+    return PdfDocument(Path('dividend-tax.pdf'), b'%PDF-test\n%%EOF', 'dividend-tax',
+                       (PdfPage(1, text),))
+
+
 def test_reference_notice_is_structured_without_second_distribution():
     detection, batch = parse(notice())
     event, tax = batch.tax_events[0], batch.transactions[0]
@@ -90,6 +106,20 @@ def test_foreign_notice_preserves_distinct_treatment_and_value_dates():
     event, payment = batch.tax_events[0], batch.transactions[0]
     assert event.date == '2026-02-27'
     assert (payment.date, payment.value_date) == ('2026-02-27', '2026-03-02')
+
+
+def test_domestic_share_dividend_tax_notice_preserves_documented_zeroes():
+    detection, batch = parse(dividend_notice())
+    assert detection.handler_id == 'dividende_steuer_inland'
+    assert batch.transactions == []
+    event = batch.tax_events[0]
+    assert (event.type, event.security_ref, event.quantity) == (
+        'dividende_inland', 'DE0005785604', '3.878')
+    assert (event.taxable_income, event.used_exemption, event.paid_taxes) == (
+        '4.07', '4.07', '0.00')
+    assert (event.capital_gains_tax, event.solidarity_surcharge,
+            event.church_tax) == ('0.00', '0.00', '0.00')
+    assert batch.documents[0].content_b64
 
 
 def test_existing_distribution_is_not_duplicated_and_reimport_is_idempotent(tmp_path):
@@ -152,13 +182,16 @@ def _tax_batch():
 
 def _finance_batch():
     dividend = BankTransaction(
-        'IBAN DE71200411330476492440', 'statement-a0h074', '2026-09-15', Kind.DIVIDEND,
-        '7.43', 'EUR', security='WKN:A0H074', quantity='27.051', taxes='1.67',
-        gross_income='9.10', gross_currency='EUR', income_basis='net',
-        performance_depot_key='depot 4764924', bank_reference='0S5C29F709I0G',
-        booking_text='ERTRAEGNISGUTSCHRIFT A0H074', affects_cash=True)
+        'IBAN DE71200411330476492440', 'statement-a0h074', '2026-09-15', Kind.BANK_BOOKING,
+        '7.43', 'EUR', bank_reference='0S5C29F709I0G', affects_cash=True,
+        booking_text=('ERTRAEGNISGUTSCHRIFT VOM 15.09.26\nDEPOTBESTAND: 27,051\n'
+                      'IS.DJ AS.PAC.S.D.50 U.ETF\nA0H074 EUR 0,336248\n'
+                      'Abr.Betrag Brutto 9,10 EUR\nSteuerabzug 1,67- EUR'))
     return ImportBatch(
         'finance.pdf', 'finance-a0h074', source_sheet='PDF', transactions=[dividend],
+        snapshots=[Snapshot('Depot 4764924', '2026-09', '2026-09-30', 'Finanzreport', [
+            Position('WKN:A0H074', 'IS.DJ AS.PAC.S.D.50 U.ETF', wkn='A0H074',
+                     isin='DE000A0H0744', quantity='27.051', value='900.00')])],
         securities=[SecurityInfo('WKN:A0H074', identifier_type='wkn', wkn='A0H074',
                                  name='IS.DJ AS.PAC.S.D.50 U.ETF')])
 

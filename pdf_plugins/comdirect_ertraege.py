@@ -5,7 +5,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 from portfolio_v5.models import (BankDocument, BankTransaction, FeeItem, Kind, SecurityInfo,
                                  TaxEvent, TaxItem, correction_number, digest, money, parse_date)
-from portfolio_v5.pdf_plugins import Detection
+from portfolio_v5.pdf_plugins import Detection, PdfDocument, PdfPage
 from portfolio_v5.accounts import account_key
 
 DIVIDEND_KIND = Kind.DIVIDEND      # Dividenden und Fonds-Ausschüttungen
@@ -205,6 +205,15 @@ INVESTMENT_TAX_DEPOT = re.compile(r'Depotnummer:(?P<n>\d+)', re.I)
 INVESTMENT_TAX_REFERENCE = re.compile(r'Referenz-Nummer:(?P<r>[A-Z0-9]{16})', re.I)
 INVESTMENT_TAX_DOCUMENT_DATE = re.compile(r'Datum:(?P<d>\d{2}\.\d{2}\.\d{4})', re.I)
 
+DIVIDEND_TAX_TITLE = re.compile(
+    r'SteuerlicheBehandlung:Inl.ndischeDividendevom(?P<date>\d{2}\.\d{2}\.\d{4})', re.I)
+DIVIDEND_TAX_SECURITY = re.compile(
+    r'Stk\.(?P<qty>\d[\d.]*(?:,\d+)?)(?P<name>.+?),WKN/ISIN:'
+    r'(?P<wkn>[A-Z0-9]{6})/(?P<isin>[A-Z]{2}[A-Z0-9]{9}\d)', re.I)
+DIVIDEND_TAX_USED = re.compile(r'inAnspruchgenommenerFreistellungsauftragEUR(?P<a>' + AMOUNT + r')', re.I)
+DIVIDEND_TAX_AFTER = re.compile(
+    r'SteuerbemessungsgrundlagenachVerlustverrechnungEUR(?P<a>' + AMOUNT + r')', re.I)
+
 
 def _advance_tax_balances(document):
     """Read the eight before/after balances in comdirect's reconciliation table."""
@@ -308,7 +317,7 @@ def split_name_wkn(rest):
 class ComdirectErtraegePlugin:
     plugin_id = 'user.comdirect-ertraege'
     bank_name = 'comdirect'
-    version = '1.3'
+    version = '1.4'
     document_types = ('Dividendengutschrift, Ertragsgutschrift, Einlösung, Wertpapierabrechnung Kauf/Verkauf, '
                       'Steuermitteilung Vorabpauschale, Steuermitteilung Investment-Ausschüttung')
 
@@ -324,6 +333,11 @@ class ComdirectErtraegePlugin:
             result.append(Detection(0.99, f'comdirect Steuermitteilung {origin} Investment-Ausschüttung',
                                     'investment_ausschuettung',
                                     'comdirect, Investment-Ausschüttung und Wertpapierkennung erkannt'))
+        dividend_tax_title = DIVIDEND_TAX_TITLE.search(compact)
+        if dividend_tax_title and DIVIDEND_TAX_SECURITY.search(compact):
+            result.append(Detection(0.99, 'comdirect Steuermitteilung inländische Dividende',
+                                    'dividende_steuer_inland',
+                                    'comdirect, inländische Dividende und Wertpapierkennung erkannt'))
         if ADVANCE_TAX_TITLE.search(text) and ADVANCE_TAX_SECURITY.search(text):
             result.append(Detection(0.99, 'comdirect Steuermitteilung Vorabpauschale', 'vorabpauschale',
                                     'comdirect, Vorabpauschale und Wertpapierkennung erkannt'))
@@ -334,6 +348,11 @@ class ComdirectErtraegePlugin:
             result.append(Detection(0.97, 'comdirect Wertpapierabrechnung ' + trade_type.title(),
                                     'wertpapier' + trade_type,
                                     'comdirect, Wertpapier' + trade_type + ' und Provision erkannt'))
+        elif trade_marker and re.search(r'GESCH.FTSABRECHNUNG', text, re.I):
+            trade_type = trade_marker.group('type').lower()
+            result.append(Detection(0.96, 'comdirect Wertpapierabrechnung ' + trade_type.title(),
+                                    'wertpapier' + trade_type,
+                                    'comdirect Geschäftsabrechnung mit beschädigter eingebetteter Schrift erkannt'))
         if not SETTLEMENT.search(text):
             return result
         result.extend(Detection(0.95, handler['title'], handler_id,
@@ -344,10 +363,12 @@ class ComdirectErtraegePlugin:
     def parse(self, document, detection, context):
         if detection.handler_id == 'investment_ausschuettung':
             return self._investment_distribution_tax(document, context.batch)
+        if detection.handler_id == 'dividende_steuer_inland':
+            return self._dividend_tax(document, context.batch)
         if detection.handler_id == 'vorabpauschale':
             return self._advance_tax(document, context.batch)
         if detection.handler_id in ('wertpapierkauf', 'wertpapierverkauf'):
-            return self._trade(document, context.batch)
+            return self._trade(document, context.batch, context.options)
         handler = HANDLERS.get(detection.handler_id)
         if handler is None:
             raise ValueError('Nicht unterstützter Dokumenttyp: ' + detection.handler_id)
@@ -470,6 +491,74 @@ class ComdirectErtraegePlugin:
                                   + ' in diesem PDF nicht lesbar; übrige Felder wurden übernommen. Bitte am Original prüfen.')
         if page.used_ocr:
             batch.warnings.append('Seite per OCR gelesen; Betrag, Stückzahl und ISIN bitte am Original prüfen.')
+        return batch
+
+    def _dividend_tax(self, document, batch):
+        compact = re.sub(r'\s+', '', document.text)
+        title = DIVIDEND_TAX_TITLE.search(compact)
+        security = DIVIDEND_TAX_SECURITY.search(compact)
+        gross = INVESTMENT_TAX_GROSS.search(compact)
+        taxable = INVESTMENT_TAX_TAXABLE.search(compact)
+        used = DIVIDEND_TAX_USED.search(compact)
+        after = DIVIDEND_TAX_AFTER.search(compact)
+        paid = INVESTMENT_TAX_PAID.search(compact)
+        net = INVESTMENT_TAX_NET.search(compact)
+        settlement = INVESTMENT_TAX_SETTLEMENT.search(compact)
+        depot = INVESTMENT_TAX_DEPOT.search(compact)
+        reference = INVESTMENT_TAX_REFERENCE.search(compact)
+        required = (title, security, gross, taxable, used, after, paid, net, settlement, depot, reference)
+        if not all(required):
+            raise ValueError('Inländische Dividende oder belegte Steuerfelder nicht vollständig erkannt.')
+        values = {name: money(match.group('a')) for name, match in (
+            ('gross', gross), ('taxable', taxable), ('used', used), ('after', after),
+            ('paid', paid), ('net', net))}
+        if any(value is None for value in values.values()):
+            raise ValueError('Ein Betrag der Dividenden-Steuermitteilung ist ungültig.')
+        if abs(Decimal(values['gross']) - Decimal(values['paid']) - Decimal(values['net'])) > Decimal('0.01'):
+            raise ValueError('Bruttodividende minus Gesamtsteuer passt nicht zur Nettoauszahlung.')
+        if Decimal(values['used']) > Decimal(values['taxable']):
+            raise ValueError('Freistellungsauftrag übersteigt die Steuerbemessungsgrundlage.')
+        components = {name: money(match.group('a')) for name, pattern in INVESTMENT_TAX_COMPONENTS.items()
+                      for match in [pattern.search(compact)] if match}
+        if set(components) != {'capital_gains_tax', 'solidarity_surcharge', 'church_tax'}:
+            raise ValueError('Steuerkomponenten der Dividende nicht vollständig erkannt.')
+        if abs(sum((Decimal(value) for value in components.values()), Decimal())
+               - Decimal(values['paid'])) > Decimal('0.01'):
+            raise ValueError('Steuerkomponenten passen nicht zur Summe der abgeführten Steuern.')
+        treatment_date = parse_date(title.group('date'))
+        value_date = parse_date(settlement.group('date'))
+        document_date_match = INVESTMENT_TAX_DOCUMENT_DATE.search(compact)
+        document_date = parse_date(document_date_match.group('d')) if document_date_match else treatment_date
+        if not treatment_date or not value_date:
+            raise ValueError('Datum oder Valuta der Dividenden-Steuermitteilung ist ungültig.')
+        isin, wkn = security.group('isin').upper(), security.group('wkn').upper()
+        qty = correction_number(security.group('qty'))
+        name = ' '.join(security.group('name').split())
+        depot_account = 'Depot ' + depot.group('n')
+        cash_account = 'IBAN ' + settlement.group('iban')
+        reference_no = reference.group('r')
+        event_id = 'pdf-comdirect-dividend-tax-' + digest(
+            [depot_account, isin, treatment_date, values['gross'], values['paid'], reference_no])
+        batch.tax_events.append(TaxEvent(
+            external_id=event_id, account=depot_account, type='dividende_inland', date=treatment_date,
+            tax_year=treatment_date[:4], income_year=treatment_date[:4], document_date=document_date,
+            security_ref=isin, quantity=qty, currency='EUR', taxable_income=values['taxable'],
+            used_exemption=values['used'], after_partial_exemption=values['after'],
+            capital_gains_tax=components['capital_gains_tax'],
+            solidarity_surcharge=components['solidarity_surcharge'],
+            church_tax=components['church_tax'], paid_taxes=values['paid'],
+            reference_no=reference_no, related_transaction_id='', cash_account=cash_account))
+        batch.securities.append(SecurityInfo(key=isin, isin=isin, wkn=wkn, name=name, quote_currency='EUR'))
+        batch.documents.append(BankDocument(
+            depot_account, batch.file_hash + ':' + depot_account, document.path.name, document_date,
+            base64.b64encode(document.content).decode('ascii'),
+            document_type='Steuermitteilung Dividende', bank_name='comdirect',
+            document_no=reference_no, page_count=len(document.pages), extraction_method='PDF-Text',
+            linked_ids=[event_id]))
+        batch.account_names.extend([depot_account, cash_account])
+        batch.warnings.append(
+            f'Separate Dividenden-Steuermitteilung: Brutto {values["gross"]} EUR, '
+            f'Steuer {values["paid"]} EUR, Netto {values["net"]} EUR. Keine zweite Dividende erzeugt.')
         return batch
 
     def _investment_distribution_tax(self, document, batch):
@@ -655,7 +744,27 @@ class ComdirectErtraegePlugin:
             f"wurden {values['used']} EUR Freistellungsauftrag verbraucht. Keine Kontobuchung erzeugt.")
         return batch
 
-    def _trade(self, document, batch):
+    def _trade(self, document, batch, options=None):
+        options = options or {}
+        native_compact = re.sub(r'[ \t]+', '', document.text)
+        needs_targeted_ocr = not all((TRADE_LINE.search(document.text) or TRADE_LINE.search(native_compact),
+                                      TRADE_DAY.search(native_compact), TRADE_SETTLEMENT.search(native_compact),
+                                      TRADE_TOTAL.search(native_compact), TRADE_DEPOT.search(native_compact),
+                                      TRADE_MARKET.search(native_compact)))
+        if needs_targeted_ocr:
+            if not options.get('allow_ocr', True):
+                raise ValueError('Beschädigte comdirect-Schrift erkannt; gezielte OCR ist deaktiviert.')
+            from portfolio_v5.pdf_ocr import ocr_page
+            pages = []
+            for page in document.pages:
+                recognized, confidence = ocr_page(document.path, page.number - 1)
+                if not recognized.strip() or confidence is None or confidence < 0.80:
+                    raise ValueError(f'Gezielte OCR auf Seite {page.number} ist nicht sicher genug; '
+                                     'Beleg bitte manuell prüfen.')
+                pages.append(PdfPage(page.number, recognized, True, confidence))
+            document = PdfDocument(document.path, document.content, document.file_hash, tuple(pages))
+            batch.warnings.append('Beschädigte comdirect-Schrift erkannt; gezielte OCR nur für diese '
+                                  'Wertpapierabrechnung verwendet. Alle Werte bitte am Original prüfen.')
         text = document.text
         compact = re.sub(r'[ \t]+', '', text)
         fee_matches = [(kind, pattern.search(compact)) for kind, pattern in TRADE_FEES.items()]
