@@ -495,7 +495,11 @@ class Store:
                 continue
             if target in new_accounts or target not in records or not records[target]['active'] \
                     or not target_compatible(records[target], required):
-                raise ValueError(f'{source_rows[source]["name"]} enthält Depot-Steuerdaten und darf nur einem aktiven Depot zugeordnet werden.')
+                raise ValueError(f'{source_rows[source]["name"]} enthält Depotdaten und darf nur einem aktiven Depot zugeordnet werden.')
+        for report in batch.cost_reports:
+            mapped = assignments.get(account_key(report.account))
+            if mapped:
+                report.account = records[mapped]['name'] if mapped in records else mapped
         if set(batch.remember_assignments) - set(assignments):
             raise ValueError('Für gemerkte Zuordnungen muss ein bestehendes Zielkonto gewählt werden.')
         from .models import transaction_validation, valid_isin
@@ -649,7 +653,8 @@ class Store:
                      + [b.account for b in batch.balances if b.account != 'Archiv']
                      + [t.account for t in batch.transactions]
                      + [t.account for t in batch.booking_evidence]
-                     + [d.account for d in batch.documents] + [r.account for r in batch.tax_details])
+                     + [d.account for d in batch.documents] + [r.account for r in batch.tax_details]
+                     + [r.account for r in batch.cost_reports])
             for name in names:
                 if account_key(name) not in assignments:
                     self._register_account(name)

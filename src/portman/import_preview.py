@@ -180,6 +180,8 @@ class ImportPreviewDialog(QDialog):
             tabs.setCurrentIndex(1)
         if any(batch.source_sheet == 'PDF' and batch.transactions for batch in batches):
             self.add_pdf_bookings(tabs)
+        if any(batch.cost_reports for batch in batches):
+            self.add_mifid_cost_reports(tabs)
         pdfs = [b for b in batches if b.source_sheet == 'PDF']
         if pdfs:
             panel = QWidget(); pdf_layout = QVBoxLayout(panel)
@@ -229,6 +231,10 @@ class ImportPreviewDialog(QDialog):
             banks = tuple(bank for bank in ('comdirect', 'renault', 'baader', 'ing')
                           if re.search(r'\b' + bank + r'\b', batch.pdf_text, re.I))
             scope = ('PDF', banks) if len(banks) == 1 else batch.path
+        elif batch.source_sheet == 'PDF' and name.startswith('Kosteninformation'):
+            banks = tuple(bank for bank in ('comdirect', 'renault', 'baader', 'ing')
+                          if re.search(r'\b' + bank + r'\b', batch.pdf_text, re.I))
+            scope = ('PDF-Kosteninformation', banks) if len(banks) == 1 else batch.path
         else:
             scope = source['scope']
         return (scope, source['key'], source['target_key'], source['new_name'], source['remembered'],
@@ -391,6 +397,121 @@ class ImportPreviewDialog(QDialog):
         layout.addLayout(actions)
         tabs.addTab(panel, 'PDF-Buchungen')
         self.refresh_pdf_bookings()
+
+    def add_mifid_cost_reports(self, tabs):
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        note = QLabel('MiFID-II-Kosteninformationen sind Kostensimulationen: keine ausgeführten Transaktionen. '
+                      'Sie erzeugen keine Buchung, keinen Cashflow und keine Depot- oder Saldenveränderung; '
+                      'tatsächliche Gebühren stehen weiterhin nur in Wertpapierabrechnungen. '
+                      'Doppelklick auf eine Zeile öffnet das Original-PDF.')
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        headers = ['Datei', 'Dokumentdatum', 'Uhrzeit', 'Sparplan-Nr.', 'WKN', 'ISIN', 'Wertpapier',
+                   'Ausführungsplatz', 'Sparbetrag mtl.', 'Sparbetrag p.a.', 'Kaufkosten p.a.',
+                   'Haltedauerkosten p.a.', 'Verkaufskosten einmalig', 'Dienstleistung Bank',
+                   'Fremdkosten', 'Produktkosten', 'Davon Dritte', 'Gesamtkosten', 'Ø % p.a.',
+                   'Betrachtungszeitraum', 'Kennzeichnung']
+        self.cost_table = table = QTableWidget(0, len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.cost_rows = []
+
+        def amount(value, suffix=' EUR'):
+            return 'nicht ausgewiesen' if value in (None, '') else str(value).replace('.', ',') + suffix
+
+        def with_pct(value, percentage):
+            text = amount(value)
+            return text if percentage in (None, '') else text + ' · ' + str(percentage).replace('.', ',') + ' % p.a.'
+
+        for batch_index, batch in enumerate(self.batches):
+            for report in batch.cost_reports:
+                row = table.rowCount()
+                table.insertRow(row)
+                values = [Path(batch.path).name, report.document_date or report.period_start,
+                          report.document_time, report.sparplan_number, report.wkn, report.isin,
+                          report.security_name or self.security_display_name(
+                              report.isin or ('WKN:' + report.wkn if report.wkn else '')),
+                          report.execution_venue, amount(report.monthly_savings),
+                          amount(report.annual_savings), amount(report.purchase_costs),
+                          amount(report.holding_costs), amount(report.sale_costs),
+                          with_pct(report.service_costs, report.service_pct),
+                          with_pct(report.overhead_costs, report.foreign_pct),
+                          with_pct(report.product_costs, report.product_pct),
+                          amount(report.inducements), amount(report.total_costs),
+                          amount(report.ongoing_pct, ' % p.a.'),
+                          f'{report.period_start} bis {report.period_end}',
+                          'Kostensimulation – keine ausgeführte Transaktion']
+                for column, value in enumerate(values):
+                    item = QTableWidgetItem(display_dates(str(value)))
+                    item.setToolTip(display_dates(str(value)))
+                    table.setItem(row, column, item)
+                self.cost_rows.append((batch_index, report, row))
+        table.resizeColumnsToContents()
+        for column, width in [(0, 240), (6, 260), (7, 120), (13, 170), (14, 120),
+                              (15, 140), (16, 120), (17, 130), (19, 230), (20, 270)]:
+            table.setColumnWidth(column, width)
+        table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(table, 1)
+
+        self.cost_item_table = item_table = QTableWidget(0, 6)
+        item_table.setHorizontalHeaderLabels(
+            ['Phase', 'Kostenposition (Original)', 'Kategorie', 'Betrag', 'Bezug', 'Originalzeile'])
+        item_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        item_table.setAlternatingRowColors(True)
+        item_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        item_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        layout.addWidget(QLabel('Einzelne Kostenpositionen der ausgewählten Kosteninformation:'))
+        layout.addWidget(item_table, 1)
+
+        phase_labels = {'kauf': 'Wertpapierkauf', 'haltedauer': 'Haltedauer',
+                        'verkauf': 'Wertpapierverkauf'}
+        category_labels = {'eigen': 'Eigene Kosten [E]', 'fremd': 'Fremdkosten [F]',
+                           'produkt': 'Produktkosten [P]'}
+
+        def show_cost_items(*args):
+            selected = table.selectionModel().selectedRows()
+            if not selected:
+                item_table.setRowCount(0)
+                return
+            row = selected[0].row()
+            report = self.cost_rows[row][1]
+            item_table.setRowCount(0)
+            for cost in report.items:
+                item_row = item_table.rowCount()
+                item_table.insertRow(item_row)
+                relation = 'pro Jahr' if cost.annual else 'einmalig' if cost.annual is False else ''
+                if cost.inducements not in (None, ''):
+                    relation = (relation + ' · ' if relation else '') + 'davon Zahlung Dritter'
+                values = [phase_labels.get(cost.phase, cost.phase),
+                          cost.label or cost.source_text,
+                          category_labels.get(cost.category, cost.category),
+                          amount(cost.total), relation, cost.source_text]
+                for column, value in enumerate(values):
+                    cell = QTableWidgetItem(display_dates(str(value)))
+                    cell.setToolTip(display_dates(str(value)))
+                    item_table.setItem(item_row, column, cell)
+            item_table.resizeColumnsToContents()
+            item_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+
+        def open_cost_document(row, column):
+            if 0 <= row < len(self.cost_rows):
+                from PySide6.QtCore import QUrl
+                from PySide6.QtGui import QDesktopServices
+                batch_index = self.cost_rows[row][0]
+                QDesktopServices.openUrl(QUrl.fromLocalFile(self.batches[batch_index].path))
+
+        table.cellDoubleClicked.connect(open_cost_document)
+        table.itemSelectionChanged.connect(show_cost_items)
+        for column, width in [(0, 120), (1, 280), (2, 150), (3, 90), (4, 130)]:
+            item_table.setColumnWidth(column, width)
+        tabs.addTab(panel, 'MiFID-II-Kosten')
+        if table.rowCount():
+            table.selectRow(0)
+            show_cost_items()
 
     @staticmethod
     def pretty_iban(value):
@@ -586,6 +707,7 @@ class ImportPreviewDialog(QDialog):
                     batch.transactions = [t for t in batch.transactions if account_key(t.account) != source['key']]
                     batch.snapshots = [s for s in batch.snapshots if account_key(s.account) != source['key']]
                     batch.balances = [b for b in batch.balances if account_key(b.account) != source['key']]
+                    batch.cost_reports = [r for r in batch.cost_reports if account_key(r.account) != source['key']]
                     batch.account_names = [n for n in batch.account_names if account_key(n) != source['key']]
                     continue
                 if target == '__new__':

@@ -1,10 +1,12 @@
 """comdirect Wertpapier-Erträge (Dividende, Ausschüttung, Einlösung); user plugin."""
 import base64
 import re
+from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
-from portfolio_v5.models import (BankDocument, BankTransaction, FeeItem, Kind, SecurityInfo,
-                                 TaxEvent, TaxItem, correction_number, digest, money, parse_date)
+from portfolio_v5.models import (BankDocument, BankTransaction, CostItem, CostReport, FeeItem, Kind,
+                                 SecurityInfo, TaxEvent, TaxItem, correction_number, digest, money,
+                                 parse_date)
 from portfolio_v5.pdf_plugins import Detection, PdfDocument, PdfPage
 from portfolio_v5.accounts import account_key
 
@@ -38,6 +40,52 @@ PAY_DATE = re.compile(r'zahlbar\s+ab\s*(?P<d>\d{2}\.\d{2}\.\d{4})')
 FX_PAIR = re.compile(r'Devisenkurs:\s*(?P<pair>[A-Z]{3}/[A-Z]{3})\s+(?P<rate>[0-9.]+,\d+)')
 DOMICILE = re.compile(r'Emissionsland:\s*(?P<c>[A-ZÄÖÜa-zäöüß][^\n]*?)\s*(?:\n|$)')
 AMOUNT = r'[0-9]{1,3}(?:\.[0-9]{3})*,\d{2}|\d+,\d{2}'
+
+# MiFID-II cost information ("Kosteninformation zum Wertpapiergeschäft").
+# These PDFs are simulations only and must never create a transaction, cash
+# flow, balance or depot position.
+MIFID_COST_MARKER = re.compile(r'Kosteninformation\s+zum\s+Wertpapiergesch\w*', re.I)
+MIFID_COST_TITLE = re.compile(
+    r'Kosteninformation\s+zum\s+Wertpapiergesch\w*\s+'
+    r'(?P<date>\d{2}\.\d{2}\.\d{4})\s*-\s*(?P<time>\d{2}:\d{2})', re.I)
+MIFID_COST_SECURITY = re.compile(
+    r'(?m)^(?P<name>[^\n]*\S[^\n]*)\n\s*WKN\s*:\s*(?P<wkn>[A-Z0-9]{6})', re.I)
+MIFID_COST_ISIN = re.compile(r'\bISIN\s*:\s*(?P<isin>[A-Z]{2}[A-Z0-9]{9}\d)', re.I)
+MIFID_COST_SPARPLAN = re.compile(
+    r'Sparplan\s*:\s*(?P<amount>' + AMOUNT + r')\s*EUR\s*mtl\.', re.I)
+MIFID_COST_ANNUAL_SAVINGS = re.compile(
+    r'Sparbetrag\s+pro\s+Jahr\s*:\s*(?P<amount>' + AMOUNT + r')\s*EUR', re.I)
+MIFID_COST_VENUE = re.compile(r'Ausf.hrungsplatz\s*:\s*(?P<venue>[^\n]+)', re.I)
+MIFID_COST_CURRENCY = re.compile(r'Abrechnung\s+in\s+(?P<currency>[A-Z]{3})', re.I)
+MIFID_COST_CUSTOMER = re.compile(r'Kundennummer\s*:\s*(?P<number>\d[\d ]*\d)', re.I)
+MIFID_COST_YEARS = re.compile(
+    r'angenommene(?:n)?\s+Laufzeit\s+von\s+(?P<years>\d+)\s+Jahr(?:\(en\)|en)?'
+    r'\s+und\s+einer\s+Haltedauer\s+von\s+(?P<holding>\d+)\s+Jahr', re.I)
+MIFID_COST_TOTAL = re.compile(
+    r'voraussichtlichen\s+Gesamtkosten\s+auf\s+(?P<amount>' + AMOUNT + r')\s+EUR'
+    r'\s+und\s+reduzieren\s+die\s+Rendite\s+um\s+durchschnittlich\s+'
+    r'(?P<pct>' + AMOUNT + r')\s*%', re.I | re.S)
+MIFID_COST_PHASE_HEADERS = (
+    ('kauf', True, re.compile(
+        r'Kosten\s+des\s+Wertpapierkaufes\s*,\s*pro\s+Jahr\s+(?P<amount>' + AMOUNT + r')\s+EU\w*', re.I)),
+    ('haltedauer', True, re.compile(
+        r'Kosten\s+w\S*hrend\s+der\s+Haltedauer\s*\(pro\s+Jahr\)\s+'
+        r'(?P<amount>' + AMOUNT + r')\s+EU\w*', re.I)),
+    ('verkauf', False, re.compile(
+        r'Kosten\s+des\s+Wertpapierverkaufes\s+(?P<amount>' + AMOUNT + r')\s+EU\w*', re.I)),
+)
+MIFID_COST_LINE = re.compile(
+    r'^(?P<label>[^\n]*?\[(?:E|F|P)\])\s+(?P<amount>' + AMOUNT + r')\s+EU\w*\s*$', re.I | re.M)
+MIFID_COST_MARKER_CATEGORY = {'E': 'eigen', 'F': 'fremd', 'P': 'produkt'}
+MIFID_COST_DETAILS = {
+    'service_costs': ('Dienstleistungskosten der Bank', True),
+    'overhead_costs': ('Dienstleistungskosten fremd', True),
+    'product_costs': ('Produktkosten (nach Zahlung von Dritten)', True),
+    'inducements': ('Davon erhält die Bank von Dritten', False),
+}
+MIFID_COST_YEAR_ROW = re.compile(
+    r'(?m)^(?P<label>Im\s+\d+\.\s+Jahr|Wertpapierverkauf)\s+'
+    r'(?P<savings>' + AMOUNT + r')\s+EUR(?P<rest>[^\n]*)$', re.I)
 
 # Older comdirect trade confirmations often have broken embedded fonts and are
 # extracted without spaces.  These patterns therefore use stable ASCII labels
@@ -314,18 +362,144 @@ def split_name_wkn(rest):
     return rest, ''
 
 
+def _mifid_detail(text, label, with_percentage):
+    """Exact MiFID detail value; an absent line stays None and never becomes zero."""
+    amount = re.search(re.escape(label) + r'\s+(?P<amount>' + AMOUNT + r')\s+EUR', text, re.I)
+    percentage = None
+    if with_percentage and amount:
+        tail = text[amount.end():amount.end() + 400]
+        next_label = re.search(
+            r'\n\s*(?:-\s*)?(?:Dienstleistungskosten|Produktkosten|Davon\s+erhält)', tail, re.I)
+        if next_label:
+            tail = tail[:next_label.start()]
+        pct = re.search(r'(?P<pct>' + AMOUNT + r')\s*%\s*p\.a\.', tail, re.I)
+        percentage = money(pct.group('pct')) if pct else None
+    return (money(amount.group('amount')) if amount else None), percentage
+
+
+def _mifid_cost_components(text, security_ref):
+    """Keep every printed cost line, including its phase and original label."""
+    phase = ''
+    annual = None
+    phase_totals = {}
+    items = []
+    for raw_line in text.splitlines():
+        line = ' '.join(raw_line.split())
+        if not line:
+            continue
+        matched_header = False
+        for phase_id, phase_annual, pattern in MIFID_COST_PHASE_HEADERS:
+            header = pattern.search(line)
+            if header:
+                if phase_id in phase_totals:
+                    raise ValueError(f'Kostenblock {phase_id} ist mehrfach ausgewiesen.')
+                phase, annual = phase_id, phase_annual
+                phase_totals[phase_id] = money(header.group('amount'))
+                matched_header = True
+                break
+        if matched_header:
+            continue
+        cost_line = MIFID_COST_LINE.match(line)
+        if not cost_line or not phase:
+            continue
+        label = ' '.join(cost_line.group('label').split())
+        marker = re.search(r'\[(E|F|P)\]', label)
+        if not marker:
+            continue
+        amount = money(cost_line.group('amount'))
+        category = MIFID_COST_MARKER_CATEGORY[marker.group(1)]
+        item = CostItem(
+            security_ref=security_ref,
+            total=amount,
+            label=label,
+            phase=phase,
+            category=category,
+            annual=annual,
+            source_text=line)
+        if category == 'eigen':
+            item.service_costs = amount
+        elif category == 'fremd':
+            item.fx_costs = amount
+        elif category == 'produkt':
+            item.product_costs = amount
+        if 'Zahlung von Dritten an die Bank' in label:
+            item.inducements = amount
+        items.append(item)
+
+    missing = [phase_id for phase_id, _annual, _pattern in MIFID_COST_PHASE_HEADERS
+               if phase_id not in phase_totals]
+    if missing:
+        raise ValueError('MiFID-II-Kostenblöcke fehlen: ' + ', '.join(missing))
+    for phase_id, _annual, _pattern in MIFID_COST_PHASE_HEADERS:
+        printed = Decimal(phase_totals[phase_id])
+        calculated = sum((Decimal(item.total) for item in items if item.phase == phase_id),
+                         Decimal('0'))
+        if abs(printed - calculated) > Decimal('0.01'):
+            raise ValueError(
+                f'MiFID-II-Kostenblock {phase_id} widersprüchlich: gedruckt {printed:.2f} EUR, '
+                f'Einzelpositionen {calculated:.2f} EUR.')
+    return phase_totals, items
+
+
+def _mifid_cost_projection(text):
+    """The printed 1..n year table; it is informational and never booked."""
+    rows = []
+    for match in MIFID_COST_YEAR_ROW.finditer(text):
+        rest = match.group('rest')
+        pct_match = re.search(r'(?P<pct>-?(?:' + AMOUNT + r'))\s*%', rest)
+        without_pct = re.sub(r'(?:-?(?:' + AMOUNT + r'))\s*%', '', rest)
+        amounts = [money(value) for value in re.findall(AMOUNT, without_pct)]
+        total = amounts[-1] if amounts else None
+        purchase = amounts[0] if len(amounts) >= 3 else None
+        holding = amounts[1] if len(amounts) >= 3 else None
+        rows.append({
+            'label': ' '.join(match.group('label').split()),
+            'savings_cumulative': money(match.group('savings')),
+            'purchase_costs': purchase,
+            'holding_costs': holding,
+            'total_costs': total,
+            'return_impact_pct': money(pct_match.group('pct')) if pct_match else None,
+        })
+    return rows
+
+
+def _mifid_period_end(period_start, years):
+    if not period_start or not years:
+        return period_start
+    try:
+        start = date.fromisoformat(period_start)
+        end = date(start.year + years, start.month, start.day)
+    except (ValueError, TypeError):
+        return period_start
+    return (end - timedelta(days=1)).isoformat()
+
+
+def _mifid_filename_metadata(stem, file_hash):
+    sparplan = re.search(r'Sparplan[_\s-]*Nr\.?[_\s-]*(?P<n>\d+)', stem, re.I)
+    suffix = re.search(r'_(?P<ref>[A-Z0-9]{6})$', stem, re.I)
+    return (sparplan.group('n') if sparplan else '',
+            suffix.group('ref').upper() if suffix else file_hash[:6].upper())
+
+
 class ComdirectErtraegePlugin:
     plugin_id = 'user.comdirect-ertraege'
     bank_name = 'comdirect'
-    version = '1.4'
+    version = '1.5'
     document_types = ('Dividendengutschrift, Ertragsgutschrift, Einlösung, Wertpapierabrechnung Kauf/Verkauf, '
-                      'Steuermitteilung Vorabpauschale, Steuermitteilung Investment-Ausschüttung')
+                      'Steuermitteilung Vorabpauschale, Steuermitteilung Investment-Ausschüttung, '
+                      'MiFID-II-Kosteninformation (Kostensimulation, keine Transaktion)')
 
     def detect(self, document):
         text = document.text
         if not re.search(r'comdirect', text, re.I):
             return []
         result = []
+        if (MIFID_COST_TITLE.search(text) and MIFID_COST_SECURITY.search(text)
+                and MIFID_COST_TOTAL.search(text)):
+            result.append(Detection(
+                0.99, 'comdirect MiFID-II-Kosteninformation – keine ausgeführte Transaktion',
+                'kosteninformation_mifid_ii',
+                'comdirect, MiFID-II-Kostensimulation und Gesamtkostenausweis erkannt'))
         compact = re.sub(r'\s+', '', text)
         investment_title = INVESTMENT_TAX_TITLE.search(compact)
         if investment_title and INVESTMENT_TAX_SECURITY.search(compact):
@@ -360,7 +534,137 @@ class ComdirectErtraegePlugin:
                 for handler_id, handler in HANDLERS.items() if handler['marker'].search(text))
         return result
 
+    def _mifid_cost_information(self, document, batch):
+        """Parse a MiFID-II cost simulation without creating any economic booking."""
+        text = document.text
+        title = MIFID_COST_TITLE.search(text)
+        security = MIFID_COST_SECURITY.search(text)
+        total_row = MIFID_COST_TOTAL.search(text)
+        if not title or not security or not total_row:
+            raise ValueError('MiFID-II-Kosteninformation unvollständig: Datum, Wertpapier oder Gesamtkosten fehlen.')
+
+        document_date = parse_date(title.group('date'))
+        if not document_date:
+            raise ValueError('MiFID-II-Kosteninformation: Dokumentdatum ist ungültig.')
+        document_time = title.group('time')
+        wkn = security.group('wkn').upper()
+        security_name = ' '.join(security.group('name').split())
+        isin_match = MIFID_COST_ISIN.search(text)
+        isin = isin_match.group('isin').upper() if isin_match else ''
+        security_ref = isin or 'WKN:' + wkn
+
+        sparplan_number, reference = _mifid_filename_metadata(document.path.stem, document.file_hash)
+        account = (f'Kosteninformation Sparplan {sparplan_number}'
+                   if sparplan_number else 'Kosteninformation')
+        monthly = MIFID_COST_SPARPLAN.search(text)
+        annual = MIFID_COST_ANNUAL_SAVINGS.search(text)
+        monthly_savings = money(monthly.group('amount')) if monthly else None
+        annual_savings = money(annual.group('amount')) if annual else None
+        if monthly_savings is not None and annual_savings is not None:
+            expected = Decimal(monthly_savings) * 12
+            if abs(expected - Decimal(annual_savings)) > Decimal('0.01'):
+                raise ValueError(
+                    f'MiFID-II-Kosteninformation: Sparbetrag monatlich {monthly_savings} EUR × 12 '
+                    f'ergibt nicht den Jahresbetrag {annual_savings} EUR.')
+        venue = MIFID_COST_VENUE.search(text)
+        currency = MIFID_COST_CURRENCY.search(text)
+        customer = MIFID_COST_CUSTOMER.search(text)
+        years_match = MIFID_COST_YEARS.search(text)
+        assumed_years = int(years_match.group('years')) if years_match else 0
+        holding_years = int(years_match.group('holding')) if years_match else 0
+
+        phase_totals, items = _mifid_cost_components(text, security_ref)
+        details = {}
+        percentages = {}
+        for field_name, (label, with_percentage) in MIFID_COST_DETAILS.items():
+            value, percentage = _mifid_detail(text, label, with_percentage)
+            details[field_name] = value
+            percentages[field_name] = percentage
+        total_costs = money(total_row.group('amount'))
+        total_pct = money(total_row.group('pct'))
+        if total_costs is None or total_pct is None:
+            raise ValueError('MiFID-II-Kosteninformation: Gesamtkosten oder Renditewirkung ungültig.')
+
+        category_fields = ('service_costs', 'overhead_costs', 'product_costs')
+        if all(details[name] is not None for name in category_fields):
+            calculated = sum((Decimal(details[name]) for name in category_fields), Decimal('0'))
+            if abs(calculated - Decimal(total_costs)) > Decimal('0.01'):
+                raise ValueError(
+                    f'MiFID-II-Gesamtkosten widersprüchlich: Kategorien {calculated:.2f} EUR, '
+                    f'gedruckt {Decimal(total_costs):.2f} EUR.')
+
+        external_id = 'pdf-cost-mifid-' + digest([
+            account, document.file_hash, document_date, wkn, isin, reference,
+            total_costs, total_pct])
+        batch.cost_reports.append(CostReport(
+            external_id=external_id,
+            account=account,
+            period_start=document_date,
+            period_end=_mifid_period_end(document_date, assumed_years),
+            currency=currency.group('currency') if currency else 'EUR',
+            items=items,
+            overhead_costs=details['overhead_costs'],
+            total_costs=total_costs,
+            ongoing_pct=total_pct,
+            document_date=document_date,
+            document_time=document_time,
+            reference=reference,
+            sparplan_number=sparplan_number,
+            security_name=security_name,
+            wkn=wkn,
+            isin=isin,
+            execution_venue=' '.join(venue.group('venue').split()) if venue else '',
+            customer_number=' '.join(customer.group('number').split()) if customer else '',
+            monthly_savings=monthly_savings,
+            annual_savings=annual_savings,
+            purchase_costs=phase_totals.get('kauf'),
+            holding_costs=phase_totals.get('haltedauer'),
+            sale_costs=phase_totals.get('verkauf'),
+            service_costs=details['service_costs'],
+            service_pct=percentages['service_costs'],
+            product_costs=details['product_costs'],
+            product_pct=percentages['product_costs'],
+            foreign_pct=percentages['overhead_costs'],
+            inducements=details['inducements'],
+            assumed_years=str(assumed_years) if assumed_years else '',
+            holding_years=str(holding_years) if holding_years else '',
+            annual_projection=_mifid_cost_projection(text)))
+
+        document_title = (f'{document.path.name} · MiFID-II-Kosteninformation – '
+                          'keine ausgeführte Transaktion')
+        batch.documents.append(BankDocument(
+            account=account,
+            external_id=batch.file_hash + ':' + account,
+            title=document_title,
+            date=document_date,
+            content_b64=base64.b64encode(document.content).decode('ascii'),
+            document_type='comdirect MiFID-II-Kosteninformation – keine ausgeführte Transaktion',
+            bank_name='comdirect',
+            document_no=reference,
+            page_count=len(document.pages),
+            extraction_method='OCR' if any(page.used_ocr for page in document.pages) else 'PDF-Text',
+            linked_ids=[external_id]))
+        if account not in batch.account_names:
+            batch.account_names.append(account)
+        batch.securities.append(SecurityInfo(
+            key=security_ref,
+            identifier_type='isin' if isin else 'wkn',
+            isin=isin,
+            wkn=wkn,
+            name=security_name,
+            quote_currency=currency.group('currency') if currency else 'EUR'))
+        batch.warnings.append(
+            'MiFID-II-Kosteninformation – keine ausgeführte Transaktion: Kostensimulation ohne '
+            'Buchung, Cashflow, Salden- oder Depotveränderung; tatsächliche Gebühren nur aus '
+            'Wertpapierabrechnungen.')
+        if not isin:
+            batch.warnings.append(
+                f'Im Beleg ist keine ISIN ausgewiesen; Zuordnung über WKN {wkn} (keine ISIN geraten).')
+        return batch
+
     def parse(self, document, detection, context):
+        if detection.handler_id == 'kosteninformation_mifid_ii':
+            return self._mifid_cost_information(document, context.batch)
         if detection.handler_id == 'investment_ausschuettung':
             return self._investment_distribution_tax(document, context.batch)
         if detection.handler_id == 'dividende_steuer_inland':

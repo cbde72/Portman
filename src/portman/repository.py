@@ -341,8 +341,8 @@ class PortfolioRepository:
             for key in after.keys() & before.keys():
                 if str(after[key].quantity)!=str(before[key]['quantity']) or str(after[key].value)!=str(before[key]['value']):changes['changed']+=1
         summary.update(changes)
-        summary['accounts']=', '.join(sorted(set(batch.account_names) | {s.account for s in batch.snapshots} | {t.account for t in batch.transactions} | {b.account for b in batch.balances} | {d.account for d in batch.documents}))
-        dates = {s.as_of or s.period for s in batch.snapshots} | {b.period for b in batch.balances} | {d.date for d in batch.documents if d.date}
+        summary['accounts']=', '.join(sorted(set(batch.account_names) | {s.account for s in batch.snapshots} | {t.account for t in batch.transactions} | {b.account for b in batch.balances} | {d.account for d in batch.documents} | {r.account for r in batch.cost_reports}))
+        dates = {s.as_of or s.period for s in batch.snapshots} | {b.period for b in batch.balances} | {d.date for d in batch.documents if d.date} | {r.period_start for r in batch.cost_reports if r.period_start}
         if batch.transactions:
             transaction_dates = [t.date for t in batch.transactions]
             dates.add(min(transaction_dates) + ' … ' + max(transaction_dates))
