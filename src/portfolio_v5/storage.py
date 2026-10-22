@@ -517,7 +517,7 @@ class Store:
                             if not parsed.is_finite(): raise InvalidOperation
                         except (InvalidOperation, TypeError, ValueError):
                             raise ValueError(f'{snapshot.sheet}: {position.name}: {field} ist keine endliche Zahl.') from None
-        for tx in batch.transactions:
+        for tx in [*batch.transactions, *batch.booking_evidence]:
             hard_problems, advisory = transaction_validation(tx)
             if hard_problems or advisory:
                 source = f'Buchung {tx.external_id or "ohne ID"}'
@@ -533,7 +533,15 @@ class Store:
             record_by_id = {record['payload'].get('external_id'): record for record in event_records
                             if record['payload'].get('external_id')}
             incoming = {event.external_id: asdict(event) for event in batch.tax_events if event.external_id}
-            if incoming and all(by_id.get(identifier) == payload for identifier, payload in incoming.items()):
+            # related_transaction_id is a derived reconciliation result.  It
+            # may be corrected after a later statement arrives and therefore
+            # must not turn the same immutable tax PDF into a new import.
+            def source_tax_fact(payload):
+                payload = dict(payload or {})
+                payload.pop('related_transaction_id', None)
+                return payload
+            if incoming and all(source_tax_fact(by_id.get(identifier)) == source_tax_fact(payload)
+                                for identifier, payload in incoming.items()):
                 old_imports = {record_by_id[identifier]['import_id'] for identifier in incoming}
                 if len(old_imports) == 1:
                     old_import = next(iter(old_imports))
@@ -594,7 +602,8 @@ class Store:
         identity = {'file': batch.file_hash, 'parser': PARSER_VERSION,
                     'snapshots': payload['snapshots'], 'balances': payload['balances'],
                     'transactions': payload['transactions']}
-        model_collections = ('securities', 'accounts', 'statements', 'tax_events', 'tax_details', 'cost_reports', 'events')
+        model_collections = ('securities', 'accounts', 'statements', 'tax_events', 'tax_details',
+                             'booking_evidence', 'cost_reports', 'events')
         for name in model_collections:
             if payload.get(name): identity[name] = payload[name]
         prepared_documents = []
@@ -636,7 +645,11 @@ class Store:
             for name in new_accounts.values():
                 self._register_account(name)
             records = self._account_view()
-            names = batch.account_names + [s.account for s in batch.snapshots] + [b.account for b in batch.balances if b.account != 'Archiv'] + [t.account for t in batch.transactions] + [d.account for d in batch.documents] + [r.account for r in batch.tax_details]
+            names = (batch.account_names + [s.account for s in batch.snapshots]
+                     + [b.account for b in batch.balances if b.account != 'Archiv']
+                     + [t.account for t in batch.transactions]
+                     + [t.account for t in batch.booking_evidence]
+                     + [d.account for d in batch.documents] + [r.account for r in batch.tax_details])
             for name in names:
                 if account_key(name) not in assignments:
                     self._register_account(name)

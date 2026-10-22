@@ -849,6 +849,10 @@ class ImportBatch:
     document_type: str = ''
     pdf_reviewed: bool = False
     replace_bank_bookings: list[dict] = field(default_factory=list)
+    # Non-cash source records which enrich an already booked cash movement.
+    # They are persisted in import_model_records and never become a second
+    # transaction by themselves.
+    booking_evidence: list[Transaction] = field(default_factory=list)
     history_end: str = ''
     plugin_id: str = ''
     plugin_version: str = ''
@@ -880,6 +884,7 @@ class ImportBatch:
                 'balances': len(self.balances), 'transactions': len(self.transactions), 'documents': len(self.documents),
                 'securities': len(self.securities), 'accounts': len(self.accounts), 'statements': len(self.statements),
                 'tax_events': len(self.tax_events), 'tax_details': len(self.tax_details),
+                'booking_evidence': len(self.booking_evidence),
                 'cost_reports': len(self.cost_reports), 'events': len(self.events),
                 'warnings': self.warnings + [f'{s.sheet}: {w}' for s in self.snapshots for w in s.warnings],
                 'errors': self.errors, 'history_end': self.history_end}
