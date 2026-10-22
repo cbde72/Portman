@@ -3,12 +3,14 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from types import SimpleNamespace
 
 from portfolio_v5.accounts import account_key
 from portfolio_v5.models import BankTransaction, ImportBatch, Kind, Position, SecurityInfo, Snapshot
 from portfolio_v5.pdf_plugins import ParseContext, PdfDocument, PdfPage
 from portfolio_v5.settlement import performance_transactions
 from portman.repository_v09 import RepositoryV09
+from portman.import_v09 import ImportSession, transaction
 from portman.tax_overview import automatic_tax_values
 
 
@@ -244,5 +246,44 @@ def test_sqlite_integration_maps_links_and_is_idempotent_in_both_orders(tmp_path
             'SELECT COUNT(*) FROM bank_documents',
             "SELECT COUNT(*) FROM import_model_records WHERE kind='tax_events'"))
         assert counts_after == counts_before
+    finally:
+        repo.close()
+
+
+@pytest.mark.parametrize('order', [('tax', 'finance'), ('finance', 'tax')])
+def test_guided_gui_apply_maps_tax_notice_in_both_orders(tmp_path, order):
+    """Regression for the atomic ImportWizard/ImportSession save boundary."""
+    repo = _integration_repo(tmp_path / ('gui-' + '-'.join(order) + '.sqlite'))
+    job = SimpleNamespace(
+        isInterruptionRequested=lambda: False,
+        progress=SimpleNamespace(emit=lambda *_args: None))
+    batches = {'tax': _tax_batch, 'finance': _finance_batch}
+    selected = [batches[name]() for name in order]
+    try:
+        with transaction(repo, commit=True):
+            results = ImportSession.apply(None, repo, job, (selected, []))
+        assert all(result['status'] == 'imported' for result in results)
+        event = next(item for item in repo.tax_events()
+                     if item['security_ref'] == 'DE000A0H0744')
+        dividend = next(tx for tx in repo.transactions() if tx['kind'] == Kind.DIVIDEND)
+        assert event['related_transaction_id'] == dividend['external_id']
+        assert dividend['performance_depot_key'] == 'depot 4764924'
+        assert len(repo.fee_links()) == 1
+        assert [(tx['kind'], tx['amount']) for tx in
+                performance_transactions(repo.store, repo.transactions())
+                if tx['date'] == '2026-09-15'] == [(Kind.DIVIDEND, '7.43')]
+
+        before = tuple(repo.db.execute(query).fetchone()[0] for query in (
+            'SELECT COUNT(*) FROM imports WHERE active=1',
+            'SELECT COUNT(*) FROM transactions',
+            'SELECT COUNT(*) FROM fee_links'))
+        with transaction(repo, commit=True):
+            repeated = ImportSession.apply(
+                None, repo, job, ([batches[name]() for name in order], []))
+        assert all(result['status'] == 'duplicate' for result in repeated)
+        assert before == tuple(repo.db.execute(query).fetchone()[0] for query in (
+            'SELECT COUNT(*) FROM imports WHERE active=1',
+            'SELECT COUNT(*) FROM transactions',
+            'SELECT COUNT(*) FROM fee_links'))
     finally:
         repo.close()
