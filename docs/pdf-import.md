@@ -32,7 +32,7 @@ abgeleitete Steuerfelder hinzu und prüft das Ergebnis auf Konsistenz.
 |-----------|-------|------|---------------|
 | `baader.pdf` | `pdf_plugins/baader.py` | Baader Bank | Quartalsaufstellung, Wertpapierabrechnung |
 | `comdirect.finanzreport` | `pdf_plugins/comdirect_finanzreport.py` | comdirect | Finanzreport (altes und aktuelles Layout) |
-| `user.comdirect-ertraege` | `pdf_plugins/comdirect_ertraege.py` | comdirect | Dividendengutschrift, Ertragsgutschrift, Einlösung, Wertpapierabrechnung Kauf, Steuermitteilung Vorabpauschale |
+| `user.comdirect-ertraege` | `pdf_plugins/comdirect_ertraege.py` | comdirect | Dividendengutschrift, Ertragsgutschrift, Einlösung, Wertpapierabrechnung Kauf, Steuermitteilung Vorabpauschale, MiFID-II-Kosteninformation |
 | `user.ing-wertpapiere` | `pdf_plugins/ing_wertpapiere.py` | ING | Dividendengutschrift, Wertpapierabrechnung Kauf, Jahresdepotauszug |
 | `user.pbb-direkt` | `pdf_plugins/pbb_direkt.py` | pbb direkt | Kontoauszug (ohne Umsätze), Steueroptimierung zum Jahresende |
 | `user.bank-of-scotland-kontoauszug` | `pdf_plugins/bank_of_scotland_kontoauszug.py` | Bank of Scotland (Lloyds Bank GmbH) | Kontoauszug (Tagesgeld, Festgeld) |
@@ -281,6 +281,8 @@ Alle Pfade sind relativ zum Projektwurzelverzeichnis.
 
 - **Datei**: `pdf_plugins/comdirect_ertraege.py`.
 - **Erkennung** (nur wenn `comdirect` im Text):
+  - `0.99` `kosteninformation_mifid_ii` (`Kosteninformation zum Wertpapiergeschäft`
+    mit Datum/Uhrzeit, `WKN:` und ausgewiesenen Gesamtkosten),
   - `0.99` `vorabpauschale` (`Steuerliche Behandlung: Vorabpauschale Ausland…` + Wertpapierzeile),
   - `0.97` `wertpapierkauf` (`Wertpapierkauf` + `Provision: EUR …`),
   - `0.95` je Handler aus `HANDLERS`, sofern eine Abrechnungszeile
@@ -297,13 +299,33 @@ Alle Pfade sind relativ zum Projektwurzelverzeichnis.
     Steuerbemessungsgrundlage und verbrauchtem Freistellungsauftrag (geprüft:
     Bemessungsgrundlage = Vorabpauschale − Teilfreistellung; verbrauchter
     Freibetrag ≤ Bemessungsgrundlage), kein Cash-Abgang;
+  - `kosteninformation_mifid_ii` → ein `CostReport` je PDF mit Dokumentdatum,
+    Sparplan-/Referenzkennung, WKN (optional ISIN), Wertpapiername,
+    Ausführungsplatz, angenommenem Sparbetrag (monatlich/jährlich), Kauf-,
+    Haltedauer- und Verkaufskosten, Gesamtkosten, Renditewirkung,
+    Betrachtungszeitraum und Jahresprojektion. Jede gedruckte Kostenzeile bleibt
+    als `CostItem` mit Originalbezeichnung, Phase (`kauf`, `haltedauer`,
+    `verkauf`), Kategorie (`eigen`/`fremd`/`produkt`) und `annual` erhalten;
   - `SecurityInfo` (inkl. `domicile` aus `Emissionsland`) und `BankDocument`.
 - **Besonderheiten**: Alte comdirect-Belege haben defekte Schriften. Fehlt ISIN
   oder Stückzahl, versucht das Plugin lokale OCR (`ocr_holding`) nur mit
   Konfidenz `≥ 0.90` und prüft die Stückzahl gegen `Stück × Satz ≈ Kurswert`.
   Die stabile `external_id` nutzt **native** (nicht per OCR ergänzte) Werte.
   Ergänzte Felder werden in `field_sources` und `review_required` markiert.
-- **Tests**: `tests/test_comdirect_pdf.py`, `tests/test_pdf_plugins.py`.
+  MiFID-II-Kosteninformationen sind **Kostensimulationen und keine ausgeführten
+  Transaktionen**: Sie erzeugen keine `BankTransaction`, keinen Cashflow, keine
+  Salden-/Depotveränderung und keine tatsächlichen Gebühren. Fehlende
+  Kostenzeilen bleiben `None`; gedruckte `0,00` bleiben `0.00`. Die
+  Kategoriesummen und die Gesamtkosten werden gegen den Druck geprüft, die
+  Summe der Einzelpositionen je Phase gegen den Blockausweis. Die
+  Original-PDF wird als `BankDocument` mit der Kennzeichnung
+  „MiFID-II-Kosteninformation – keine ausgeführte Transaktion“ archiviert.
+  Die Importvorschau zeigt Kostenkomponenten und Summen im Reiter
+  `MiFID-II-Kosten`; Doppelklick öffnet das Original. Da die Belege keine
+  Depotnummer und keine ISIN enthalten, erfolgt die Depotzuordnung manuell und
+  die Wertpapierkennung über `WKN:<wkn>` ohne geratene ISIN.
+- **Tests**: `tests/test_comdirect_pdf.py`, `tests/test_pdf_plugins.py`,
+  `tests/test_comdirect_mifid_cost.py`.
 
 ### 6.4 `user.ing-wertpapiere` – ING
 
@@ -599,10 +621,17 @@ und klassifizieren reine `BANK_BOOKING`-Texte konservativ nach Wortlaut.
 `partial_exemption_rate`, `refund_kapst`, `refund_solz`, `refund_kist`,
 `reference_no`, `related_transaction_id`)
 **CostItem**: `security_ref`, `service_costs`, `inducements`, `product_costs`,
-`fx_costs`, `total`
+`fx_costs`, `total`; optional `label`, `phase`, `category`, `annual`,
+`percentage`, `source_text`
 **CostReport**: `external_id`, `account`, `period_start`, `period_end`, `currency`,
 `items: list[CostItem]`, `overhead_costs`, `total_costs`, `ongoing_pct`,
-`entry_exit_pct`, `avg_capital`, `turnover_volume`
+`entry_exit_pct`, `avg_capital`, `turnover_volume`; optionale MiFID-II-Felder
+`document_date`, `document_time`, `reference`, `sparplan_number`,
+`security_name`, `wkn`, `isin`, `execution_venue`, `customer_number`,
+`monthly_savings`, `annual_savings`, `purchase_costs`, `holding_costs`,
+`sale_costs`, `service_costs`, `service_pct`, `product_costs`, `product_pct`,
+`foreign_pct`, `inducements`, `assumed_years`, `holding_years`,
+`annual_projection` (JSON, keine SQL-Schemaänderung)
 **CorporateEvent**: `external_id`, `account`, `type`, `security_ref`, `event_date`,
 `record_date`, `registration_deadline`, `location`, `eligible_quantity`
 **Balance**: `period`, `category`, `account`, `value`, `sheet`, `row`, `priority=20`

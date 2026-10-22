@@ -346,6 +346,15 @@ class CostItem:
     product_costs: str | None = None
     fx_costs: str | None = None
     total: str | None = None
+    # Optional MiFID-II source detail.  These fields are additive and
+    # persisted in import_model_records as part of the CostItem JSON, so
+    # existing databases do not need a schema migration.
+    label: str = ''
+    phase: str = ''
+    category: str = ''
+    annual: bool | None = None
+    percentage: str | None = None
+    source_text: str = ''
 
 
 @dataclass
@@ -362,6 +371,30 @@ class CostReport:
     entry_exit_pct: str | None = None
     avg_capital: str | None = None
     turnover_volume: str | None = None
+    # Optional MiFID-II metadata (all defaults keep older JSON payloads valid).
+    document_date: str = ''
+    document_time: str = ''
+    reference: str = ''
+    sparplan_number: str = ''
+    security_name: str = ''
+    wkn: str = ''
+    isin: str = ''
+    execution_venue: str = ''
+    customer_number: str = ''
+    monthly_savings: str | None = None
+    annual_savings: str | None = None
+    purchase_costs: str | None = None
+    holding_costs: str | None = None
+    sale_costs: str | None = None
+    service_costs: str | None = None
+    service_pct: str | None = None
+    product_costs: str | None = None
+    product_pct: str | None = None
+    foreign_pct: str | None = None
+    inducements: str | None = None
+    assumed_years: str = ''
+    holding_years: str = ''
+    annual_projection: list[dict] = field(default_factory=list)
 
 
 @dataclass

@@ -16,7 +16,8 @@ def import_sources(batch):
             key = account_key(value.account)
             item = sources.setdefault(key, {'key': key, 'name': value.account, 'kinds': set(), 'count': 0})
             item['kinds'].add(kind); item['count'] += 1
-    for kind, values in [('Steuerereignisse', batch.tax_events), ('Steuerdetails', batch.tax_details)]:
+    for kind, values in [('Steuerereignisse', batch.tax_events), ('Steuerdetails', batch.tax_details),
+                         ('Kosteninformationen', batch.cost_reports)]:
         for value in values:
             key = account_key(value.account)
             item = sources.setdefault(key, {'key': key, 'name': value.account, 'kinds': set(), 'count': 0})
@@ -29,7 +30,7 @@ def import_sources(batch):
 
 def required_target_kind(source):
     """Return the account kind mandated by the imported facts, if any."""
-    return 'Depot' if source['kinds'] & {'Steuerereignisse', 'Steuerdetails'} else ''
+    return 'Depot' if source['kinds'] & {'Steuerereignisse', 'Steuerdetails', 'Kosteninformationen'} else ''
 
 
 def target_compatible(record, required_kind):
