@@ -1058,11 +1058,11 @@ class ComdirectErtraegePlugin:
         if needs_targeted_ocr:
             if not options.get('allow_ocr', True):
                 raise ValueError('Beschädigte comdirect-Schrift erkannt; gezielte OCR ist deaktiviert.')
-            from portfolio_v5.pdf_ocr import ocr_page
+            from portfolio_v5.pdf_ocr import MIN_SAFE_CONFIDENCE, ocr_page
             pages = []
             for page in document.pages:
                 recognized, confidence = ocr_page(document.path, page.number - 1)
-                if not recognized.strip() or confidence is None or confidence < 0.80:
+                if not recognized.strip() or confidence is None or confidence < MIN_SAFE_CONFIDENCE:
                     raise ValueError(f'Gezielte OCR auf Seite {page.number} ist nicht sicher genug; '
                                      'Beleg bitte manuell prüfen.')
                 pages.append(PdfPage(page.number, recognized, True, confidence))

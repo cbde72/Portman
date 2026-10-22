@@ -12,6 +12,42 @@ from pdf_plugins._generic_document import analyse_pages as analyse_pages  # re-e
 from pdf_plugins._generic_document import parse_generic_document
 
 
+_LONG_LETTER_RUN = re.compile(r'([^\W\d_])\1{19,}')
+
+
+def text_is_damaged(extracted):
+    """Detect text that cannot be trusted even when pypdf reports no layout issue.
+
+    Broken embedded font maps replace whole table cells with one repeated
+    letter (``zzzz...``, ``RRRR...``) or with replacement characters.  pypdf's
+    layout warning is only a hint: current comdirect statements render in
+    review mode although their text is complete.
+    """
+    visible = len(re.sub(r'\s', '', extracted))
+    if not visible:
+        return False
+    if extracted.count('\ufffd') > visible * .05:
+        return True
+    return bool(_LONG_LETTER_RUN.search(extracted))
+
+
+def needs_ocr(extracted, *, layout_review=False, has_images=False):
+    """Run OCR only when native text is missing, damaged, or visibly incomplete."""
+    visible = len(re.sub(r'\s', '', extracted))
+    if visible == 0 or text_is_damaged(extracted):
+        return True
+    if visible < 300 and has_images:
+        # The short, fully textual account appendix also contains a bank logo.
+        # Its image is not a scanned statement and needs no OCR.
+        compact = ' '.join(extracted.split())
+        if (re.search(r'Finanzreport\s+Nr\.', compact, re.I)
+                and 'Übersicht Ihrer Kontodaten' in compact
+                and re.search(r'DE(?: ?\d){20}', compact)):
+            return False
+        return True
+    return False
+
+
 def _validate_plugin_batch(batch, document):
     ids = [tx.external_id for tx in batch.transactions]
     if len(ids) != len(set(ids)): raise ValueError('Plugin erzeugte mehrfach verwendete Buchungskennungen.')
@@ -72,37 +108,31 @@ def parse_pdf(path, *, allow_ocr=True, preferred_plugin=None, preferred_handler=
         pages, ocr_pages = [], {}
         fallback_pages = set()
         from .pdf_text import extract_page_text
-        from .pdf_ocr import ocr_page
+        from .pdf_ocr import MIN_SAFE_CONFIDENCE, ocr_page, text_is_reliable
         for index, page in enumerate(reader.pages):
             extracted, needs_layout_review = extract_page_text(page)
             if needs_layout_review:
                 fallback_pages.add(index + 1)
                 batch.warnings.append(f'Seite {index + 1}: Gedrehter Text oder Layoutproblem. Alternative Textextraktion verwendet; Vollständigkeit und Tabellenspalten am Original prüfen.')
-            # Image-backed pages with little useful text also include scans with
-            # a selectable letterhead. Do not concatenate OCR and native text.
-            visible = len(re.sub(r'\s', '', extracted))
-            # pypdf reports rotated content and uninterpretable embedded fonts
-            # through the reviewed fallback flag. Native text can look plausible
-            # while still omitting complete booking rows, so verify that page by OCR.
-            needs_ocr = needs_layout_review or visible == 0 or ('\ufffd' in extracted and extracted.count('\ufffd') > visible * .05)
-            if not needs_ocr and visible < 300:
-                needs_ocr = bool(page.images)
-                # The short, fully textual account appendix also contains a bank
-                # logo. Its image is not a scanned statement and needs no OCR.
-                compact = ' '.join(extracted.split())
-                if (re.search(r'Finanzreport\s+Nr\.', compact, re.I)
-                        and 'Übersicht Ihrer Kontodaten' in compact
-                        and re.search(r'DE(?: ?\d){20}', compact)):
-                    needs_ocr = False
-            if needs_ocr and not allow_ocr:
+            # Broken embedded fonts can leave plausible-looking text that omits
+            # whole booking rows.  The layout warning alone is not enough: new
+            # comdirect statements also trigger it although their text is complete.
+            page_needs_ocr = needs_ocr(extracted, layout_review=needs_layout_review,
+                                       has_images=bool(page.images))
+            if page_needs_ocr and not allow_ocr:
                 batch.warnings.append(f'Seite {index + 1}: Textergänzung nur aus eingebettetem Text, ohne OCR.')
-            if needs_ocr and allow_ocr:
+            if page_needs_ocr and allow_ocr:
                 try:
                     recognized, confidence = ocr_page(path, index)
-                    if recognized.strip():
+                    if text_is_reliable(recognized, confidence):
                         extracted = recognized
                         ocr_pages[index + 1] = confidence
                         batch.warnings.append(f'Seite {index + 1}: OCR verwendet; Buchungen bitte am Original prüfen und einzeln bestätigen.')
+                    elif recognized.strip():
+                        shown = 'unbekannt' if confidence is None else f'{confidence:.0%}'
+                        batch.warnings.append(
+                            f'Seite {index + 1}: OCR-Ergebnis mit geringer Sicherheit ({shown}) nicht übernommen; '
+                            f'vorhandener Text bleibt erhalten. Schwelle {MIN_SAFE_CONFIDENCE:.0%}.')
                     else:
                         batch.warnings.append(f'Seite {index + 1}: OCR hat keinen Text erkannt; nur Dokumentablage möglich.')
                 except Exception as error:
@@ -134,7 +164,7 @@ def parse_pdf(path, *, allow_ocr=True, preferred_plugin=None, preferred_handler=
             plugin, detection = selected
             batch.document_type = detection.document_type
             batch.pdf_text = '\n\n'.join(f'--- Seite {n} ---\n{text}' for n, text in enumerate(pages, 1))
-            result = plugin.parse(document, detection, ParseContext(batch))
+            result = plugin.parse(document, detection, ParseContext(batch, {'allow_ocr': allow_ocr}))
             if fallback_pages:
                 while len(result.pdf_booking_evidence) < len(result.transactions):
                     result.pdf_booking_evidence.append({})
