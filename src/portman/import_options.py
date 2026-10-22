@@ -34,7 +34,10 @@ class ImportOptionsDialog(QDialog):
             if report.get('source_sha256'):
                 existing.setdefault((report['source_sha256'], report.get('source_sheet', '')), []).append(report)
         self.duplicates = [any(report.get('snapshots', 0) == len(batch.snapshots)
-                              and report.get('transactions', 0) == len(batch.transactions)
+                              and (report.get('transactions', 0) == len(batch.transactions)
+                                   or (batch.plugin_id == 'user.comdirect-ertraege'
+                                       and batch.plugin_handler in ('wertpapierkauf', 'wertpapierverkauf')
+                                       and report.get('booking_evidence', 0) == len(batch.transactions)))
                               and report.get('balances', 0) == len(batch.balances)
                               and (not batch.history_end or (
                                   report.get('history_end') == batch.history_end

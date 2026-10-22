@@ -104,21 +104,107 @@ class RepositoryV09(RepositoryV07):
             self.db.execute(f'PRAGMA busy_timeout={int(timeout)}')
 
     def commit_batches(self, batches):
+        # Direct/API imports do not pass through ImportPreviewDialog.  Move
+        # comdirect settlement notices to the same evidence channel here too.
+        for batch in batches:
+            if (batch.plugin_id == 'user.comdirect-ertraege'
+                    and batch.plugin_handler in ('wertpapierkauf', 'wertpapierverkauf')):
+                evidence = list(getattr(batch, 'booking_evidence', ())) or list(batch.transactions)
+                batch.booking_evidence = evidence
+                batch.transactions = [tx for tx in batch.transactions if tx not in evidence]
         results = super().commit_batches(batches)
         if any(result.get('status') in ('imported', 'duplicate') for result in results):
-            warnings = self._link_investment_distribution_taxes()
+            warnings = self._persist_comdirect_trade_details()
+            warnings.extend(self._link_investment_distribution_taxes())
             for result in results:
                 if result.get('status') == 'imported':
                     result.setdefault('warnings', []).extend(warnings)
         return results
+
+    def _persist_comdirect_trade_details(self):
+        """Attach one trade notice to one statement row without a second cashflow."""
+        from portfolio_v5.booking_duplicates import security_identifiers
+        from portfolio_v5.settlement import infer_security_booking
+        evidence = self.store.model_records(kind='booking_evidence')
+        if not evidence:
+            return []
+        raw_rows = [dict(row) for row in self.db.execute(
+            "SELECT t.id,t.import_id,t.account,t.external_id,t.date,t.payload,i.path "
+            "FROM transactions t JOIN imports i ON i.id=t.import_id AND i.active=1")]
+        context = {}
+        candidates = []
+        for row in raw_rows:
+            payload = json.loads(row['payload'])
+            payload.update(id=row['id'], import_id=row['import_id'], depot=row['account'], source=row['path'])
+            if payload.get('kind') != 'BANK_BOOKING':
+                continue
+            inferred = infer_security_booking(self.store, payload, context)
+            if inferred:
+                payload.update(inferred)
+            if payload.get('kind') in ('BUY', 'SELL'):
+                candidates.append(payload)
+
+        warnings = []
+        fields = ('kind', 'security', 'quantity', 'fees', 'taxes', 'gross_amount', 'price',
+                  'price_currency', 'trade_date', 'pay_date', 'cash_account', 'depot_account',
+                  'security_ref', 'order_id', 'venue', 'document_reference',
+                  'transaction_reference', 'fee_items', 'tax_items', 'field_sources')
+        with self.db:
+            for record in evidence:
+                item = dict(record['payload'])
+                item_ids = security_identifiers(item)
+                item_day = date.fromisoformat(item.get('value_date') or item['date'])
+                item_amount = Decimal(str(item['amount']))
+                matches = []
+                for tx in candidates:
+                    tx_ids = security_identifiers(tx)
+                    tx_day = date.fromisoformat(tx.get('value_date') or tx['date'])
+                    if (account_key(tx.get('account', '')) != account_key(item.get('cash_account') or tx['account'])
+                            or tx.get('currency') != item.get('currency')
+                            or Decimal(str(tx.get('amount'))) != item_amount
+                            or abs((tx_day - item_day).days) > 3
+                            or not item_ids or not (item_ids & tx_ids)):
+                        continue
+                    matches.append(tx)
+                if len(matches) != 1:
+                    warnings.append(
+                        f'Prüfhinweis: Kaufabrechnung {item.get("document_reference") or item.get("external_id")} '
+                        f'konnte nicht eindeutig einer Finanzreportbuchung zugeordnet werden ({len(matches)} Treffer); '
+                        'keine Gebühren übernommen.')
+                    continue
+                target = matches[0]
+                details = {field: item.get(field) for field in fields
+                           if item.get(field) not in (None, '', [], {})}
+                current = self.db.execute(
+                    'SELECT payload,source_hash FROM booking_details WHERE transaction_id=?',
+                    (target['id'],)).fetchone()
+                if current:
+                    existing = json.loads(current['payload'])
+                    conflict = any(existing.get(field) not in (None, '', [], {})
+                                   and details.get(field) not in (None, '', [], {})
+                                   and existing[field] != details[field] for field in fields)
+                    if conflict:
+                        warnings.append(
+                            f'Prüfhinweis: Finanzreportbuchung {target["external_id"]} besitzt '
+                            'widersprüchliche Belegdetails; keine automatische Änderung.')
+                        continue
+                    existing.update(details)
+                    details = existing
+                self.db.execute(
+                    'INSERT INTO booking_details(transaction_id,payload,source_hash) VALUES(?,?,?) '
+                    'ON CONFLICT(transaction_id) DO UPDATE SET payload=excluded.payload,source_hash=excluded.source_hash',
+                    (target['id'], json.dumps(details, ensure_ascii=False, separators=(',', ':')),
+                     self.db.execute(
+                         "SELECT json_extract(report,'$.source_sha256') FROM imports WHERE id=?",
+                         (record['import_id'],)).fetchone()[0]))
+        return warnings
 
     def _link_investment_distribution_taxes(self):
         """Link a separate tax notice to one fully evidenced net dividend."""
         events = [event for event in self.tax_events()
                   if event.get('type') in ('investment_ausschuettung_inland',
                                            'investment_ausschuettung_ausland',
-                                           'dividende_inland')
-                  and (event.get('related_transaction_id') or event.get('type') == 'dividende_inland')]
+                                           'dividende_inland')]
         if not events:
             return []
         transactions = self.transactions()
@@ -168,12 +254,14 @@ class RepositoryV09(RepositoryV07):
         warnings = []
         with self.db:
             for event in events:
-                tax = by_external.get(event['related_transaction_id'])
+                related = by_external.get(event.get('related_transaction_id'))
+                tax_matches = [tx for tx in transactions
+                               if tx.get('kind') == 'TAX'
+                               and tx.get('transaction_reference') == event.get('reference_no')
+                               and account_key(tx.get('account', '')) == account_key(event.get('cash_account', ''))]
+                tax = related if related and related.get('kind') == 'TAX' else (
+                    tax_matches[0] if len(tax_matches) == 1 else None)
                 ordinary_dividend = event.get('type') == 'dividende_inland'
-                if ordinary_dividend and tax is not None:
-                    continue
-                if tax is None and not ordinary_dividend:
-                    continue
                 tax_ref = reference(tax) if tax is not None else ''
                 if tax_ref and tax_ref in existing_fee_refs:
                     continue
@@ -208,20 +296,19 @@ class RepositoryV09(RepositoryV07):
                     if evidence:
                         candidates.append(tx)
                 if len(candidates) == 1:
-                    if ordinary_dividend:
-                        record = self.db.execute(
-                            "SELECT import_id,ordinal,payload FROM import_model_records "
-                            "WHERE kind='tax_events' AND json_extract(payload,'$.external_id')=?",
-                            (event['external_id'],)).fetchone()
-                        if record:
-                            payload = json.loads(record['payload'])
-                            payload['related_transaction_id'] = candidates[0]['external_id']
-                            self.db.execute(
-                                "UPDATE import_model_records SET payload=? "
-                                "WHERE import_id=? AND kind='tax_events' AND ordinal=?",
-                                (json.dumps(payload, ensure_ascii=False, separators=(',', ':')),
-                                 record['import_id'], record['ordinal']))
-                    else:
+                    record = self.db.execute(
+                        "SELECT import_id,ordinal,payload FROM import_model_records "
+                        "WHERE kind='tax_events' AND json_extract(payload,'$.external_id')=?",
+                        (event['external_id'],)).fetchone()
+                    if record:
+                        payload = json.loads(record['payload'])
+                        payload['related_transaction_id'] = candidates[0]['external_id']
+                        self.db.execute(
+                            "UPDATE import_model_records SET payload=? "
+                            "WHERE import_id=? AND kind='tax_events' AND ordinal=?",
+                            (json.dumps(payload, ensure_ascii=False, separators=(',', ':')),
+                             record['import_id'], record['ordinal']))
+                    if tax is not None and paid:
                         self.db.execute('INSERT OR IGNORE INTO fee_links VALUES(?,?,?,?)',
                                         (reference(candidates[0]), 'taxes', tax_ref,
                                          'Automatisch: comdirect Investment-Ausschüttung, Netto und Steuer belegt'))

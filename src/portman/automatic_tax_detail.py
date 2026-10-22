@@ -167,9 +167,11 @@ def automatic_tax_detail_records(repository, imported):
     fee_to_aux = {row['fee_ref']: row['aux_ref'] for row in repository.fee_links()}
     event_by_aux = {}
     for event in events:
-        tax = by_external.get(event.get('related_transaction_id'))
-        if tax is not None:
-            aux = fee_to_aux.get(reference(tax))
+        related_tx = by_external.get(event.get('related_transaction_id'))
+        if related_tx is not None:
+            related_ref = reference(related_tx)
+            aux = (related_ref if related_tx.get('kind') in ('DIVIDEND', 'DISTRIBUTION')
+                   else fee_to_aux.get(related_ref))
             if aux:
                 event_by_aux[aux] = event
     for event in events:
@@ -199,7 +201,9 @@ def automatic_tax_detail_records(repository, imported):
         if tx.get('kind') in ('TAX','TAX_REFUND') and not tx.get('affects_cash', True):
             continue
         ref = reference(tx)
-        if ref in linked_transactions or tx.get('external_id') in related:
+        # A related dividend is the primary detail row and must be enriched by
+        # its tax event.  Legacy related TAX rows remain suppressed.
+        if ref in linked_transactions or (tx.get('external_id') in related and ref not in event_by_aux):
             continue
         gains = realized_index.get((account_key(tx['account']), tx['date'], tx.get('security', ''),
                                     abs(Decimal(str(tx['amount'])))), [])

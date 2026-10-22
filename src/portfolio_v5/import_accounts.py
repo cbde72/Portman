@@ -7,7 +7,9 @@ from .accounts import account_key, account_name
 
 def import_sources(batch):
     sources = {}
-    for kind, values in [('Depotstände', batch.snapshots), ('Salden', batch.balances), ('Transaktionen', batch.transactions), ('Dokumente', batch.documents)]:
+    for kind, values in [('Depotstände', batch.snapshots), ('Salden', batch.balances),
+                         ('Transaktionen', batch.transactions),
+                         ('Buchungsbelege', batch.booking_evidence), ('Dokumente', batch.documents)]:
         for value in values:
             if value.account == 'Archiv':
                 continue

@@ -49,18 +49,23 @@ def transaction(repo, commit=False):
 
 def decode_batch(payload):
     # Avoid deepcopy - construct new objects directly from payload data
-    d = {k: v for k, v in payload.items() if k not in ('snapshots', 'balances', 'transactions', 'documents', 'securities', 'accounts', 'statements', 'tax_events', 'tax_details', 'cost_reports', 'events')}
+    d = {k: v for k, v in payload.items() if k not in ('snapshots', 'balances', 'transactions',
+         'booking_evidence', 'documents', 'securities', 'accounts', 'statements', 'tax_events',
+         'tax_details', 'cost_reports', 'events')}
     d['snapshots'] = [Snapshot(**{**s,'positions':[Position(**p) for p in s['positions']]}) for s in payload['snapshots']]
     d['balances'] = [Balance(**b) for b in payload['balances']]
     bank_fields = {'purpose', 'counterparty', 'bank_reference', 'operation', 'booking_text',
                    'counterparty_iban', 'counterparty_bic', 'raw_text', 'affects_cash'}
-    transactions = []
-    for tx in payload['transactions']:
-        tx_copy = dict(tx)  # shallow copy is sufficient
-        tx_copy['tax_items'] = [TaxItem(**item) if isinstance(item, dict) else item for item in tx_copy.get('tax_items', [])]
-        tx_copy['fee_items'] = [FeeItem(**item) if isinstance(item, dict) else item for item in tx_copy.get('fee_items', [])]
-        transactions.append((BankTransaction if bank_fields & tx_copy.keys() else Transaction)(**tx_copy))
-    d['transactions'] = transactions
+    def decode_transactions(rows):
+        transactions = []
+        for tx in rows:
+            tx_copy = dict(tx)  # shallow copy is sufficient
+            tx_copy['tax_items'] = [TaxItem(**item) if isinstance(item, dict) else item for item in tx_copy.get('tax_items', [])]
+            tx_copy['fee_items'] = [FeeItem(**item) if isinstance(item, dict) else item for item in tx_copy.get('fee_items', [])]
+            transactions.append((BankTransaction if bank_fields & tx_copy.keys() else Transaction)(**tx_copy))
+        return transactions
+    d['transactions'] = decode_transactions(payload['transactions'])
+    d['booking_evidence'] = decode_transactions(payload.get('booking_evidence', []))
     d['documents'] = [BankDocument(**b) for b in payload.get('documents',[])]
     d['securities'] = [SecurityInfo(**row) for row in payload.get('securities', [])]
     d['accounts'] = [AccountInfo(**row) for row in payload.get('accounts', [])]

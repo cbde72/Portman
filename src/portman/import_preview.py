@@ -532,6 +532,12 @@ class ImportPreviewDialog(QDialog):
             if original.errors or (not always_sync and self.table.item(row, 0).checkState() != Qt.CheckState.Checked):
                 continue
             batch = deepcopy(original)
+            # The checkbox controls creation of cash transactions.  A comdirect
+            # trade confirmation is non-cash evidence for an existing statement
+            # row and must survive even when that checkbox remains cleared.
+            if (batch.plugin_id == 'user.comdirect-ertraege'
+                    and batch.plugin_handler in ('wertpapierkauf', 'wertpapierverkauf')):
+                batch.booking_evidence = deepcopy(original.transactions)
             batch.account_assignments = {}
             batch.remember_assignments = []
             batch.new_accounts = []
