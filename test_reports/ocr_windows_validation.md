@@ -1,7 +1,7 @@
 # Portman V09 – OCR-Validierung unter Windows
 
 Prüfdatum: 22.10.2026  
-Branch: `fix/windows-ocr-targeted-validation`  
+Branch: `fix/windows-ocr-targeted-validation` (Basis `main` @ `55b2eda`)  
 Umgebung: Windows 11 (10.0.26220), Projekt-`.venv`
 (`C:\Users\chris\Desktop\programming\PortmanNL\.venv\Scripts\python.exe`,
 Python 3.13.9, 64 Bit)  
@@ -16,14 +16,18 @@ verändert. Es wurden keine Pakete installiert oder aktualisiert.
   `PP-OCRv6_det_small`, `PP-OCRv6_rec_small` und der Klassifikator liegen
   vollständig im Paket und im Portman-Modellcache.
 - Die drei gemeldeten comdirect-Familien LS9AVX, A2H57N und LYX05A werden
-  weiterhin korrekt als Kauf erkannt. OCR läuft nur auf den beschädigten
-  Seiten, nicht auf dem gesamten Dokument.
-- Ein neu eingeführter Sicherheits-Schwellwert (`MIN_SAFE_CONFIDENCE = 0.80`)
-  verhindert, dass OCR-Text mit geringer Konfidenz native Buchungstexte
-  ersetzt. Fehlende Pakete oder OCR-Fehler erzeugen Warnungen und weiterhin
-  eine Dokumentablage, aber keine falschen Buchungen.
-- Die vollständige Testsuite läuft durch: **1086 passed, 12 skipped**.
-- Der Beleg-Diagnosetest bestätigt die Qualität: **PASS 18, WARN 0, FAIL 0**.
+  weiterhin korrekt als Kauf erkannt. Bei den beschädigten Januar-Belegen läuft
+  OCR nur auf den zwei betroffenen Seiten, nicht auf dem gesamten Dokument.
+- Neue, vollständig textliche Varianten derselben Familien lösen **keine** OCR
+  mehr aus. Sie werden in ca. 0,4 s geparst, statt unnötig 13–20 s OCR zu
+  durchlaufen.
+- Ein Sicherheits-Schwellwert (`MIN_SAFE_CONFIDENCE = 0.80`) verhindert, dass
+  OCR-Text mit geringer Konfidenz native Buchungstexte ersetzt. Fehlende Pakete
+  oder OCR-Fehler erzeugen Warnungen und weiterhin eine Dokumentablage, aber
+  keine falschen Buchungen.
+- Die vollständige Testsuite läuft durch: **1090 passed, 12 skipped**.
+- Der Beleg-Diagnosetest über alle sechs Referenzvarianten bestätigt die
+  Qualität: **PASS 20, WARN 0, FAIL 0**.
 
 ## Installierte Versionen
 
@@ -47,7 +51,7 @@ verändert. Es wurden keine Pakete installiert oder aktualisiert.
 - Cache und Paketmodelle stimmen in Anzahl und Dateigröße überein.
 - Verfügbare Provider: `AzureExecutionProvider`, `CPUExecutionProvider`
 - Aktives Gerät: `CPU`
-- Engine-Initialisierung: ca. 2,2 s
+- Engine-Initialisierung: ca. 2,2 s (kalter Prozess)
 
 ## Diagnosewerkzeug
 
@@ -71,36 +75,61 @@ Ausgabeformat:
 Lokaler Lauf ohne Belege: `PASS 15, WARN 1, FAIL 0` (die WARN weist lediglich
 darauf hin, dass keine realen PDFs übergeben wurden).
 
-Synthetischer Erkenner-Test: 82 Zeichen, 4 Boxen, Konfidenz 0,97, ca. 5,2 s,
+Synthetischer Erkenner-Test: 82 Zeichen, 4 Boxen, Konfidenz 0,97, ca. 6,1 s,
 Treffer `COMDIRECT`, `LS9AVX`, `DE000LS9AVX3`.
 
 ## Reale comdirect-Belege
 
-Geprüft wurden die zuvor problematischen Dokumente (nur lesend):
+Geprüft wurden die zuvor problematischen Januar-Belege und die neuen,
+vollständig textlichen Varianten (nur lesend):
 
 | Familie | Dokument | Seiten | OCR-Seiten | OCR-Zeit | Parser | Min. Konfidenz | Ergebnis |
 |---|---|---:|---:|---:|---:|---:|---|
-| LS9AVX | Kauf 0,006 St. vom 07.01.2026 | 3 | 2 | 21,9 s | 2,1 s | 0,84 | PASS |
-| A2H57N | Kauf 0,227 St. vom 02.01.2026 | 3 | 2 | 19,1 s | 3,9 s | 0,84 | PASS |
-| LYX05A | Kauf 0,667 St. vom 02.01.2026 | 3 | 2 | 21,0 s | 4,4 s | 0,84 | PASS |
+| LS9AVX | Kauf 0,006 St. vom 07.01.2026 (beschädigt) | 3 | 2 | 15,5 s | 1,6 s | 0,84 | PASS |
+| A2H57N | Kauf 0,227 St. vom 02.01.2026 (beschädigt) | 3 | 2 | 13,6 s | 2,5 s | 0,84 | PASS |
+| LYX05A | Kauf 0,667 St. vom 02.01.2026 (beschädigt) | 3 | 2 | 13,2 s | 2,6 s | 0,84 | PASS |
+| LS9AVX | Kauf 0,006 St. vom 01.06.2026 (vollständig) | 3 | 0 | – | 0,4 s | – | PASS |
+| A2H57N | Kauf 0,217 St. vom 01.06.2026 (vollständig) | 3 | 0 | – | 0,4 s | – | PASS |
+| LYX05A | Kauf 0,579 St. vom 01.06.2026 (vollständig) | 3 | 0 | – | 0,4 s | – | PASS |
 
 Validierte Buchungsdaten (jeweils genau eine Buchung, keine Parserfehler):
 
-| Familie | ISIN | Stück | Kurs | Kurswert | Betrag | Art |
-|---|---|---:|---:|---:|---:|---|
-| LS9AVX | DE000LS9AVX3 | 0,006 | 4152,91 | 24,92 | −24,92 | BUY |
-| A2H57N | LU1681041973 | 0,227 | 219,45 | 49,82 | −49,82 | BUY |
-| LYX05A | LU2090063673 | 0,667 | 74,92 | 49,97 | −49,97 | BUY |
+| Familie | Dokument | ISIN | Stück | Kurs | Kurswert | Betrag | Art |
+|---|---|---:|---:|---:|---:|---:|---|
+| LS9AVX | 07.01.2026 | DE000LS9AVX3 | 0,006 | 4152,91 | 24,92 | −24,92 | BUY |
+| A2H57N | 02.01.2026 | LU1681041973 | 0,227 | 219,45 | 49,82 | −49,82 | BUY |
+| LYX05A | 02.01.2026 | LU2090063673 | 0,667 | 74,92 | 49,97 | −49,97 | BUY |
+| LS9AVX | 01.06.2026 | DE000LS9AVX3 | 0,006 | 3662,71 | 21,98 | −21,98 | BUY |
+| A2H57N | 01.06.2026 | LU1681041973 | 0,217 | 230,35 | 49,99 | −49,99 | BUY |
+| LYX05A | 01.06.2026 | LU2090063673 | 0,579 | 86,27 | 49,95 | −49,95 | BUY |
 
-End-to-End-Laufzeit beim ersten Import (inklusive OCR): 24,3–28,9 s pro Beleg.
-Die beiden beschädigten Seiten dominieren mit 19–22 s. Ein zweiter Parserlauf
-im selben Prozess benötigt dank des neuen Seiten-Caches nur noch 2–4 s.
+Laufzeit beim ersten Import der beschädigten Belege inklusive OCR: ca. 15–18 s
+pro Beleg. Die beiden beschädigten Seiten dominieren; ein zweiter Parserlauf im
+selben Prozess benötigt dank des Seiten-Caches nur noch 2–3 s. Die vollständigen
+Varianten brauchen ohne OCR ca. 0,4 s.
 
-Qualitätshinweis: In der A2H57N-Belegbeschreibung trat bei der Baseline-
-Prüfung ein kosmetisches OCR-Artefakt auf (`AIS-ĀM` statt `AIS-AM`). Die
-validierten Felder ISIN, Stückzahl, Kurs, Kurswert und Betrag waren davon
-nicht betroffen. Eine feldgenaue Nachkorrektur wäre ein separater
-Plugin-Schritt und wurde hier bewusst nicht eingebaut.
+Qualitätshinweis: In der A2H57N-Belegbeschreibung kann ein kosmetisches
+OCR-Artefakt auftreten (`AIS-ĀM` statt `AIS-AM`). Die validierten Felder ISIN,
+Stückzahl, Kurs, Kurswert und Betrag waren davon nicht betroffen. Eine
+feldgenaue Nachkorrektur wäre ein separater Plugin-Schritt und wurde bewusst
+nicht eingebaut.
+
+## Schadenserkennung
+
+Die beschädigten comdirect-Belege zeigen keine Ersatzzeichen, sondern lange
+Wiederholungen eines Buchstabens aus einer defekten Schriftzuordnung
+(`zzzz…` bei LS9AVX, `RRRR…` bei A2H57N, `üüü…` bei LYX05A). `pypdf` meldet
+zusätzlich ein Layoutproblem, aber auch die neuen, vollständigen Belege lösen
+diese Meldung aus. Deshalb entscheidet nicht mehr das Layout-Flag allein,
+sondern der erkannte Textschaden:
+
+- kein sichtbarer Text, oder
+- mehr als 5 % Ersatzzeichen `U+FFFD`, oder
+- mindestens 20 gleiche Buchstaben in Folge (Unicode-Buchstaben; Ziffern und
+  Unterstriche zählen nicht).
+
+`layout_review` bleibt als Prüfhinweis in den Warnungen erhalten, löst aber
+keine OCR mehr aus.
 
 ## Änderungen
 
@@ -114,24 +143,34 @@ Plugin-Schritt und wurde hier bewusst nicht eingebaut.
 - Prüfung des Seitenindex mit klarer Fehlermeldung
 - Handlungsfähigere Fehlermeldungen bei fehlenden Paketen/Enginefehlern
 - `seed_model_cache` toleriert ein fehlendes Quellverzeichnis
+- Cache-Schreiben erfolgt unter demselben Lock wie Rendering und Erkennung
 
 ### `src/portfolio_v5/pdf_importer.py`
 
-- Zentrale, testbare Entscheidung `needs_ocr(...)`; Verhalten unverändert:
-  OCR nur bei Layout-Review, ohne sichtbaren Text, bei vielen Ersatzzeichen
-  oder bei kurzem Text mit Bild – mit Ausnahme des textlichen
-  Finanzreport-Anhangs (Banklogo)
+- Zentrale, testbare Entscheidung `text_is_damaged(...)` und `needs_ocr(...)`
+- OCR nur bei fehlendem Text, erkanntem Textschaden oder kurzem Text mit Bild –
+  mit Ausnahme des textlichen Finanzreport-Anhangs (Banklogo)
+- `layout_review` allein löst keine OCR mehr aus
+- `allow_ocr` wird über `ParseContext.options` an Plugins weitergereicht;
+  `allow_ocr=False` wird damit auch im comdirect-Plugin wirksam
 - OCR-Text ersetzt nativen Text nur noch ab 0,80 Konfidenz
 - Unterhalb der Schwelle bleibt der native Text erhalten; Warnung:
   „OCR-Ergebnis mit geringer Sicherheit (…) nicht übernommen“
 - Fehlende Pakete/OCR-Fehler erzeugen weiterhin nur Warnungen und eine
   Dokumentablage, keine Buchung
 
+### `pdf_plugins/comdirect_ertraege.py`
+
+- Die gezielte Handels-OCR verwendet denselben Schwellwert
+  `MIN_SAFE_CONFIDENCE` statt eines separaten Literals `0.80`
+- Die feldgenaue Prüfung bleibt strenger (`OCR_MIN_CONFIDENCE = 0.90`)
+
 ### Neue Dateien
 
 - `src/portfolio_v5/ocr_diagnostics.py` – lesende Prüflogik
 - `tools/check_ocr_windows.py` – CLI mit PASS/WARN/FAIL und JSON
-- `tests/test_pdf_ocr_safety.py` – Fehler-, Paket- und Schwellwerttests
+- `tests/test_pdf_ocr_safety.py` – Fehler-, Paket-, Schwellwert- und
+  Weitergabetests
 - `tests/test_ocr_diagnostics.py` – Diagnose- und Validierungstests
 - `tests/test_ocr_windows_real_pdfs.py` – opt-in-Test mit echten Belegen
 
@@ -139,16 +178,16 @@ Plugin-Schritt und wurde hier bewusst nicht eingebaut.
 
 | Testlauf | Ergebnis |
 |---|---|
-| Gezielte PDF-/OCR-Regression (`test_pdf_import`, comdirect, Plugins, Text, OCR) | 113 passed, 1 skipped in 22,9 s |
-| Neue OCR-Sicherheits-/Diagnosetests | 17 passed in 5,1 s |
-| Reale Belege, opt-in (`PORTMAN_REAL_OCR=1`) | 3 passed in 44,8 s |
-| Vollständige Suite | 1086 passed, 12 skipped in 479,6 s |
+| Neue OCR-Sicherheits-/Diagnosetests | 17 passed in 4,7 s |
+| Gezielte PDF-/OCR-Regression (`test_pdf_import`, comdirect, Plugins, Text, OCR) | 59 passed, 1 skipped in 24,0 s |
+| Reale Belege, opt-in (`PORTMAN_REAL_OCR=1`) | 3 passed in 50,4 s |
+| Vollständige Suite | 1090 passed, 12 skipped in 354,6 s |
 
 Opt-in-Test:
 
 ```powershell
 $env:PORTMAN_REAL_OCR='1'
-$env:PORTMAN_COMDIRECT_PDF_DIR='C:\Users\chris\Desktop\history\comdirect\2026'
+$env:PORTMAN_COMDIRECT_PDF_DIR='C:\Users\chris\Desktop\history\comdirect\2026\Januar'
 .venv\Scripts\python.exe -m pytest tests/test_ocr_windows_real_pdfs.py -q
 ```
 
@@ -159,6 +198,8 @@ Abgedeckte Fehlerszenarien:
 - leerer oder fehlgeschlagener OCR-Lauf
 - OCR-Ergebnis mit 0,42 bzw. 0,10 Konfidenz
 - Erhalt des nativen Texts bei geringer OCR-Konfidenz
+- `allow_ocr=False` wird an Plugins weitergegeben
+- lange Buchstabenfolgen und Ersatzzeichen als Schadenssignale
 - ungültige/fehlende Beträge, ISINs und Kurs-/Stückzahlkombinationen in der
   Belegdiagnose
 

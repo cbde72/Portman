@@ -414,8 +414,8 @@ def check_real_pdf(report, path):
         if problems:
             report.add(f'Beleg {name}', FAIL, detail + ' · ' + '; '.join(problems))
         elif not damaged:
-            report.add(f'Beleg {name}', WARN, detail,
-                       'Keine beschädigte Textextraktion erkannt; OCR war für diesen Beleg nicht nötig.')
+            report.add(f'Beleg {name}', PASS, detail,
+                       'Native Textextraktion vollständig; OCR war für diesen Beleg nicht nötig.')
         elif ocr_seconds > 40 or parse_time > 60:
             report.add(f'Beleg {name}', WARN, detail, 'Laufzeit über dem Richtwert; Seiten gezielt prüfen.')
         else:
