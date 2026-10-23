@@ -337,6 +337,8 @@ class TaxDetailRecord:
     source_format: str
     original_values: dict[str, str]
     source_reference: str = ''
+    source_date: str = ''
+    source_name: str = ''
     linked_tax_event_id: str = ''
     linked_transaction_id: str = ''
     match_status: str = 'unmatched'

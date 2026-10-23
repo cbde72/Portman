@@ -41,7 +41,9 @@ def automatic_tax_values(repository, year):
     name_keys = {account_key(row['name']): row['account_key'] for row in records.values()}
     values = defaultdict(lambda: {'interest': Decimal(), 'dividends': Decimal(), 'capital_income': Decimal(),
                                    'taxes': Decimal(), 'withholding_tax': Decimal(),
-                                   'solidarity_surcharge': Decimal(), 'partial_exemption': Decimal(),
+                                   'solidarity_surcharge': Decimal(), 'church_tax': Decimal(),
+                                   'creditable_withholding': Decimal(), 'credited_withholding': Decimal(),
+                                   'partial_exemption': Decimal(),
                                    'used_exemption': Decimal(), 'advance_tax_base': Decimal(),
                                    'taxable_after_fsa': Decimal(),
                                    'advance_tax_taxable': Decimal(), 'advance_tax_count': 0})
@@ -87,6 +89,9 @@ def automatic_tax_values(repository, year):
                           for item in tax_items
                           if (item.get('kind') if isinstance(item, dict) else item.kind)
                           in ('solidaritaetszuschlag', 'solidaritätszuschlag')), Decimal())
+        church = sum((_number(item.get('amount') if isinstance(item, dict) else item.amount)
+                      for item in tax_items
+                      if (item.get('kind') if isinstance(item, dict) else item.kind) == 'kirchensteuer'), Decimal())
         if kind in ('DIVIDEND', 'DISTRIBUTION'):
             taxes = abs(_number(tx.get('taxes')))
             _, gross = dividend_amounts(tx)
@@ -98,6 +103,7 @@ def automatic_tax_values(repository, year):
                 values[key]['taxes'] += taxes
                 values[key]['withholding_tax'] += abs(_number(tx.get('withholding_tax')))
                 values[key]['solidarity_surcharge'] += solidarity
+                values[key]['church_tax'] += church
         elif kind == 'INTEREST':
             interest = gross_income_amount(tx) or _number(tx.get('amount'))
             values[key]['interest'] += interest
@@ -105,6 +111,7 @@ def automatic_tax_values(repository, year):
             values[key]['taxes'] += abs(_number(tx.get('taxes')))
             values[key]['withholding_tax'] += abs(_number(tx.get('withholding_tax')))
             values[key]['solidarity_surcharge'] += solidarity
+            values[key]['church_tax'] += church
         elif kind == 'TAX':
             if tx.get('external_id') in event_aux_ids or not tx.get('affects_cash', True):
                 continue
@@ -133,6 +140,8 @@ def automatic_tax_values(repository, year):
         values[key]['used_exemption'] += abs(_number(event.get('used_exemption')))
         values[key]['taxes'] += abs(_number(event.get('paid_taxes')))
         values[key]['solidarity_surcharge'] += abs(_number(event.get('solidarity_surcharge')))
+        values[key]['church_tax'] += abs(_number(event.get('church_tax')))
+        values[key]['creditable_withholding'] += abs(_number(event.get('creditable_withholding')))
         if not event_type.startswith('vorabpauschale'):
             continue
         base = abs(_number(event.get('advance_tax_base')))
@@ -162,6 +171,7 @@ def automatic_tax_values(repository, year):
             continue
         for key in institution_keys:
             for field in ('capital_income', 'taxes', 'solidarity_surcharge', 'used_exemption',
+                          'church_tax', 'creditable_withholding', 'credited_withholding',
                           'taxable_after_fsa', 'advance_tax_taxable'):
                 values[key][field] = Decimal()
             values[key]['advance_tax_count'] = 0
@@ -176,6 +186,12 @@ def automatic_tax_values(repository, year):
                                             for row in originals), Decimal())
         values[target_key]['solidarity_surcharge'] = -sum((_source_number(row.get('Solidaritätszuschlag'))
                                                            for row in originals), Decimal())
+        values[target_key]['church_tax'] = -sum((_source_number(row.get('Kirchensteuer'))
+                                                 for row in originals), Decimal())
+        values[target_key]['creditable_withholding'] = sum(
+            (_source_number(row.get('Umsatz anrechenbarer Quellensteuer')) for row in originals), Decimal())
+        values[target_key]['credited_withholding'] = -sum(
+            (_source_number(row.get('Veränderung Angerechnete Quellensteuer')) for row in originals), Decimal())
         advances = [row for row in originals if 'vorabpauschale' in row.get('Vorgang', '').casefold()]
         values[target_key]['advance_tax_taxable'] = sum(
             (_source_number(row.get('Steuerbemessungsgrundlage')) for row in advances), Decimal())

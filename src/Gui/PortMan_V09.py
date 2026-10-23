@@ -29,6 +29,8 @@ class MainWindow(MainWindowV09Mixin, SaveGuardMixin, LatestScopeMixin, LockEdita
 
 if __name__ == "__main__":
     app = QApplication.instance() or QApplication(sys.argv)
+    from portman.gui_copy_support import install_global_copy_support
+    install_global_copy_support(app)
     try:
         import argparse
 

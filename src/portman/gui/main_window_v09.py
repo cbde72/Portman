@@ -56,6 +56,8 @@ class MainWindowV09Mixin:
         return self.data_folder / "banking"
 
     def __init__(self, portfolio_folder=None):
+        from portman.gui_copy_support import install_global_copy_support
+        install_global_copy_support()
         self.portfolio_folder = Path(portfolio_folder).resolve() if portfolio_folder else None
         if self.portfolio_folder and not (self.portfolio_folder / "portfolio.sqlite").is_file():
             raise ValueError("Portfolio-Datenbank wurde nicht gefunden.")
@@ -131,6 +133,7 @@ class MainWindowV09Mixin:
             ("CSV mit Profil importieren", self.profile_import),
             ("comdirect-Steuerdetails importieren", self.comdirect_tax_detail_import),
             ("Steuerliche Detailansicht", self.open_tax_detail_view),
+            ("Steuerliche Jahresübersicht", self.open_tax_annual_summary),
             ("Umbuchungen / Kapitalmaßnahmen / Wechselkurse", self.open_actions),
             ("Zurück", self.go_back),
         ]:
@@ -632,6 +635,10 @@ class MainWindowV09Mixin:
     def open_tax_detail_view(self):
         from portman.tax_detail_view import TaxDetailDialog
         TaxDetailDialog(self.repository, self).exec()
+
+    def open_tax_annual_summary(self):
+        from portman.tax_annual_summary import TaxAnnualSummaryDialog
+        TaxAnnualSummaryDialog(self.repository, self).exec()
 
     def excel_import(self):
         from portman.excel_import_dialog import ExcelImportDialog
