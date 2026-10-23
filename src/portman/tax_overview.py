@@ -28,6 +28,17 @@ def _source_number(value):
         return Decimal()
 
 
+def _advance_taxable_income(event):
+    """Use the evidenced post-exemption basis; derive it only from complete facts."""
+    if event.get('taxable_income') not in (None, ''):
+        return abs(_number(event['taxable_income']))
+    if (event.get('advance_tax_base') not in (None, '')
+            and event.get('partial_exemption_amount') not in (None, '')):
+        return max(Decimal(), abs(_number(event['advance_tax_base']))
+                   - abs(_number(event['partial_exemption_amount'])))
+    return Decimal()
+
+
 def automatic_tax_values(repository, year):
     """Return booked gross investment income and taxes per account key."""
     records = {row['account_key']: row for row in repository.account_records()}
@@ -37,7 +48,9 @@ def automatic_tax_values(repository, year):
                                    'taxes': Decimal(), 'withholding_tax': Decimal(),
                                    'solidarity_surcharge': Decimal(), 'partial_exemption': Decimal(),
                                    'used_exemption': Decimal(), 'advance_tax_base': Decimal(),
-                                   'advance_tax_taxable': Decimal(), 'advance_tax_count': 0})
+                                   'advance_tax_taxable': Decimal(),
+                                   'advance_tax_partial_exemption': Decimal(),
+                                   'advance_tax_count': 0})
     for tx in repository.transactions():
         if tx.get('date', '')[:4] != str(year):
             continue
@@ -109,13 +122,18 @@ def automatic_tax_values(repository, year):
             values[key]['partial_exemption'] += abs(_number(event.get('partial_exemption_amount')))
             continue
         base = abs(_number(event.get('advance_tax_base')))
-        taxable = abs(_number(event.get('taxable_income')))
+        taxable = _advance_taxable_income(event)
         values[key]['advance_tax_base'] += base
         values[key]['advance_tax_taxable'] += taxable
         values[key]['advance_tax_count'] += 1
-        values[key]['capital_income'] += base
+        # ``capital_income`` is the taxable aggregate.  The gross advance-tax
+        # base remains separately visible, but must not enter the tax result
+        # before its evidenced partial exemption has been removed.
+        values[key]['capital_income'] += taxable
         partial = abs(_number(event.get('partial_exemption_amount')))
         values[key]['partial_exemption'] += partial if partial else max(Decimal(), base - taxable)
+        values[key]['advance_tax_partial_exemption'] += (
+            partial if partial else max(Decimal(), base - taxable))
         values[key]['used_exemption'] += abs(_number(event.get('used_exemption')))
     # CSV rows are a fallback source.  A linked PDF event is richer and wins,
     # preventing the same Vorabpauschale from being counted twice.
@@ -157,6 +175,7 @@ def tax_overview(repository, year):
         'partial_exemption': Decimal(),
         'used_exemption': Decimal(), 'remaining_exemption': Decimal(),
         'advance_tax_base': Decimal(), 'advance_tax_taxable': Decimal(),
+        'advance_tax_partial_exemption': Decimal(),
         'advance_tax_count': 0, 'accounts': 0})
     legacy = defaultdict(lambda: {'exemption': Decimal(), 'capital_income': Decimal(),
         'taxes': Decimal(), 'partial_exemption': Decimal(), 'used_exemption': Decimal(),
@@ -176,6 +195,7 @@ def tax_overview(repository, year):
                    withholding_tax=booked.get('withholding_tax', Decimal()),
                    advance_tax_base=booked.get('advance_tax_base', Decimal()),
                    advance_tax_taxable=booked.get('advance_tax_taxable', Decimal()),
+                   advance_tax_partial_exemption=booked.get('advance_tax_partial_exemption', Decimal()),
                    advance_tax_count=booked.get('advance_tax_count', 0),
                    partial_exemption=booked.get('partial_exemption', Decimal()),
                    used_exemption=booked.get('used_exemption', Decimal()), remaining_exemption=Decimal(),
@@ -193,6 +213,7 @@ def tax_overview(repository, year):
         total['solidarity_surcharge'] += row['solidarity_surcharge']
         total['advance_tax_base'] += row['advance_tax_base']
         total['advance_tax_taxable'] += row['advance_tax_taxable']
+        total['advance_tax_partial_exemption'] += row['advance_tax_partial_exemption']
         total['advance_tax_count'] += row['advance_tax_count']
         total['partial_exemption'] += row['partial_exemption']
         total['used_exemption'] += row['used_exemption']
@@ -225,7 +246,11 @@ def tax_overview(repository, year):
         booked_partial = total['partial_exemption']
         booked_used = total['used_exemption']
         total['partial_exemption'] = selected('partial_exemption', booked_partial)
-        calculated_used = min(total['exemption'], max(Decimal(), total['capital_income'] - total['partial_exemption']))
+        # Advance-tax income already uses the post-exemption basis.  Only the
+        # exemption belonging to other gross income may still be deducted.
+        remaining_partial = max(
+            Decimal(), total['partial_exemption'] - total['advance_tax_partial_exemption'])
+        calculated_used = min(total['exemption'], max(Decimal(), total['capital_income'] - remaining_partial))
         total['used_exemption'] = selected('used_exemption', booked_used or calculated_used)
         total['remaining_exemption'] = max(Decimal(), total['exemption'] - total['used_exemption'])
         total.update(booked_capital_income=booked_capital, booked_taxes=booked_taxes,

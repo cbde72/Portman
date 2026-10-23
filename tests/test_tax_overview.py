@@ -1,13 +1,18 @@
 import os
 from decimal import Decimal
+from pathlib import Path
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
+import pytest
 from PySide6.QtWidgets import QApplication
 
+from portfolio_v5.accounts import account_key
 from portfolio_v5.models import ImportBatch, TaxEvent, Transaction
+from portfolio_v5.pdf_importer import parse_pdf
 from portman.accounts_widget import AccountsWidget
 from portman.repository import PortfolioRepository
+from portman.repository_v09 import RepositoryV09
 from portman.tax_overview import TaxOverviewDialog, automatic_tax_values, tax_overview
 
 
@@ -141,7 +146,7 @@ def test_imported_vorabpauschale_consumes_only_taxable_exemption_amount(tmp_path
                  partial_exemption_rate='30')]))
 
     values = automatic_tax_values(repository, 2020)['comdirect depot']
-    assert values['capital_income'] == Decimal('12.54')
+    assert values['capital_income'] == Decimal('8.77')
     assert values['advance_tax_base'] == Decimal('12.54')
     assert values['advance_tax_taxable'] == Decimal('8.77')
     assert values['advance_tax_count'] == 1
@@ -152,6 +157,68 @@ def test_imported_vorabpauschale_consumes_only_taxable_exemption_amount(tmp_path
     assert institutions['comdirect']['remaining_exemption'] == Decimal('291.23')
     assert institutions['comdirect']['advance_tax_base'] == Decimal('12.54')
     repository.close()
+
+
+def test_advance_taxable_basis_is_derived_only_from_complete_evidence(tmp_path):
+    repository = PortfolioRepository(tmp_path / 'advance-tax-fallback.sqlite')
+    repository.save_account('Depot', {'institution': 'comdirect', 'kind': 'Depot', 'exemption': '100'})
+    repository.store.import_batch(ImportBatch('tax.pdf', 'tax-fallback', tax_events=[
+        TaxEvent('complete', 'Depot', 'vorabpauschale_ausland', '2026-01-02', tax_year='2026',
+                 income_year='2025', security_ref='COMPLETE',
+                 advance_tax_base='12.54', partial_exemption_amount='3.77'),
+        TaxEvent('incomplete', 'Depot', 'vorabpauschale_ausland', '2026-01-03', tax_year='2026',
+                 income_year='2025', security_ref='INCOMPLETE', advance_tax_base='25.00')]))
+
+    values = automatic_tax_values(repository, 2026)['depot']
+    assert values['advance_tax_base'] == Decimal('37.54')
+    assert values['advance_tax_taxable'] == Decimal('8.77')
+    assert values['capital_income'] == Decimal('8.77')
+    repository.save_institution_tax_record(
+        'comdirect', 2026, exemption='100', capital_income='', taxes='',
+        partial_exemption='', used_exemption='')
+    _, institutions = tax_overview(repository, 2026)
+    # The evidenced 3.77 EUR exemption is already reflected in 8.77 EUR and
+    # must not be subtracted for a second time.
+    assert institutions['comdirect']['used_exemption'] == Decimal('8.77')
+    repository.close()
+
+
+REAL_ADVANCE_TAX = Path(r'C:\Users\chris\Desktop\history\comdirect\2026\Steuerinformationen')
+
+
+@pytest.mark.skipif(not REAL_ADVANCE_TAX.is_dir(), reason='comdirect real corpus is not available')
+def test_three_real_comdirect_advance_taxes_use_post_exemption_basis(tmp_path):
+    paths = [next(REAL_ADVANCE_TAX.glob(f'Steuermitteilung_{wkn}_*.pdf'))
+             for wkn in ('A1JJTF', 'A111X9', 'A2H57N')]
+    batches = [parse_pdf(path) for path in paths]
+    expected = {
+        'IE00B48X4842': ('37.75', '11.33', '26.42'),
+        'IE00BKM4GZ66': ('137.65', '41.30', '96.35'),
+        'LU1681041973': ('99.25', '29.78', '69.47'),
+    }
+    repository = RepositoryV09(tmp_path / 'real-advance-tax.sqlite', backups=False)
+    try:
+        repository.save_account('Depot 4764924', {'institution': 'comdirect', 'kind': 'Depot'})
+        for batch in batches:
+            event = batch.tax_events[0]
+            assert (event.advance_tax_base, event.partial_exemption_amount,
+                    event.taxable_income) == expected[event.security_ref]
+            assert (event.date, event.tax_year, event.income_year) == (
+                '2026-01-02', '2026', '2025')
+            batch.account_assignments = {
+                account_key(event.account): account_key('Depot 4764924')}
+            repository.commit_batches([batch])
+
+        values = automatic_tax_values(repository, 2026)['depot 4764924']
+        assert values['advance_tax_base'] == Decimal('274.65')
+        assert values['partial_exemption'] == Decimal('82.41')
+        assert values['advance_tax_taxable'] == Decimal('192.24')
+        assert values['capital_income'] == Decimal('192.24')
+        assert values['advance_tax_count'] == 3
+        assert repository.transactions() == []
+        assert repository.holdings() == []
+    finally:
+        repository.close()
 
 
 def test_institution_tax_record_follows_institution_rename(tmp_path):
