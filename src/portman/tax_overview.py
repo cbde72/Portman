@@ -29,6 +29,30 @@ def _source_number(value):
         return Decimal()
 
 
+def calculate_fsa(exemption, taxable_income, *, loss_offset=Decimal(),
+                  taxable_known=True, loss_offset_known=True, documented_used=None):
+    """Calculate an institution-wide FSA without changing booked tax facts.
+
+    ``taxable_income`` is already the tax basis after any fund partial
+    exemption. Unknown loss offsets therefore qualify the result instead of
+    causing another partial-exemption deduction or masquerading as evidence.
+    """
+    exemption = max(Decimal(), _number(exemption))
+    taxable = _number(taxable_income)
+    losses = max(Decimal(), _number(loss_offset))
+    eligible = max(Decimal(), taxable - losses)
+    used = min(exemption, eligible)
+    documented = None if documented_used in (None, '') else abs(_number(documented_used))
+    complete = bool(taxable_known and loss_offset_known)
+    status = ('bankseitig nachgewiesen' if documented is not None else
+              'aus Portman-Steuerdaten berechnet' if complete else
+              'berechnet; Steuer-/Verlustdaten nicht vollständig nachgewiesen')
+    return {'taxable_income': taxable, 'loss_offset': losses, 'eligible_income': eligible,
+            'used_exemption': used, 'remaining_exemption': max(Decimal(), exemption - used),
+            'taxable_after_fsa': max(Decimal(), eligible - used),
+            'documented_used_exemption': documented, 'complete': complete, 'status': status}
+
+
 def automatic_tax_values(repository, year):
     """Return taxable income and actually withheld taxes per account key.
 
@@ -46,7 +70,9 @@ def automatic_tax_values(repository, year):
                                    'partial_exemption': Decimal(),
                                    'used_exemption': Decimal(), 'advance_tax_base': Decimal(),
                                    'taxable_after_fsa': Decimal(),
-                                   'advance_tax_taxable': Decimal(), 'advance_tax_count': 0})
+                                   'advance_tax_taxable': Decimal(), 'advance_tax_count': 0,
+                                   'loss_offset': Decimal(), 'loss_offset_known': True,
+                                   'taxable_income_known': True, 'documented_used_exemption': None})
     transactions = repository.transactions()
     events = repository.tax_events() if hasattr(repository, 'tax_events') else []
     if not events:
@@ -138,6 +164,12 @@ def automatic_tax_values(repository, year):
         values[key]['capital_income'] += taxable
         values[key]['partial_exemption'] += partial
         values[key]['used_exemption'] += abs(_number(event.get('used_exemption')))
+        if event.get('loss_offset') in (None, ''):
+            values[key]['loss_offset_known'] = False
+        else:
+            values[key]['loss_offset'] += abs(_number(event.get('loss_offset')))
+        if event.get('taxable_income') in (None, ''):
+            values[key]['taxable_income_known'] = False
         values[key]['taxes'] += abs(_number(event.get('paid_taxes')))
         values[key]['solidarity_surcharge'] += abs(_number(event.get('solidarity_surcharge')))
         values[key]['church_tax'] += abs(_number(event.get('church_tax')))
@@ -180,6 +212,7 @@ def automatic_tax_values(repository, year):
                                                     for row in originals), Decimal())
         values[target_key]['used_exemption'] = -sum((_source_number(row.get('Veränderung FSA'))
                                                      for row in originals), Decimal())
+        values[target_key]['documented_used_exemption'] = values[target_key]['used_exemption']
         values[target_key]['taxable_after_fsa'] = sum((_source_number(row.get('BMG nach FSA'))
                                                        for row in originals), Decimal())
         values[target_key]['taxes'] = -sum((_source_number(row.get('Summe Steuern'))
@@ -284,11 +317,29 @@ def tax_overview(repository, year):
         total['taxes'] = selected('taxes', booked_taxes)
         total['solidarity_surcharge'] = selected('solidarity_surcharge', booked_solidarity)
         booked_partial = total['partial_exemption']
-        booked_used = total['used_exemption']
         total['partial_exemption'] = selected('partial_exemption', booked_partial)
-        calculated_used = min(total['exemption'], max(Decimal(), total['capital_income'] - total['partial_exemption']))
-        total['used_exemption'] = selected('used_exemption', booked_used or calculated_used)
+        institution_keys = [key for key, record in by_key.items()
+                            if account_institution(record, by_key) == institution]
+        loss_offset = sum((automatic.get(key, {}).get('loss_offset', Decimal())
+                           for key in institution_keys), Decimal())
+        loss_known = all(automatic.get(key, {}).get('loss_offset_known', True)
+                         for key in institution_keys)
+        taxable_known = all(automatic.get(key, {}).get('taxable_income_known', True)
+                            for key in institution_keys)
+        documented_values = [automatic.get(key, {}).get('documented_used_exemption')
+                             for key in institution_keys]
+        documented_values = [value for value in documented_values if value is not None]
+        calculation = calculate_fsa(
+            total['exemption'], total['capital_income'], loss_offset=loss_offset,
+            taxable_known=taxable_known, loss_offset_known=loss_known,
+            documented_used=sum(documented_values, Decimal()) if documented_values else None)
+        manual_used = saved.get('used_exemption', '') if saved else ''
+        total['used_exemption'] = (_number(manual_used) if manual_used not in (None, '')
+                                   else calculation['used_exemption'])
         total['remaining_exemption'] = max(Decimal(), total['exemption'] - total['used_exemption'])
+        total['taxable_after_fsa'] = calculation['taxable_after_fsa']
+        total['documented_used_exemption'] = calculation['documented_used_exemption']
+        total['fsa_status'] = ('manuell erfasst' if manual_used not in (None, '') else calculation['status'])
         total.update(booked_capital_income=booked_capital, booked_taxes=booked_taxes,
                      booked_solidarity_surcharge=booked_solidarity,
                      manual_capital_income=saved.get('capital_income', '') if saved else '',
@@ -320,12 +371,12 @@ class TaxOverviewDialog(QDialog):
                       'steuerpflichtige Verbrauch mindert den Freistellungsauftrag.')
         hint.setWordWrap(True); root.addWidget(hint)
         root.addWidget(QLabel('<b>Erfassung je Institut</b>'))
-        self.institutions = QTableWidget(0, 17)
+        self.institutions = QTableWidget(0, 19)
         self.institutions.setHorizontalHeaderLabels(('Institut', 'Konten', 'Freistellungsauftrag',
             'Zinsen / Dividenden gebucht', 'Vorabpauschale', 'davon steuerpflichtig',
             'Kapitalerträge gebucht', 'Kapitalerträge manuell', 'Steuern gebucht', 'Steuern manuell',
             'Soli gebucht', 'Soli manuell', 'Teilfreistellung', 'Verbraucht manuell',
-            'Verbraucht', 'Verbleibend', 'Notiz'))
+            'Verbraucht', 'Verbleibend', 'Notiz', 'BMG nach FSA', 'FSA-Status'))
         self.institutions.setAlternatingRowColors(True); root.addWidget(self.institutions, 1)
         root.addWidget(QLabel('<b>Herkunft der automatisch ermittelten Werte</b>'))
         self.accounts = QTableWidget(0, 10)
@@ -352,7 +403,8 @@ class TaxOverviewDialog(QDialog):
                 values['manual_capital_income'], _money(values['booked_taxes']), values['manual_taxes'],
                 _money(values['booked_solidarity_surcharge']), values['manual_solidarity_surcharge'],
                 _money(values['partial_exemption']), values['manual_used_exemption'],
-                _money(values['used_exemption']), _money(values['remaining_exemption']), values['note'])
+                _money(values['used_exemption']), _money(values['remaining_exemption']), values['note'],
+                _money(values['taxable_after_fsa']), values['fsa_status'])
             for c, value in enumerate(row_values):
                 item = QTableWidgetItem(str(value))
                 if c not in (2, 7, 9, 11, 12, 13, 16):

@@ -6,6 +6,7 @@ from portfolio_v5.models import BankTransaction, ImportBatch, TaxEvent
 from portman.repository_v09 import RepositoryV09
 from portman.tax_annual_summary import (METRICS, TaxAnnualSummaryDialog,
                                        aggregate_tax_annual_rows, tax_annual_summaries)
+from portman.tax_overview import calculate_fsa
 
 
 def _write(path):
@@ -91,8 +92,8 @@ def test_shared_institution_fsa_is_subtracted_once_for_multiple_accounts(tmp_pat
         assert len(rows) == 2
         assert all(row['portman']['remaining_exemption'] is None for row in rows)
         _bank, portman = aggregate_tax_annual_rows(rows)
-        assert portman['used_exemption'] == Decimal('200.80')
-        assert portman['remaining_exemption'] == Decimal('210.20')
+        assert portman['used_exemption'] == Decimal('208.74')
+        assert portman['remaining_exemption'] == Decimal('202.26')
         assert portman['remaining_exemption'] != Decimal('621.20')
     finally:
         repo.close()
@@ -152,3 +153,51 @@ def test_fsa_is_separate_by_institution_and_year_and_unknown_stays_unknown(tmp_p
         assert unknown['portman']['remaining_exemption'] is None
     finally:
         repo.close()
+
+
+def test_automatic_fsa_uses_complete_taxable_basis_without_csv_or_double_partial_exemption(tmp_path):
+    repo = RepositoryV09(tmp_path / 'automatic.sqlite', backups=False)
+    try:
+        repo.save_account('Depot', {'kind': 'Depot', 'institution': 'comdirect'})
+        repo.save_account('Cash', {'kind': 'Girokonto', 'institution': 'comdirect'})
+        repo.save_institution_tax_record('comdirect', 2026, exemption='411')
+        repo.commit_batches([ImportBatch('tax facts', 'tax facts', tax_events=[
+            TaxEvent('advance', 'Depot', 'vorabpauschale_ausland', '2026-01-02', tax_year='2026',
+                     taxable_income='192.24', partial_exemption_amount='82.41', loss_offset='0.00'),
+            TaxEvent('funds', 'Depot', 'investment_ausschuettung_inland', '2026-09-15', tax_year='2026',
+                     taxable_income='314.33', partial_exemption_amount='134.71', loss_offset='0.00'),
+            TaxEvent('shares', 'Depot', 'dividende_inland', '2026-05-08', tax_year='2026',
+                     taxable_income='8.56', loss_offset='0.00')], transactions=[
+            BankTransaction('Cash', 'interest', '2026-09-30', 'INTEREST', '7.94', 'EUR')])])
+
+        rows = tax_annual_summaries(repo, 2026)
+        _bank, portman = aggregate_tax_annual_rows(rows)
+        calculation = rows[0]['fsa_calculation']
+        assert calculation['taxable_income'] == Decimal('523.07')
+        assert calculation['used_exemption'] == portman['used_exemption'] == Decimal('411.00')
+        assert calculation['remaining_exemption'] == portman['remaining_exemption'] == Decimal('0')
+        assert calculation['taxable_after_fsa'] == Decimal('112.07')
+        assert calculation['status'] == 'aus Portman-Steuerdaten berechnet'
+        assert repo._imported_tax_detail_records(tax_year=2026) == []
+    finally:
+        repo.close()
+
+
+def test_fsa_calculation_applies_losses_before_fsa_and_preserves_known_zero():
+    partial = calculate_fsa('411', '300', loss_offset='50')
+    assert partial['eligible_income'] == Decimal('250')
+    assert partial['used_exemption'] == Decimal('250')
+    assert partial['remaining_exemption'] == Decimal('161')
+    assert partial['taxable_after_fsa'] == Decimal('0')
+
+    zero = calculate_fsa('411', '0', loss_offset='0', documented_used='0.00')
+    assert zero['used_exemption'] == Decimal('0')
+    assert zero['remaining_exemption'] == Decimal('411')
+    assert zero['documented_used_exemption'] == Decimal('0.00')
+    assert zero['status'] == 'bankseitig nachgewiesen'
+
+    qualified = calculate_fsa('411', '523.07', loss_offset='0', loss_offset_known=False)
+    assert qualified['used_exemption'] == Decimal('411')
+    assert qualified['taxable_after_fsa'] == Decimal('112.07')
+    assert not qualified['complete']
+    assert 'nicht vollständig' in qualified['status']
