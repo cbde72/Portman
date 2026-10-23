@@ -510,16 +510,39 @@ class RepositoryV09(RepositoryV07):
         """Project tax facts into the depot booking view without creating transactions."""
         rows = []
         for event in self.tax_events(account):
-            details = [f"Vorabpauschale Ertragsjahr {event.get('income_year') or '?'}",
-                       f"Basis {event.get('advance_tax_base') or 'unbekannt'} {event.get('currency') or 'EUR'}",
-                       f"steuerpflichtig {event.get('taxable_income') or 'unbekannt'}",
-                       f"Freistellungsauftrag {event.get('used_exemption') or '0.00'}",
-                       f"Verlustverrechnung {event.get('loss_offset') or '0.00'}",
-                       f"gezahlte Steuern {event.get('paid_taxes') or '0.00'}"]
-            rows.append(dict(event, kind='VORABPAUSCHALE', amount='0.00', affects_cash=False,
+            event_type = event.get('type', '')
+            currency = event.get('currency') or 'EUR'
+            if event_type in ('vorabpauschale', 'vorabpauschale_ausland'):
+                kind = 'VORABPAUSCHALE'
+                title = ('Vorabpauschale Ausland' if event_type == 'vorabpauschale_ausland'
+                         else 'Vorabpauschale')
+                details = [f"{title} Ertragsjahr {event.get('income_year') or '?'}",
+                           f"Basis {event.get('advance_tax_base') or 'unbekannt'} {currency}",
+                           f"steuerpflichtig {event.get('taxable_income') or 'unbekannt'}",
+                           f"Freistellungsauftrag {event.get('used_exemption') or '0.00'}",
+                           f"Verlustverrechnung {event.get('loss_offset') or '0.00'}",
+                           f"gezahlte Steuern {event.get('paid_taxes') or '0.00'}"]
+                gross_income = None
+            else:
+                labels = {
+                    'investment_ausschuettung_inland': ('DISTRIBUTION', 'Investment-Ausschüttung Inland'),
+                    'investment_ausschuettung_ausland': ('DISTRIBUTION', 'Investment-Ausschüttung Ausland'),
+                    'dividende_inland': ('DIVIDEND', 'Dividende Inland'),
+                }
+                kind, title = labels.get(event_type, ('TAX_EVENT', event_type or 'Steuerereignis'))
+                taxable = event.get('taxable_income')
+                exemption = event.get('partial_exemption_amount')
+                gross_income = (str(Decimal(str(taxable or 0)) + Decimal(str(exemption or 0)))
+                                if taxable is not None or exemption is not None else None)
+                details = [title,
+                           f"Brutto {gross_income or 'unbekannt'} {currency}",
+                           f"Teilfreistellung {exemption if exemption is not None else 'unbekannt'}",
+                           f"steuerpflichtig {taxable if taxable is not None else 'unbekannt'}",
+                           f"gezahlte Steuern {event.get('paid_taxes') if event.get('paid_taxes') is not None else 'unbekannt'}"]
+            rows.append(dict(event, kind=kind, amount='0.00', affects_cash=False,
                              value_date=event.get('date', ''), security=event.get('security_ref', ''),
                              purpose=' · '.join(details), counterparty='Steuerereignis',
-                             taxes=event.get('paid_taxes'), fees=None, gross_income=None,
+                             taxes=event.get('paid_taxes'), fees=None, gross_income=gross_income,
                              external_id=event.get('external_id', ''), tax_event=True))
         return rows
 

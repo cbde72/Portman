@@ -135,6 +135,65 @@ def test_depot_bookings_dialog_shows_advance_tax_event(tmp_path):
         repo.close()
 
 
+def test_depot_bookings_classifies_each_tax_event_by_its_actual_type(tmp_path):
+    from PySide6.QtWidgets import QApplication
+    from portfolio_v5.models import ImportBatch, TaxEvent
+    from portman.account_bookings_dialog import AccountBookingsDialog
+
+    QApplication.instance() or QApplication([])
+    depot = 'Depot 4764924'
+    events = [
+        TaxEvent(f'advance-{index}', depot, 'vorabpauschale_ausland', '2026-01-02',
+                 income_year='2025', security_ref=security, advance_tax_base='10.00',
+                 taxable_income='7.00', paid_taxes='0.00')
+        for index, security in enumerate(('IE00BKM4GZ66', 'IE00B48X4842', 'LU1681041973'), 1)
+    ] + [
+        TaxEvent('sap', depot, 'dividende_inland', '2026-05-08',
+                 security_ref='DE0007164600', taxable_income='4.49',
+                 partial_exemption_amount='0.00', paid_taxes='0.00'),
+        TaxEvent('fresenius', depot, 'dividende_inland', '2026-05-26',
+                 security_ref='DE0005785604', taxable_income='4.07',
+                 partial_exemption_amount='0.00', paid_taxes='0.00'),
+        TaxEvent('etf-inland', depot, 'investment_ausschuettung_inland', '2026-09-15',
+                 security_ref='DE000A0H0744', taxable_income='6.37',
+                 partial_exemption_amount='2.73', paid_taxes='1.67'),
+        TaxEvent('etf-foreign', depot, 'investment_ausschuettung_ausland', '2026-09-18',
+                 security_ref='IE00B1FZS350', taxable_income='20.00',
+                 partial_exemption_amount='8.00', paid_taxes='6.38'),
+    ]
+    repo = RepositoryV09(tmp_path / 'portfolio.sqlite', backups=False)
+    try:
+        repo.save_account(depot, {'kind': 'Depot', 'institution': 'comdirect'})
+        repo.commit_batches([ImportBatch('tax-events.pdf', 'tax-event-types', tax_events=events)])
+        before = (repo.transactions(), repo.holdings())
+
+        rows = repo.tax_event_bookings(depot)
+        assert [row['kind'] for row in rows].count('VORABPAUSCHALE') == 3
+        assert [row['kind'] for row in rows].count('DIVIDEND') == 2
+        assert [row['kind'] for row in rows].count('DISTRIBUTION') == 2
+        assert all('Vorabpauschale' not in row['purpose']
+                   for row in rows if row['kind'] != 'VORABPAUSCHALE')
+        assert next(row for row in rows if row['external_id'] == 'sap')['purpose'].startswith(
+            'Dividende Inland')
+        assert next(row for row in rows if row['external_id'] == 'etf-inland')['purpose'].startswith(
+            'Investment-Ausschüttung Inland')
+
+        dialog = AccountBookingsDialog(repo, depot)
+        shown = [dialog.model.item(row, 2).text() for row in range(dialog.model.rowCount())]
+        assert shown.count('VORABPAUSCHALE · nur Depot') == 3
+        assert shown.count('DIVIDEND · nur Depot') == 2
+        assert shown.count('DISTRIBUTION · nur Depot') == 2
+        dialog.close()
+
+        tax_kinds = {row['linked_tax_event_id']: row['original_values']['Vorgang']
+                     for row in repo.tax_detail_records()}
+        assert tax_kinds['sap'] == 'Dividende Inland'
+        assert tax_kinds['etf-inland'] == 'Investment-Ausschüttung Inland'
+        assert (repo.transactions(), repo.holdings()) == before == ([], [])
+    finally:
+        repo.close()
+
+
 def test_duplicate_advance_tax_is_not_counted_twice(tmp_path):
     repo = RepositoryV09(tmp_path / 'portfolio.sqlite', backups=False)
     try:
