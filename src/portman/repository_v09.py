@@ -429,6 +429,8 @@ class RepositoryV09(RepositoryV07):
             'SELECT id,path FROM imports WHERE active=1')}
         tax_events = self.tax_events()
         transactions = self.transactions()
+        from .tax_matching import match_tax_events
+        economic_matches = match_tax_events(self, tax_events, transactions)
         result, seen = [], set()
         for record in self.store.model_records(kind='tax_details'):
             row = dict(record['payload'])
@@ -462,11 +464,28 @@ class RepositoryV09(RepositoryV07):
                     and tx.get('date') in (tax_day, booking_day)
                     and (reference_no and reference_no in ' '.join(str(tx.get(k) or '') for k in
                          ('transaction_reference', 'bank_reference', 'document_reference', 'purpose', 'booking_text')))]
-            if len(candidates) == 1 and candidates[0].get('related_transaction_id'):
-                related = [tx for tx in transactions
-                           if tx.get('external_id') == candidates[0]['related_transaction_id']]
-                if len(related) == 1:
-                    cash = related
+            if len(candidates) == 1:
+                economic = economic_matches.get(candidates[0].get('external_id'))
+                if economic is not None:
+                    cash = [economic]
+                elif candidates[0].get('related_transaction_id'):
+                    related = [tx for tx in transactions
+                               if tx.get('external_id') == candidates[0]['related_transaction_id']]
+                    if len(related) == 1:
+                        cash = related
+            # Interest CSV rows have no security.  Link only one same-day
+            # interest booking with the identical documented gross amount.
+            if not cash and 'zins' in values.get('Vorgang', '').casefold():
+                try:
+                    csv_gross = abs(Decimal(values.get('Betrag Brutto', '').replace('.', '').replace(',', '.')))
+                except Exception:
+                    csv_gross = None
+                interest_cash = [tx for tx in transactions
+                    if tx.get('kind') == 'INTEREST' and tx.get('date') in (tax_day, booking_day)
+                    and csv_gross is not None
+                    and abs(Decimal(str(tx.get('gross_income') or tx.get('amount') or 0))) == csv_gross]
+                if len(interest_cash) == 1:
+                    cash = interest_cash
             linked_event = candidates[0] if len(candidates) == 1 else {}
             depot_details = json.loads(target.get('details') or '{}')
             cash_key = linked_event.get('cash_account') or depot_details.get('cash_account_key') or ''
@@ -487,7 +506,7 @@ class RepositoryV09(RepositoryV07):
                        linked_tax_event_id=linked_event.get('external_id', ''),
                        linked_transaction_id=(reference(cash[0]) if len(cash) == 1 else ''),
                        match_status=('ambiguous' if len(candidates) > 1 or len(cash) > 1 else
-                                     'matched' if len(candidates) == 1 else 'unmatched'))
+                                     'matched' if len(candidates) == 1 or len(cash) == 1 else 'unmatched'))
             if account and account_key(row['account']) != account_key(account):
                 continue
             if tax_year is not None and row['tax_year'] != str(tax_year):

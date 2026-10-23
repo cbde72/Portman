@@ -7,6 +7,7 @@ from portfolio_v5.comdirect_tax_detail import COLUMNS, date_value
 from .institutions import account_institution
 from .income_basis import gross_income_amount
 from .repository_v09 import reference
+from .tax_matching import match_tax_events
 
 
 def _de(value):
@@ -30,6 +31,8 @@ def _blank():
 
 
 def _security(repository, value):
+    if not str(value or '').strip():
+        return '', ''
     row = repository.db.execute(
         'SELECT canonical_name,isin,wkn FROM security_master WHERE security_key=? OR isin=? OR wkn=?',
         (value, value, value)).fetchone()
@@ -77,7 +80,8 @@ def _event_values(repository, event):
     kind = labels.get(event_type, event_type or 'Steuerereignis')
     distribution = (str(event_type or '').startswith('investment_ausschuettung_')
                     or event_type == 'dividende_inland')
-    gross = ((Decimal(str(event.get('taxable_income') or 0))
+    gross = ((Decimal(str(event['gross_income'])) if event.get('gross_income') is not None else
+              Decimal(str(event.get('taxable_income') or 0))
               + Decimal(str(event.get('partial_exemption_amount') or 0))) if distribution
              else event.get('advance_tax_base'))
     net = ((gross - Decimal(str(event.get('paid_taxes') or 0))) if distribution else
@@ -131,6 +135,10 @@ def _transaction_values(repository, tx, realized=None):
     if tx['kind'] in ('DIVIDEND', 'DISTRIBUTION', 'INTEREST') and gross is not None:
         values['Gewinn/Verlust'] = _de(gross)
         values['Gewinn Sonstige'] = _de(gross)
+        if tx['kind'] == 'INTEREST':
+            values['BMG nach VV'] = _de(gross)
+            values['BMG nach FSA'] = _de(gross)
+            values['Steuerbemessungsgrundlage'] = _de(gross)
     if tx['kind'] == 'SELL' and realized is not None:
         values['Gewinn/Verlust'] = _de(realized)
     return values
@@ -163,6 +171,10 @@ def automatic_tax_detail_records(repository, imported):
         result.append(item)
     events = repository.tax_events()
     all_transactions = repository.transactions()
+    matched_cash = match_tax_events(repository, events, all_transactions)
+    matched_by_ref = {reference(tx): next(event for event in events
+                                          if event.get('external_id') == event_id)
+                      for event_id, tx in matched_cash.items()}
     by_external = {tx.get('external_id'): tx for tx in all_transactions if tx.get('external_id')}
     fee_to_aux = {row['fee_ref']: row['aux_ref'] for row in repository.fee_links()}
     event_by_aux = {}
@@ -177,16 +189,19 @@ def automatic_tax_detail_records(repository, imported):
     for event in events:
         if event.get('external_id') in linked_events:
             continue
-        if event in event_by_aux.values():
-            continue
         account = event['account']; key = account_key(account); record = records.get(key, {})
         values = _event_values(repository, event)
+        cash_tx = matched_cash.get(event.get('external_id'))
+        cash_ref = reference(cash_tx) if cash_tx else ''
+        if cash_tx:
+            values['Referenznummer'] = (cash_tx.get('transaction_reference') or
+                                        cash_tx.get('bank_reference') or cash_tx.get('external_id', ''))
         provenance = {column: {'status': 'document', 'source': event.get('source', '')}
                       for column in COLUMNS if values[column] != ''}
         result.append(_row(values, external_id='auto-event:'+event['external_id'],
             institution=account_institution(record, records), account=account,
             source_format='automatic_tax_event_v1', source=event.get('source', ''),
-            linked_event=event['external_id'], provenance=provenance))
+            linked_event=event['external_id'], linked_transaction=cash_ref, provenance=provenance))
     related = {event.get('related_transaction_id') for event in events
                if event.get('related_transaction_id')}
     from .analysis_v09 import realized_profit
@@ -203,7 +218,7 @@ def automatic_tax_detail_records(repository, imported):
         ref = reference(tx)
         # A related dividend is the primary detail row and must be enriched by
         # its tax event.  Legacy related TAX rows remain suppressed.
-        if ref in linked_transactions or (tx.get('external_id') in related and ref not in event_by_aux):
+        if ref in linked_transactions or ref in matched_by_ref or (tx.get('external_id') in related and ref not in event_by_aux):
             continue
         gains = realized_index.get((account_key(tx['account']), tx['date'], tx.get('security', ''),
                                     abs(Decimal(str(tx['amount'])))), [])

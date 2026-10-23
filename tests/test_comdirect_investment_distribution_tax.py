@@ -82,7 +82,7 @@ def test_reference_notice_is_structured_without_second_distribution():
     assert (event.security_ref, event.quantity, event.date, event.document_date) == (
         'DE000A0H0744', '27.051', '2026-09-15', '2026-09-15')
     assert (event.partial_exemption_rate, event.partial_exemption_amount,
-            event.taxable_income) == ('30', '2.73', '6.37')
+            event.taxable_income, event.gross_income) == ('30', '2.73', '6.37', '9.10')
     assert (event.capital_gains_tax, event.solidarity_surcharge,
             event.church_tax, event.paid_taxes) == ('1.59', '0.08', '0.00', '1.67')
     assert (tax.kind, tax.amount, tax.taxes, tax.account) == (
@@ -117,8 +117,8 @@ def test_domestic_share_dividend_tax_notice_preserves_documented_zeroes():
     event = batch.tax_events[0]
     assert (event.type, event.security_ref, event.quantity) == (
         'dividende_inland', 'DE0005785604', '3.878')
-    assert (event.taxable_income, event.used_exemption, event.paid_taxes) == (
-        '4.07', '4.07', '0.00')
+    assert (event.taxable_income, event.used_exemption, event.paid_taxes, event.gross_income) == (
+        '4.07', '4.07', '0.00', '4.07')
     assert (event.capital_gains_tax, event.solidarity_surcharge,
             event.church_tax) == ('0.00', '0.00', '0.00')
     assert batch.documents[0].content_b64
@@ -218,7 +218,7 @@ def test_sqlite_integration_maps_links_and_is_idempotent_in_both_orders(tmp_path
         values = automatic_tax_values(repo, 2026)['depot 4764924']
         assert (values['capital_income'], values['dividends'], values['taxes'],
                 values['partial_exemption']) == (
-                    Decimal('9.10'), Decimal('7.43'), Decimal('1.67'), Decimal('2.73'))
+                    Decimal('6.37'), Decimal('7.43'), Decimal('1.67'), Decimal('2.73'))
 
         details = [row for row in repo.tax_detail_records()
                    if row['original_values']['Referenznummer'] == '0S5C29F709I0G']
@@ -246,6 +246,23 @@ def test_sqlite_integration_maps_links_and_is_idempotent_in_both_orders(tmp_path
             'SELECT COUNT(*) FROM bank_documents',
             "SELECT COUNT(*) FROM import_model_records WHERE kind='tax_events'"))
         assert counts_after == counts_before
+    finally:
+        repo.close()
+
+
+def test_tax_detail_and_overview_match_without_persisted_fee_link(tmp_path):
+    repo = _integration_repo(tmp_path / 'without-fee-link.sqlite')
+    try:
+        repo.commit_batches([_tax_batch(), _finance_batch()])
+        repo.db.execute('DELETE FROM fee_links')
+        repo.db.commit()
+
+        values = automatic_tax_values(repo, 2026)['depot 4764924']
+        assert (values['capital_income'], values['taxes']) == (Decimal('6.37'), Decimal('1.67'))
+        relevant = [row for row in repo.tax_detail_records()
+                    if row.get('linked_tax_event_id')]
+        assert len(relevant) == 1
+        assert relevant[0]['linked_transaction_id']
     finally:
         repo.close()
 

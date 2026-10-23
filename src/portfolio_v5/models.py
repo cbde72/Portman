@@ -289,6 +289,10 @@ class TaxEvent:
     security_ref: str = ''
     quantity: str | None = None
     currency: str = 'EUR'
+    # Original gross amount printed on the tax notice.  This is deliberately
+    # optional so historic imports remain readable; consumers may fall back
+    # to taxable income plus partial exemption only when it is absent.
+    gross_income: str | None = None
     taxable_income: str | None = None
     advance_tax_base: str | None = None
     partial_exemption_amount: str | None = None

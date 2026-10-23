@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QDialog, QDialogButtonBox, QHB
 from portfolio_v5.accounts import account_key
 from .institutions import account_institution
 from .income_basis import dividend_amounts, gross_income_amount
+from .repository_v09 import reference
 
 
 def _number(value):
@@ -29,16 +30,45 @@ def _source_number(value):
 
 
 def automatic_tax_values(repository, year):
-    """Return booked gross investment income and taxes per account key."""
+    """Return taxable income and actually withheld taxes per account key.
+
+    PDF tax events are the authoritative tax basis.  Their corresponding
+    cash bookings remain the authoritative net receipts, but are not counted
+    a second time.  An imported bank tax-detail export is an authoritative
+    reference for the institution totals it covers.
+    """
     records = {row['account_key']: row for row in repository.account_records()}
     name_keys = {account_key(row['name']): row['account_key'] for row in records.values()}
-    linked = {row['fee_ref'] for row in repository.fee_links()} if hasattr(repository, 'fee_links') else set()
     values = defaultdict(lambda: {'interest': Decimal(), 'dividends': Decimal(), 'capital_income': Decimal(),
                                    'taxes': Decimal(), 'withholding_tax': Decimal(),
                                    'solidarity_surcharge': Decimal(), 'partial_exemption': Decimal(),
                                    'used_exemption': Decimal(), 'advance_tax_base': Decimal(),
+                                   'taxable_after_fsa': Decimal(),
                                    'advance_tax_taxable': Decimal(), 'advance_tax_count': 0})
-    for tx in repository.transactions():
+    transactions = repository.transactions()
+    events = repository.tax_events() if hasattr(repository, 'tax_events') else []
+    if not events:
+        store = getattr(repository, 'store', None)
+        if store is not None and hasattr(store, 'model_records'):
+            links, mappings = store._import_links(), store._depot_mappings()
+            for model_record in store.model_records(kind='tax_events'):
+                event = dict(model_record['payload'])
+                source_key = account_key(event.get('account', ''))
+                target_key = links.get((model_record['import_id'], source_key), mappings.get(source_key, source_key))
+                if target_key in records:
+                    event['account'] = records[target_key]['name']
+                events.append(event)
+    from .tax_matching import match_tax_events
+    event_cash = match_tax_events(repository, events, transactions) if events and hasattr(repository, 'db') else {}
+    def tx_ref(tx):
+        try:
+            return reference(tx)
+        except KeyError:
+            return tx.get('external_id') or id(tx)
+    matched_refs = {tx_ref(tx) for tx in event_cash.values()}
+    event_aux_ids = {event.get('related_transaction_id') for event in events
+                     if event.get('related_transaction_id')}
+    for tx in transactions:
         if tx.get('date', '')[:4] != str(year):
             continue
         # Only the booked amounts enter these sums; a foreign-currency
@@ -60,13 +90,14 @@ def automatic_tax_values(repository, year):
         if kind in ('DIVIDEND', 'DISTRIBUTION'):
             taxes = abs(_number(tx.get('taxes')))
             _, gross = dividend_amounts(tx)
-            values[key]['capital_income'] += gross
             # The overview column shows cash actually received, matching the
             # net interest credits shown for bank accounts.
             values[key]['dividends'] += _number(tx.get('amount'))
-            values[key]['taxes'] += taxes
-            values[key]['withholding_tax'] += abs(_number(tx.get('withholding_tax')))
-            values[key]['solidarity_surcharge'] += solidarity
+            if tx_ref(tx) not in matched_refs:
+                values[key]['capital_income'] += gross
+                values[key]['taxes'] += taxes
+                values[key]['withholding_tax'] += abs(_number(tx.get('withholding_tax')))
+                values[key]['solidarity_surcharge'] += solidarity
         elif kind == 'INTEREST':
             interest = gross_income_amount(tx) or _number(tx.get('amount'))
             values[key]['interest'] += interest
@@ -75,69 +106,81 @@ def automatic_tax_values(repository, year):
             values[key]['withholding_tax'] += abs(_number(tx.get('withholding_tax')))
             values[key]['solidarity_surcharge'] += solidarity
         elif kind == 'TAX':
-            try:
-                from .repository_v09 import reference
-                if reference(tx) in linked:
-                    continue
-            except KeyError:
-                pass
+            if tx.get('external_id') in event_aux_ids or not tx.get('affects_cash', True):
+                continue
             values[key]['taxes'] += abs(_number(tx.get('amount')))
             if 'solidaritätszuschlag' in (tx.get('purpose') or '').casefold():
                 values[key]['solidarity_surcharge'] += abs(_number(tx.get('amount')))
-    store = getattr(repository, 'store', None)
-    if store is None or not hasattr(store, 'model_records'):
-        return dict(values)
-    links = store._import_links()
-    mappings = store._depot_mappings()
     seen_events = set()
-    for record in store.model_records(kind='tax_events'):
-        event = record['payload']
+    for event in events:
         event_type = event.get('type')
         if event_type not in ('vorabpauschale', 'vorabpauschale_ausland',
-                              'investment_ausschuettung_inland', 'investment_ausschuettung_ausland') or str(
+                              'investment_ausschuettung_inland', 'investment_ausschuettung_ausland',
+                              'dividende_inland') or str(
                 event.get('tax_year') or event.get('date', '')[:4]) != str(year):
             continue
         identity = event.get('external_id') or (event.get('account'), event.get('date'), event.get('security_ref'))
         if identity in seen_events:
             continue
         seen_events.add(identity)
-        source_key = account_key(event.get('account', ''))
-        key = links.get((record['import_id'], source_key), mappings.get(source_key, source_key))
+        key = name_keys.get(account_key(event.get('account', '')), account_key(event.get('account', '')))
         if key not in records or (event.get('currency') or 'EUR') != 'EUR':
             continue
-        if event_type.startswith('investment_ausschuettung_'):
-            values[key]['partial_exemption'] += abs(_number(event.get('partial_exemption_amount')))
+        taxable = abs(_number(event.get('taxable_income')))
+        partial = abs(_number(event.get('partial_exemption_amount')))
+        values[key]['capital_income'] += taxable
+        values[key]['partial_exemption'] += partial
+        values[key]['used_exemption'] += abs(_number(event.get('used_exemption')))
+        values[key]['taxes'] += abs(_number(event.get('paid_taxes')))
+        values[key]['solidarity_surcharge'] += abs(_number(event.get('solidarity_surcharge')))
+        if not event_type.startswith('vorabpauschale'):
             continue
         base = abs(_number(event.get('advance_tax_base')))
-        taxable = abs(_number(event.get('taxable_income')))
         values[key]['advance_tax_base'] += base
         values[key]['advance_tax_taxable'] += taxable
-        values[key]['advance_tax_count'] += 1
-        values[key]['capital_income'] += base
-        partial = abs(_number(event.get('partial_exemption_amount')))
-        values[key]['partial_exemption'] += partial if partial else max(Decimal(), base - taxable)
-        values[key]['used_exemption'] += abs(_number(event.get('used_exemption')))
-    # CSV rows are a fallback source.  A linked PDF event is richer and wins,
-    # preventing the same Vorabpauschale from being counted twice.
-    if hasattr(repository, 'tax_detail_records'):
-        keys_by_name = {account_key(row['name']): row['account_key'] for row in records.values()}
-        for detail in repository.tax_detail_records(tax_year=year):
-            original = detail.get('original_values') or {}
-            if 'vorabpauschale' not in original.get('Vorgang', '').casefold():
-                continue
-            if detail.get('linked_tax_event_id'):
-                continue
-            key = keys_by_name.get(account_key(detail.get('account', '')))
-            if key not in records:
-                continue
-            taxable = abs(_source_number(original.get('Steuerbemessungsgrundlage')))
-            used = abs(_source_number(original.get('Veränderung FSA')))
-            taxes = abs(_source_number(original.get('Summe Steuern')))
-            values[key]['advance_tax_taxable'] += taxable
-            values[key]['advance_tax_count'] += 1
-            values[key]['capital_income'] += taxable
-            values[key]['used_exemption'] += used
-            values[key]['taxes'] += taxes
+        values[key]['advance_tax_count'] += int(taxable != 0)
+        if not partial:
+            values[key]['partial_exemption'] += max(Decimal(), base - taxable)
+
+    # A bank tax-detail CSV is the reference source for FSA, BMG after FSA,
+    # proven zero rows and actual tax.  Replace (never add to) the covered
+    # institution's calculated totals, while leaving cash display fields intact.
+    imported = (repository._imported_tax_detail_records(tax_year=year)
+                if hasattr(repository, '_imported_tax_detail_records') else [])
+    by_institution = defaultdict(list)
+    for detail in imported:
+        original = detail.get('original_values') or {}
+        if original.get('Steuerjahr', '').strip() == str(year):
+            target = records.get(name_keys.get(account_key(detail.get('account', '')), ''))
+            if target:
+                by_institution[account_institution(target, records)].append(detail)
+    for institution, details in by_institution.items():
+        institution_keys = [key for key, record in records.items()
+                            if account_institution(record, records) == institution]
+        target_key = name_keys.get(account_key(details[0].get('account', '')))
+        if not target_key:
+            continue
+        for key in institution_keys:
+            for field in ('capital_income', 'taxes', 'solidarity_surcharge', 'used_exemption',
+                          'taxable_after_fsa', 'advance_tax_taxable'):
+                values[key][field] = Decimal()
+            values[key]['advance_tax_count'] = 0
+        originals = [detail.get('original_values') or {} for detail in details]
+        values[target_key]['capital_income'] = sum((_source_number(row.get('Steuerbemessungsgrundlage'))
+                                                    for row in originals), Decimal())
+        values[target_key]['used_exemption'] = -sum((_source_number(row.get('Veränderung FSA'))
+                                                     for row in originals), Decimal())
+        values[target_key]['taxable_after_fsa'] = sum((_source_number(row.get('BMG nach FSA'))
+                                                       for row in originals), Decimal())
+        values[target_key]['taxes'] = -sum((_source_number(row.get('Summe Steuern'))
+                                            for row in originals), Decimal())
+        values[target_key]['solidarity_surcharge'] = -sum((_source_number(row.get('Solidaritätszuschlag'))
+                                                           for row in originals), Decimal())
+        advances = [row for row in originals if 'vorabpauschale' in row.get('Vorgang', '').casefold()]
+        values[target_key]['advance_tax_taxable'] = sum(
+            (_source_number(row.get('Steuerbemessungsgrundlage')) for row in advances), Decimal())
+        values[target_key]['advance_tax_count'] = sum(
+            1 for row in advances if _source_number(row.get('Steuerbemessungsgrundlage')) != 0)
     return dict(values)
 
 
@@ -155,7 +198,7 @@ def tax_overview(repository, year):
         'capital_income': Decimal(), 'taxes': Decimal(), 'withholding_tax': Decimal(),
         'solidarity_surcharge': Decimal(),
         'partial_exemption': Decimal(),
-        'used_exemption': Decimal(), 'remaining_exemption': Decimal(),
+        'used_exemption': Decimal(), 'remaining_exemption': Decimal(), 'taxable_after_fsa': Decimal(),
         'advance_tax_base': Decimal(), 'advance_tax_taxable': Decimal(),
         'advance_tax_count': 0, 'accounts': 0})
     legacy = defaultdict(lambda: {'exemption': Decimal(), 'capital_income': Decimal(),
@@ -179,6 +222,7 @@ def tax_overview(repository, year):
                    advance_tax_count=booked.get('advance_tax_count', 0),
                    partial_exemption=booked.get('partial_exemption', Decimal()),
                    used_exemption=booked.get('used_exemption', Decimal()), remaining_exemption=Decimal(),
+                   taxable_after_fsa=booked.get('taxable_after_fsa', Decimal()),
                    booked_capital_income=booked.get('capital_income', Decimal()),
                    booked_taxes=booked.get('taxes', Decimal()),
                    booked_solidarity_surcharge=booked.get('solidarity_surcharge', Decimal()),
@@ -196,6 +240,7 @@ def tax_overview(repository, year):
         total['advance_tax_count'] += row['advance_tax_count']
         total['partial_exemption'] += row['partial_exemption']
         total['used_exemption'] += row['used_exemption']
+        total['taxable_after_fsa'] += row['taxable_after_fsa']
         old = legacy[institution]
         old['exemption'] += _number(manual.get('exemption') if manual.get('exemption') not in (None, '')
                                     else details.get('exemption'))
