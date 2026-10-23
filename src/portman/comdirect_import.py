@@ -12,14 +12,16 @@ def commit_reports(job, batches, repository_type, versioned=True, backup=False):
                 results.extend({'path': b.path, 'status': 'cancelled'} for b in batches[index:])
                 break
             try:
-                result = repo.store.import_batch(batch)
+                # Keep the dedicated Finanzreport progress UI, but persist via
+                # the V09 repository boundary.  Direct Store writes bypass the
+                # reconciliation hooks for trade details and tax/dividend
+                # links, which made the outcome depend on the GUI entry point.
+                result = repo.commit_batches([batch])[0]
             except ValueError as error:
                 result = {'status': 'error', 'errors': [str(error)]}
             result.update(path=batch.path, warnings=batch.summary()['warnings'])
             results.append(result)
             job.progress.emit(index + 1, len(batches))
-        if any(r['status'] == 'imported' for r in results):
-            repo.sync_security_master()
         return results
     finally:
         repo.close()

@@ -148,7 +148,11 @@ class RepositoryV09(RepositoryV07):
         fields = ('kind', 'security', 'quantity', 'fees', 'taxes', 'gross_amount', 'price',
                   'price_currency', 'trade_date', 'pay_date', 'cash_account', 'depot_account',
                   'security_ref', 'order_id', 'venue', 'document_reference',
-                  'transaction_reference', 'fee_items', 'tax_items', 'field_sources')
+                  'transaction_reference', 'fee_items', 'tax_items', 'field_sources',
+                  'performance_depot_key')
+        links = self.store._import_links()
+        mappings = self.store._depot_mappings()
+        accounts = {row['account_key']: row for row in self.account_records() if row['active']}
         with self.db:
             for record in evidence:
                 item = dict(record['payload'])
@@ -175,6 +179,17 @@ class RepositoryV09(RepositoryV07):
                 target = matches[0]
                 details = {field: item.get(field) for field in fields
                            if item.get(field) not in (None, '', [], {})}
+                source_depot = account_key(item.get('depot_account', ''))
+                depot_key = links.get(
+                    (record['import_id'], source_depot), mappings.get(source_depot, source_depot))
+                depot = accounts.get(depot_key)
+                depot_details = json.loads(depot['details']) if depot else {}
+                cash_keys = {value for value in (
+                    depot_details.get('cash_account_key'),
+                    *(depot_details.get('cash_account_keys') or [])) if value}
+                if (depot_details.get('kind') == 'Depot'
+                        and account_key(target.get('account', '')) in cash_keys):
+                    details['performance_depot_key'] = depot_key
                 current = self.db.execute(
                     'SELECT payload,source_hash FROM booking_details WHERE transaction_id=?',
                     (target['id'],)).fetchone()

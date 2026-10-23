@@ -257,7 +257,15 @@ class ImportSession:
         for i,b in enumerate(selected):
             if job.isInterruptionRequested(): raise ValueError('Import abgebrochen; keine Änderungen gespeichert.')
             if b.errors: raise ValueError('; '.join(b.errors))
-            result=repo.store.import_batch(b); result['path']=b.path; results.append(result)
+            # The guided V09 import must use the repository boundary too.  A
+            # direct Store import persists the source rows, but skips V09's
+            # post-processing (trade evidence -> booking_details and tax
+            # notice -> dividend/fee_links reconciliation).  Calling the
+            # repository here remains inside the surrounding atomic
+            # transaction and also retries deferred links after every source,
+            # which makes either document order converge to the same state.
+            result=repo.commit_batches([b])[0]
+            result['path']=b.path; results.append(result)
             if result['status']=='error': raise ValueError('; '.join(result.get('errors',[])))
             for key,old,reason,new_id in replacements:
                 if key[0]!=i: continue

@@ -1,4 +1,5 @@
 from copy import deepcopy
+from types import SimpleNamespace
 
 import pytest
 
@@ -6,6 +7,8 @@ from portfolio_v5.accounts import account_key
 from portfolio_v5.models import (BankTransaction, FeeItem, ImportBatch, Kind,
                                  Position, SecurityInfo, Snapshot, TaxEvent)
 from portfolio_v5.settlement import performance_transactions
+from portman.comdirect_import import commit_reports
+from portman.import_v09 import ImportSession, transaction
 from portman.repository_v09 import RepositoryV09
 
 
@@ -137,5 +140,62 @@ def test_zero_tax_regular_dividend_links_to_statement_without_fee_link(tmp_path)
         assert repo.fee_links() == []
         assert len([row for row in repo.tax_detail_records()
                     if row.get('linked_tax_event_id') == 'sap-tax-event']) == 1
+    finally:
+        repo.close()
+
+
+@pytest.mark.parametrize('order', ('finance-first', 'notices-first'))
+def test_guided_gui_apply_persists_trade_details_in_both_orders(tmp_path, order):
+    """Exercise both storage paths used by the two V09 import previews."""
+    path = tmp_path / ('gui-' + order + '.sqlite')
+    repo = repository(path)
+    repo.close()
+    job = SimpleNamespace(
+        path=str(path),
+        isInterruptionRequested=lambda: False,
+        progress=SimpleNamespace(emit=lambda *_args: None))
+    finance = finance_batch()
+    notices = trade_batches()
+    for notice in notices:
+        notice.account_assignments = {'depot 476492400': account_key(DEPOT)}
+
+    def apply_notices(batches):
+        current = RepositoryV09(str(path), backups=False)
+        try:
+            with transaction(current, commit=True):
+                return ImportSession.apply(None, current, job, (deepcopy(batches), []))
+        finally:
+            current.close()
+
+    if order == 'finance-first':
+        results = commit_reports(job, [deepcopy(finance)], RepositoryV09)
+        results.extend(apply_notices(notices))
+    else:
+        results = apply_notices(notices)
+        results.extend(commit_reports(job, [deepcopy(finance)], RepositoryV09))
+
+    repo = RepositoryV09(str(path), backups=False)
+    try:
+        assert all(result['status'] == 'imported' for result in results)
+        assert repo.db.execute('SELECT COUNT(*) FROM transactions').fetchone()[0] == 3
+        assert repo.db.execute('SELECT COUNT(*) FROM booking_details').fetchone()[0] == 3
+        assert {tx['security']: tx['fees'] for tx in repo.transactions()} == {
+            isin: fee for _wkn, isin, _day, _valuta, _qty, _price, _gross, fee, _total in TRADES}
+        assert {tx['performance_depot_key'] for tx in repo.transactions()} == {
+            account_key(DEPOT)}
+
+        counts = tuple(repo.db.execute(query).fetchone()[0] for query in (
+            'SELECT COUNT(*) FROM imports WHERE active=1',
+            'SELECT COUNT(*) FROM transactions',
+            'SELECT COUNT(*) FROM booking_details'))
+        repo.close()
+        repeated = commit_reports(job, [deepcopy(finance)], RepositoryV09)
+        repeated.extend(apply_notices(notices))
+        repo = RepositoryV09(str(path), backups=False)
+        assert all(result['status'] == 'duplicate' for result in repeated)
+        assert counts == tuple(repo.db.execute(query).fetchone()[0] for query in (
+            'SELECT COUNT(*) FROM imports WHERE active=1',
+            'SELECT COUNT(*) FROM transactions',
+            'SELECT COUNT(*) FROM booking_details'))
     finally:
         repo.close()
