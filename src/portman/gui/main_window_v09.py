@@ -133,6 +133,7 @@ class MainWindowV09Mixin:
             ("CSV mit Profil importieren", self.profile_import),
             ("comdirect-Steuerdetails importieren", self.comdirect_tax_detail_import),
             ("Steuerliche Detailansicht", self.open_tax_detail_view),
+            ("Steuerliche Jahresübersicht", self.open_tax_annual_summary),
             ("Umbuchungen / Kapitalmaßnahmen / Wechselkurse", self.open_actions),
             ("Zurück", self.go_back),
         ]:
@@ -634,6 +635,10 @@ class MainWindowV09Mixin:
     def open_tax_detail_view(self):
         from portman.tax_detail_view import TaxDetailDialog
         TaxDetailDialog(self.repository, self).exec()
+
+    def open_tax_annual_summary(self):
+        from portman.tax_annual_summary import TaxAnnualSummaryDialog
+        TaxAnnualSummaryDialog(self.repository, self).exec()
 
     def excel_import(self):
         from portman.excel_import_dialog import ExcelImportDialog

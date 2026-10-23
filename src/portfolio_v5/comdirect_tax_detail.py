@@ -63,6 +63,11 @@ def parse_comdirect_tax_detail(path, account=None):
     metadata = {row[0].strip().rstrip(':'): row[1].strip() for row in rows[:header_index]
                 if len(row) >= 2 and row[0].strip() and row[1].strip()}
     institution = metadata.get('Institut', metadata.get('Kreditinstitut', 'comdirect'))
+    created = metadata.get('Export erstellt am', metadata.get('Erstellt am', ''))
+    try:
+        source_date = datetime.strptime(created.split(' Uhr')[0].strip(), '%d.%m.%Y %H:%M').date().isoformat()
+    except (ValueError, AttributeError):
+        source_date = ''
     source_account = account or f"comdirect Steuerdaten {Path(path).stem.split('_')[-2] if '_' in Path(path).stem else ''}".strip()
     records = []
     for number, row in enumerate(rows[header_index + 1:], start=header_index + 2):
@@ -77,6 +82,8 @@ def parse_comdirect_tax_detail(path, account=None):
             external_id=stable_identity(source_account, values), institution=institution,
             account=source_account, source_format='comdirect_tax_detail_v1',
             original_values=values, source_reference=values['Referenznummer'].strip()))
+        records[-1].source_date = source_date
+        records[-1].source_name = Path(path).name
     if not records:
         raise ValueError('Der comdirect-Steuerexport enthält keine Buchungen.')
     return ImportBatch(path=str(Path(path)), file_hash=hashlib.sha256(raw).hexdigest(),

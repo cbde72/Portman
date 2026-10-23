@@ -135,6 +135,13 @@ def test_complete_rows_and_columns_can_be_selected_and_copied():
     table.close()
 
 
+def test_default_table_context_menu_contains_copy_and_select_all():
+    table = table_with([['A', '1']])
+    assert table.contextMenuPolicy() == Qt.ContextMenuPolicy.ActionsContextMenu
+    assert [action.text() for action in table.actions()[-2:]] == ['Kopieren', 'Alles auswählen']
+    table.close()
+
+
 def test_tabular_tree_uses_the_same_global_copy_support():
     tree = QTreeWidget()
     tree.setColumnCount(2)

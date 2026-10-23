@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QObject, Qt
-from PySide6.QtGui import QKeyEvent, QKeySequence
+from PySide6.QtGui import QAction, QKeyEvent, QKeySequence
 from PySide6.QtWidgets import QApplication, QLabel, QTableView, QTreeView, QWidget
 
 
@@ -22,6 +22,19 @@ def configure_copy_widget(widget):
         widget.setProperty("portmanCopyEnabled", True)
         widget.setSelectionBehavior(widget.SelectionBehavior.SelectItems)
         widget.setSelectionMode(widget.SelectionMode.ExtendedSelection)
+        copy_action = QAction('Kopieren', widget)
+        copy_action.setShortcut(QKeySequence.StandardKey.Copy)
+        copy_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        copy_action.triggered.connect(
+            lambda checked=False, table=widget: __import__(
+                'portman.table_copy', fromlist=['copy_selected_cells']).copy_selected_cells(table))
+        select_action = QAction('Alles auswählen', widget)
+        select_action.setShortcut(QKeySequence.StandardKey.SelectAll)
+        select_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        select_action.triggered.connect(widget.selectAll)
+        widget.addActions((copy_action, select_action))
+        if widget.contextMenuPolicy() == Qt.ContextMenuPolicy.DefaultContextMenu:
+            widget.setContextMenuPolicy(Qt.ContextMenuPolicy.ActionsContextMenu)
     elif isinstance(widget, QLabel):
         if widget.property("portmanTextSelectable"):
             return
