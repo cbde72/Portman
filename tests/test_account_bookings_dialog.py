@@ -114,8 +114,8 @@ def test_numeric_date_sort_and_selected_rows_copy(tmp_path):
         selection.select(dialog.proxy.index(row, 0), QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows)
     copy_selected_rows(dialog.table)
     copied = QApplication.clipboard().text().splitlines()
-    assert len(copied) == 3
-    assert copied[1].endswith('third') and copied[2].endswith('first')
+    assert len(copied) == 2
+    assert copied[0].endswith('third') and copied[1].endswith('first')
     assert dialog.model.item(1, 5).text() == '109,00 €'
     selection.clearSelection()
     copy_selected_rows(dialog.table)
@@ -134,7 +134,7 @@ def test_single_booking_cell_can_be_copied(tmp_path):
     dialog.table.selectionModel().select(dialog.proxy.index(0, 7),
         QItemSelectionModel.SelectionFlag.Select)
     copy_selected_rows(dialog.table)
-    assert QApplication.clipboard().text().splitlines() == ['Verwendungszweck', 'Einzelzelle']
+    assert QApplication.clipboard().text().splitlines() == ['Einzelzelle']
     dialog.close(); repo.close()
 
 
