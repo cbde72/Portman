@@ -111,6 +111,14 @@ def tax_annual_summaries(repository, year):
         if key:
             grouped[key].append(row)
     automatic = automatic_tax_values(repository, year)
+    event_used_keys = set()
+    if hasattr(repository, 'tax_events'):
+        for event in repository.tax_events():
+            if str(event.get('tax_year') or event.get('date', '')[:4]) != str(year):
+                continue
+            key = by_name.get(account_key(event.get('account', '')))
+            if key and event.get('used_exemption') is not None:
+                event_used_keys.add(key)
     saved = {row['institution_key']: row for row in repository.institution_tax_records(year)} \
         if hasattr(repository, 'institution_tax_records') else {}
     result = []
@@ -126,12 +134,12 @@ def tax_annual_summaries(repository, year):
         taxes = auto.get('taxes')
         solidarity = auto.get('solidarity_surcharge')
         church = auto.get('church_tax')
+        used_known = key in grouped or key in event_used_keys
         portman = {
             'stock_result': None, 'stock_loss_pot': None,
             'other_result': auto.get('capital_income'), 'other_loss_pot': None,
-            'used_exemption': auto.get('used_exemption'),
-            'remaining_exemption': (max(Decimal(), exemption - auto.get('used_exemption', Decimal()))
-                                    if exemption is not None else bank.get('remaining_exemption')),
+            'used_exemption': auto.get('used_exemption') if used_known else None,
+            'remaining_exemption': None,
             'creditable_withholding': auto.get('creditable_withholding'),
             'capital_gains_tax': (taxes - (solidarity or Decimal()) - (church or Decimal())
                                   if taxes is not None else None),
@@ -145,8 +153,45 @@ def tax_annual_summaries(repository, year):
                        'year': int(year), 'as_of': _source_date(grouped.get(key, [])),
                        'source': ', '.join(source_names) or 'Automatisch aus Portman-Buchungen',
                        'bank': bank, 'portman': portman,
+                       'institution_exemption': exemption,
                        'reference_rows': len(grouped.get(key, []))})
+    institution_counts = defaultdict(int)
+    for record in accounts.values():
+        institution_counts[account_institution(record, accounts)] += 1
+    for row in result:
+        used = row['portman']['used_exemption']
+        if (institution_counts[row['institution']] == 1
+                and row['institution_exemption'] is not None and used is not None):
+            row['portman']['remaining_exemption'] = max(Decimal(), row['institution_exemption'] - used)
     return result
+
+
+def aggregate_tax_annual_rows(rows):
+    """Aggregate account rows without repeating an institution-wide FSA."""
+    rows = list(rows)
+    if not rows:
+        return ({name: None for name, _label in METRICS},
+                {name: None for name, _label in METRICS})
+    bank, portman = {}, {}
+    for field, _label in METRICS:
+        bank_values = [row['bank'][field] for row in rows if row['bank'][field] is not None]
+        portman_values = [row['portman'][field] for row in rows if row['portman'][field] is not None]
+        bank[field] = sum(bank_values, Decimal()) if bank_values else None
+        portman[field] = sum(portman_values, Decimal()) if portman_values else None
+    # Remaining FSA is not additive.  The order belongs to the institution,
+    # so subtract the institution-wide consumption exactly once.
+    exemptions = {row['institution_exemption'] for row in rows if row['institution_exemption'] is not None}
+    if len(exemptions) == 1:
+        exemption = next(iter(exemptions))
+        if bank['used_exemption'] is not None:
+            bank['remaining_exemption'] = max(Decimal(), exemption - bank['used_exemption'])
+        if portman['used_exemption'] is not None:
+            portman['remaining_exemption'] = max(Decimal(), exemption - portman['used_exemption'])
+        else:
+            portman['remaining_exemption'] = None
+    else:
+        portman['remaining_exemption'] = None
+    return bank, portman
 
 
 def _money(value):
@@ -215,11 +260,12 @@ class TaxAnnualSummaryDialog(QDialog):
         sources = sorted({row['source'] for row in rows})
         self.source.setText(f"Quelle: {'; '.join(sources)} · Referenzzeilen: {sum(row['reference_rows'] for row in rows)}")
         self.table.setRowCount(len(METRICS))
+        aggregate = not self.account.currentData() and len(rows) > 1
+        aggregated_bank, aggregated_portman = (aggregate_tax_annual_rows(rows) if aggregate else
+                                                (rows[0]['bank'], rows[0]['portman']))
         for r, (field, label) in enumerate(METRICS):
-            bank_values = [row['bank'][field] for row in rows]
-            portman_values = [row['portman'][field] for row in rows]
-            bank = sum(bank_values, Decimal()) if bank_values and all(v is not None for v in bank_values) else None
-            portman = sum(portman_values, Decimal()) if portman_values and all(v is not None for v in portman_values) else None
+            bank = aggregated_bank[field]
+            portman = aggregated_portman[field]
             difference = portman - bank if portman is not None and bank is not None else None
             for c, value in enumerate((label, _money(bank), _money(portman), _money(difference))):
                 self.table.setItem(r, c, QTableWidgetItem(value))
