@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QDialogBut
 from portfolio_v5.accounts import account_key
 from portfolio_v5.comdirect_tax_detail import date_value
 from .institutions import account_institution
-from .tax_overview import automatic_tax_values
+from .tax_overview import automatic_tax_values, calculate_fsa
 
 
 METRICS = (
@@ -111,16 +111,27 @@ def tax_annual_summaries(repository, year):
         if key:
             grouped[key].append(row)
     automatic = automatic_tax_values(repository, year)
-    event_used_keys = set()
-    if hasattr(repository, 'tax_events'):
-        for event in repository.tax_events():
-            if str(event.get('tax_year') or event.get('date', '')[:4]) != str(year):
-                continue
-            key = by_name.get(account_key(event.get('account', '')))
-            if key and event.get('used_exemption') is not None:
-                event_used_keys.add(key)
     saved = {row['institution_key']: row for row in repository.institution_tax_records(year)} \
         if hasattr(repository, 'institution_tax_records') else {}
+    institution_automatic = defaultdict(list)
+    for key, auto in automatic.items():
+        record = accounts.get(key)
+        if record:
+            institution_automatic[account_institution(record, accounts)].append(auto)
+    calculations = {}
+    for institution, autos in institution_automatic.items():
+        saved_row = saved.get(institution.casefold(), {})
+        exemption = _number(saved_row.get('exemption'))
+        if exemption is None:
+            continue
+        documented = [auto.get('documented_used_exemption') for auto in autos
+                      if auto.get('documented_used_exemption') is not None]
+        calculations[institution] = calculate_fsa(
+            exemption, sum((auto.get('capital_income', Decimal()) for auto in autos), Decimal()),
+            loss_offset=sum((auto.get('loss_offset', Decimal()) for auto in autos), Decimal()),
+            taxable_known=all(auto.get('taxable_income_known', True) for auto in autos),
+            loss_offset_known=all(auto.get('loss_offset_known', True) for auto in autos),
+            documented_used=sum(documented, Decimal()) if documented else None)
     result = []
     for key in sorted(set(grouped) | set(automatic)):
         record = accounts.get(key)
@@ -134,11 +145,11 @@ def tax_annual_summaries(repository, year):
         taxes = auto.get('taxes')
         solidarity = auto.get('solidarity_surcharge')
         church = auto.get('church_tax')
-        used_known = key in grouped or key in event_used_keys
+        calculation = calculations.get(institution)
         portman = {
             'stock_result': None, 'stock_loss_pot': None,
             'other_result': auto.get('capital_income'), 'other_loss_pot': None,
-            'used_exemption': auto.get('used_exemption') if used_known else None,
+            'used_exemption': None,
             'remaining_exemption': None,
             'creditable_withholding': auto.get('creditable_withholding'),
             'capital_gains_tax': (taxes - (solidarity or Decimal()) - (church or Decimal())
@@ -154,15 +165,16 @@ def tax_annual_summaries(repository, year):
                        'source': ', '.join(source_names) or 'Automatisch aus Portman-Buchungen',
                        'bank': bank, 'portman': portman,
                        'institution_exemption': exemption,
+                       'fsa_calculation': calculation,
                        'reference_rows': len(grouped.get(key, []))})
     institution_counts = defaultdict(int)
     for record in accounts.values():
         institution_counts[account_institution(record, accounts)] += 1
     for row in result:
-        used = row['portman']['used_exemption']
-        if (institution_counts[row['institution']] == 1
-                and row['institution_exemption'] is not None and used is not None):
-            row['portman']['remaining_exemption'] = max(Decimal(), row['institution_exemption'] - used)
+        calculation = row['fsa_calculation']
+        if institution_counts[row['institution']] == 1 and calculation is not None:
+            row['portman']['used_exemption'] = calculation['used_exemption']
+            row['portman']['remaining_exemption'] = calculation['remaining_exemption']
     return result
 
 
@@ -185,7 +197,12 @@ def aggregate_tax_annual_rows(rows):
         exemption = next(iter(exemptions))
         if bank['used_exemption'] is not None:
             bank['remaining_exemption'] = max(Decimal(), exemption - bank['used_exemption'])
-        if portman['used_exemption'] is not None:
+        calculations = [row.get('fsa_calculation') for row in rows if row.get('fsa_calculation')]
+        calculation = calculations[0] if calculations else None
+        if calculation:
+            portman['used_exemption'] = calculation['used_exemption']
+            portman['remaining_exemption'] = calculation['remaining_exemption']
+        elif portman['used_exemption'] is not None:
             portman['remaining_exemption'] = max(Decimal(), exemption - portman['used_exemption'])
         else:
             portman['remaining_exemption'] = None
@@ -217,6 +234,7 @@ class TaxAnnualSummaryDialog(QDialog):
         root.addLayout(bar)
         self.heading = QLabel(); self.heading.setTextFormat(Qt.TextFormat.RichText); root.addWidget(self.heading)
         self.source = QLabel(); self.source.setWordWrap(True); root.addWidget(self.source)
+        self.calculation = QLabel(); self.calculation.setWordWrap(True); root.addWidget(self.calculation)
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(('Steuerkennzahl', 'Bankwert EUR', 'Portman EUR', 'Differenz EUR'))
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -253,16 +271,30 @@ class TaxAnnualSummaryDialog(QDialog):
         rows = self._selected()
         if not rows:
             self.heading.setText(f'<b>Steuerliche Daten für das Jahr {self.year.value()}</b>')
-            self.source.setText('Keine Daten verfügbar.'); self.table.setRowCount(0); return
+            self.source.setText('Keine Daten verfügbar.'); self.calculation.clear(); self.table.setRowCount(0); return
         as_of = max((row['as_of'] for row in rows if row['as_of']), default='')
         shown_date = date.fromisoformat(as_of).strftime('%d.%m.%Y') if as_of else 'n. v.'
         self.heading.setText(f'<b>Steuerliche Daten für das Jahr {self.year.value()}</b><br>Stand: {shown_date}')
         sources = sorted({row['source'] for row in rows})
-        self.source.setText(f"Quelle: {'; '.join(sources)} · Referenzzeilen: {sum(row['reference_rows'] for row in rows)}")
+        statuses = sorted({row['fsa_calculation']['status'] for row in rows if row.get('fsa_calculation')})
+        status = f" · FSA-Status: {'; '.join(statuses)}" if statuses else ''
+        self.source.setText(f"Quelle: {'; '.join(sources)} · Referenzzeilen: {sum(row['reference_rows'] for row in rows)}{status}")
         self.table.setRowCount(len(METRICS))
         aggregate = not self.account.currentData() and len(rows) > 1
         aggregated_bank, aggregated_portman = (aggregate_tax_annual_rows(rows) if aggregate else
                                                 (rows[0]['bank'], rows[0]['portman']))
+        calculation = next((row.get('fsa_calculation') for row in rows if row.get('fsa_calculation')), None)
+        exemption = next((row.get('institution_exemption') for row in rows
+                          if row.get('institution_exemption') is not None), None)
+        if calculation:
+            self.calculation.setText(
+                'Portman-Berechnung: Steuerpflichtige Erträge '
+                f"{_money(calculation['taxable_income'])} EUR · FSA {_money(exemption)} EUR · "
+                f"Verbrauch {_money(calculation['used_exemption'])} EUR · Rest "
+                f"{_money(calculation['remaining_exemption'])} EUR · BMG nach FSA "
+                f"{_money(calculation['taxable_after_fsa'])} EUR")
+        else:
+            self.calculation.setText('Portman-Berechnung: Kein Freibetrag für Institut/Jahr hinterlegt.')
         for r, (field, label) in enumerate(METRICS):
             bank = aggregated_bank[field]
             portman = aggregated_portman[field]
