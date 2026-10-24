@@ -240,6 +240,13 @@ class RepositoryV09(RepositoryV07):
         transactions = resolved_transactions
         by_external = {tx.get('external_id'): tx for tx in transactions if tx.get('external_id')}
         existing_fee_refs = {row['fee_ref'] for row in self.db.execute('SELECT fee_ref FROM fee_links')}
+        account_aliases = {row['account_key']: row['account_key'] for row in self.account_records()}
+        account_aliases.update({account_key(row['name']): row['account_key']
+                                for row in self.account_records()})
+
+        def account_identity(value):
+            key = account_key(value or '')
+            return account_aliases.get(key, key)
 
         security_aliases = {}
         imported_securities = [record['payload'] for record in self.store.model_records(kind='securities')]
@@ -273,7 +280,8 @@ class RepositoryV09(RepositoryV07):
                 tax_matches = [tx for tx in transactions
                                if tx.get('kind') == 'TAX'
                                and tx.get('transaction_reference') == event.get('reference_no')
-                               and account_key(tx.get('account', '')) == account_key(event.get('cash_account', ''))]
+                               and account_identity(tx.get('account', '')) == account_identity(
+                                   event.get('cash_account', ''))]
                 tax = related if related and related.get('kind') == 'TAX' else (
                     tax_matches[0] if len(tax_matches) == 1 else None)
                 ordinary_dividend = event.get('type') == 'dividende_inland'
@@ -285,7 +293,7 @@ class RepositoryV09(RepositoryV07):
                 paid = Decimal(str(event.get('paid_taxes') or 0))
                 net = gross - paid
                 event_security = security_identity(event.get('security_ref'))
-                event_depot = account_key(event.get('account', ''))
+                event_depot = account_identity(event.get('account', ''))
                 candidates = []
                 for tx in transactions:
                     if (tx.get('kind') not in ('DIVIDEND', 'DISTRIBUTION')
@@ -298,8 +306,9 @@ class RepositoryV09(RepositoryV07):
                     date_matches = any(abs((day - event_day).days) <= 3 for day in tx_days)
                     evidence = (
                         date_matches
-                        and account_key(tx.get('account', '')) == account_key(event.get('cash_account', ''))
-                        and account_key(tx.get('performance_depot_key', '')) == event_depot
+                        and account_identity(tx.get('account', '')) == account_identity(
+                            event.get('cash_account', ''))
+                        and account_identity(tx.get('performance_depot_key', '')) == event_depot
                         and security_identity(tx.get('security')) == event_security
                         and tx_gross not in (None, '') and Decimal(str(tx_gross)) == gross
                         and Decimal(str(tx.get('amount'))) == net

@@ -1,4 +1,5 @@
 from copy import deepcopy
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,8 @@ from portfolio_v5.settlement import performance_transactions
 from portman.comdirect_import import commit_reports
 from portman.import_v09 import ImportSession, transaction
 from portman.repository_v09 import RepositoryV09
+from portman.tax_matching import match_tax_events
+from portman.tax_overview import automatic_tax_values
 
 
 CASH = 'IBAN DE84200411330476492400'
@@ -18,7 +21,9 @@ DEPOT = 'Depot 4764924'
 
 def repository(path):
     repo = RepositoryV09(path, backups=False)
-    repo.save_account(CASH, {'kind': 'Girokonto', 'institution': 'comdirect'})
+    cash_details = {'kind': 'Girokonto', 'institution': 'comdirect'}
+    repo.save_account(CASH, cash_details)
+    repo.save_account('Giro DE84200411330476492400', cash_details, original=CASH)
     repo.save_account(DEPOT, {
         'kind': 'Depot', 'institution': 'comdirect',
         'cash_account_key': account_key(CASH),
@@ -140,6 +145,41 @@ def test_zero_tax_regular_dividend_links_to_statement_without_fee_link(tmp_path)
         assert repo.fee_links() == []
         assert len([row for row in repo.tax_detail_records()
                     if row.get('linked_tax_event_id') == 'sap-tax-event']) == 1
+    finally:
+        repo.close()
+
+
+def test_tax_matching_uses_imported_wkn_isin_bridge_on_clean_database(tmp_path):
+    repo = repository(tmp_path / 'clean-tax-match.sqlite')
+    try:
+        dividend = BankTransaction(
+            CASH, 'statement-distribution', '2026-09-15', Kind.DIVIDEND,
+            '7.43', 'EUR', security='WKN:A0H074', gross_income='9.10',
+            taxes='1.67', performance_depot_key=account_key(DEPOT),
+            bank_reference='REPORT-DISTRIBUTION')
+        finance = ImportBatch(
+            'finance-distribution.pdf', 'finance-distribution', transactions=[dividend],
+            snapshots=[Snapshot(DEPOT, '2026-09', '2026-09-30', 'Finanzreport', [
+                Position('WKN:A0H074', 'ETF', wkn='A0H074', quantity='1', value='9.10')])])
+        notice = ImportBatch(
+            'tax-distribution.pdf', 'tax-distribution',
+            securities=[SecurityInfo('DE000A0H0744', identifier_type='isin',
+                                     isin='DE000A0H0744', wkn='A0H074', name='ETF')],
+            tax_events=[TaxEvent(
+                'tax-distribution', DEPOT, 'investment_ausschuettung_inland',
+                '2026-09-15', security_ref='DE000A0H0744', gross_income='9.10',
+                partial_exemption_amount='2.73', taxable_income='6.37',
+                paid_taxes='1.67', cash_account=CASH)])
+        repo.commit_batches([finance])
+        repo.commit_batches([notice])
+
+        master = repo.db.execute(
+            "SELECT isin FROM security_master WHERE security_key='WKN:A0H074'").fetchone()
+        assert master['isin'] == ''
+        assert list(match_tax_events(repo).values())[0]['external_id'] == 'statement-distribution'
+        values = automatic_tax_values(repo, 2026)[account_key(DEPOT)]
+        assert (values['capital_income'], values['taxes']) == (
+            Decimal('6.37'), Decimal('1.67'))
     finally:
         repo.close()
 
