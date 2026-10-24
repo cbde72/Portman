@@ -285,10 +285,8 @@ def performance_transactions(store, transactions, account=None):
     # A settlement link describes two records of one economic event.  Prefer
     # the depot-side record for performance and keep the bank-side record only
     # as evidence.  The raw records remain untouched and visible in histories.
-    def tx_ref(tx):
-        return json.dumps([tx['import_id'], tx.get('depot', tx['account']), tx['external_id']],
-                          ensure_ascii=False, separators=(',', ':'))
-    active_refs = {tx_ref(tx) for tx in transactions}
+    from .transaction_reference import transaction_reference
+    active_refs = {transaction_reference(tx) for tx in transactions}
     cash_allocations = defaultdict(Decimal)
     reconciled_notice_refs = set()
     try:
@@ -313,7 +311,7 @@ def performance_transactions(store, transactions, account=None):
         links = [dict(row) for row in store.db.execute('SELECT aux_ref,field,fee_ref FROM fee_links')]
     except Exception:
         links = []  # Older repositories without the fee-link table.
-    originals = {tx_ref(tx): tx for tx in transactions}
+    originals = {transaction_reference(tx): tx for tx in transactions}
     for link in links:
         aux, fee = originals.get(link['aux_ref']), originals.get(link['fee_ref'])
         field = link['field']
@@ -330,7 +328,7 @@ def performance_transactions(store, transactions, account=None):
             linked_fee_rows.add(link['fee_ref'])
     owners = None
     for original in transactions:
-        ref = tx_ref(original)
+        ref = transaction_reference(original)
         if ref in linked_fee_rows:
             continue
         if (original.get('kind') in ('TAX', 'FEE')

@@ -11,10 +11,10 @@ from .repository_base import RepositoryV07
 from .storage_v09 import migrate, backup_database, backup_records
 from portfolio_v5.accounts import account_key
 from portfolio_v5.storage import cached_read
+from portfolio_v5.transaction_reference import transaction_reference
 
 
-def reference(tx):
-    return json.dumps([tx['import_id'], tx.get('depot', tx['account']), tx['external_id']], ensure_ascii=False, separators=(',', ':'))
+reference = transaction_reference
 
 
 def booking_direction_matches(depot_tx, cash_tx):

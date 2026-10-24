@@ -4,13 +4,12 @@ from datetime import date
 from decimal import Decimal
 from uuid import uuid4, uuid5, NAMESPACE_URL
 from portfolio_v5.accounts import account_key
+from portfolio_v5.transaction_reference import transaction_reference
 from .asset_fields import validate
 from .asset_schema import initialize
 
 
-def transaction_ref(tx):
-    return json.dumps([tx['import_id'], tx.get('depot', tx['account']), tx['external_id']],
-                      ensure_ascii=False, separators=(',', ':'))
+transaction_ref = transaction_reference
 
 
 class AssetRegistry:
