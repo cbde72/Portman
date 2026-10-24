@@ -32,6 +32,30 @@ def _security_refs(repository, value, cache):
         (value, value, value)).fetchone()
     if row:
         refs.update(str(row[key]).strip().upper() for key in ('security_key', 'isin', 'wkn') if row[key])
+    # A clean import can legitimately leave security_master with the WKN key
+    # from a Finanzreport while the settlement/tax PDFs carry the ISIN.  The
+    # imported security evidence already contains the authoritative bridge;
+    # use it for read-only matching instead of requiring a later master-data
+    # repair or a particular document order.
+    aliases = cache.get('__imported_aliases__')
+    if aliases is None:
+        aliases = {}
+        store = getattr(repository, 'store', None)
+        records = store.model_records(kind='securities') if store is not None else []
+        for record in records:
+            security = record.get('payload', record)
+            identifiers = {str(security.get(field) or '').strip().upper()
+                           for field in ('key', 'isin', 'wkn')}
+            identifiers.discard('')
+            expanded = set(identifiers)
+            expanded.update(identifier.removeprefix('ISIN:').removeprefix('WKN:')
+                            for identifier in identifiers)
+            for identifier in expanded:
+                aliases.setdefault(identifier, set()).update(expanded)
+        cache['__imported_aliases__'] = aliases
+    refs.update(aliases.get(value, ()))
+    for identifier in tuple(refs):
+        refs.update(aliases.get(identifier, ()))
     cache[value] = refs
     return refs
 
