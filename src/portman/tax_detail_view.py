@@ -1,6 +1,5 @@
 """Auditable, lossless view of institution tax-detail exports."""
 import csv
-from pathlib import Path
 
 from PySide6.QtCore import Qt, QSortFilterProxyModel
 from PySide6.QtGui import QColor, QStandardItem, QStandardItemModel
