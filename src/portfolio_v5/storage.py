@@ -657,6 +657,144 @@ class Store:
                     'id': next(iid for iid in duplicate_imports if iid is not None)}
         return None
 
+    def _persist_import_sources_and_accounts(self, batch, assignments, new_accounts,
+                                             records, rule_scope, original_content,
+                                             prepared_documents):
+        """Archive sources and persist account mappings before duplicate exit."""
+        if original_content is not None:
+            self.db.execute('INSERT OR IGNORE INTO original_files VALUES(?,?,?)',
+                            (hashlib.sha256(original_content).hexdigest(), batch.path, original_content))
+        elif prepared_documents:
+            for metadata, content in prepared_documents:
+                self.db.execute('INSERT OR IGNORE INTO original_files VALUES(?,?,?)',
+                                (metadata['content_hash'], batch.path, content))
+        for name in new_accounts.values():
+            self._register_account(name)
+        records = self._account_view()
+        names = (batch.account_names + [s.account for s in batch.snapshots]
+                 + [b.account for b in batch.balances if b.account != 'Archiv']
+                 + [t.account for t in batch.transactions]
+                 + [t.account for t in batch.booking_evidence]
+                 + [d.account for d in batch.documents] + [r.account for r in batch.tax_details]
+                 + [r.account for r in batch.cost_reports])
+        for name in names:
+            if account_key(name) not in assignments:
+                self._register_account(name)
+        for account in dict.fromkeys(s.account for s in batch.snapshots):
+            parent = account.split('/', 1)[0] if account.casefold().startswith('deka/') else account
+            target = assignments.get(account_key(account), account_key(parent))
+            if target not in records:
+                self._register_account(parent)
+            self.db.execute('INSERT OR IGNORE INTO depot_accounts VALUES(?,?,?)',
+                            (account_key(account), account, target))
+        for source in batch.remember_assignments:
+            self.db.execute('INSERT OR REPLACE INTO import_account_rules VALUES(?,?,?)',
+                            (rule_scope(batch.path), source, assignments[source]))
+
+    def _persist_import_header_and_documents(self, batch, import_key, assignments, payload,
+                                             model_collections, prepared_documents, result):
+        """Persist the import header, model records, documents and account links."""
+        cur = self.db.execute('INSERT INTO imports(path,file_hash,parser,imported_at,report) VALUES(?,?,?,?,?)',
+                              (batch.path, import_key, PARSER_VERSION, datetime.now(timezone.utc).isoformat(),
+                               json.dumps({'source_sha256': batch.file_hash, **batch.summary(),
+                                           'account_assignments': assignments,
+                                           'source_sheet': batch.source_sheet,
+                                           'parser_provenance': {
+                                               'plugin_id': batch.plugin_id,
+                                               'plugin_version': batch.plugin_version,
+                                               'handler': batch.plugin_handler,
+                                               'detection_confidence': batch.detection_confidence,
+                                           }}, ensure_ascii=False)))
+        iid = cur.lastrowid
+        result.update(id=iid, documents=0, model_records=0)
+        for kind in model_collections:
+            for ordinal, record in enumerate(payload.get(kind, [])):
+                self.db.execute('INSERT INTO import_model_records VALUES(?,?,?,?)',
+                                (iid, kind, ordinal, json.dumps(record, ensure_ascii=False)))
+                result['model_records'] += 1
+        for metadata, content in prepared_documents:
+            self.db.execute('''INSERT INTO bank_documents(import_id,account,external_id,title,date,media_type,content_hash,content)
+                VALUES(?,?,?,?,?,?,?,?)''', (iid, metadata['account'], metadata['external_id'], metadata['title'],
+                metadata['date'], metadata['media_type'], metadata['content_hash'], content))
+            result['documents'] += 1
+        for source, target in assignments.items():
+            self.db.execute('INSERT INTO import_account_links VALUES(?,?,?)', (iid, source, target))
+        if assignments:
+            self.db.execute('DELETE FROM coverage')
+        return iid
+
+    def _persist_snapshots_and_balances(self, batch, iid, assignments, links, mappings, result):
+        """Persist portfolio observations without changing deduplication order."""
+        for snapshot in batch.snapshots:
+            data = asdict(snapshot)
+            semantic = {k: data[k] for k in ('account', 'as_of', 'complete')}
+            semantic['positions'] = sorted(
+                [{k: v for k, v in p.items() if k != 'row'} for p in data['positions']],
+                key=lambda p: p['key'])
+            fingerprint = digest(semantic)
+            old = self.db.execute('''SELECT s.content_hash,s.import_id FROM snapshots s JOIN imports i ON i.id=s.import_id
+                WHERE i.active=1 AND s.account=? AND s.effective_date=? AND s.complete=? ORDER BY s.id DESC LIMIT 1''',
+                (snapshot.account, snapshot.effective_date, snapshot.complete)).fetchone()
+            if (not batch.force_import and old and old[0] == fingerprint
+                    and links.get((old['import_id'], account_key(snapshot.account)),
+                                  mappings.get(account_key(snapshot.account)))
+                    == assignments.get(account_key(snapshot.account),
+                                       mappings.get(account_key(snapshot.account)))):
+                result['unchanged'] += 1
+                continue
+            self.db.execute('''INSERT INTO snapshots(import_id,account,period,as_of,effective_date,complete,content_hash,payload)
+                VALUES(?,?,?,?,?,?,?,?)''', (iid, snapshot.account, snapshot.period, snapshot.as_of,
+                                            snapshot.effective_date, snapshot.complete, fingerprint,
+                                            json.dumps(data, ensure_ascii=False)))
+            result['snapshots'] += 1
+        grouped = defaultdict(list)
+        for balance in batch.balances:
+            grouped[(balance.period, balance.category, balance.account,
+                     balance.priority, balance.sheet)].append(balance)
+        for (period, category, account, priority, sheet), values in grouped.items():
+            value = str(sum(Decimal(item.value) for item in values))
+            self.db.execute('''INSERT INTO balances(import_id,period,category,account,value,priority,sheet,row_number)
+                VALUES(?,?,?,?,?,?,?,?)''',
+                (iid, period, category, account, value, priority, sheet, values[0].row))
+            result['balances'] += 1
+
+    def _persist_transactions_and_coverage(self, batch, iid, assignments, links, mappings, result):
+        """Persist transactions and invalidate only affected coverage records."""
+        from .settlement import kind_of
+        coverage_accounts = [row[0] for row in self.db.execute('SELECT account FROM coverage')]
+        covered_keys, clear_coverage = set(), False
+        for transaction in batch.transactions:
+            data = asdict(transaction)
+            clear_coverage = clear_coverage or kind_of(data) == 'DIVIDEND'
+            fingerprint = digest({k: v for k, v in data.items() if k != 'row'})
+            old = self.db.execute('''SELECT t.content_hash,t.import_id FROM transactions t JOIN imports i ON i.id=t.import_id
+                WHERE i.active=1 AND t.account=? AND t.external_id=? ORDER BY t.id DESC LIMIT 1''',
+                (transaction.account, transaction.external_id)).fetchone()
+            if (not batch.force_import and old and old[0] == fingerprint
+                    and links.get((old['import_id'], account_key(transaction.account)),
+                                  mappings.get(account_key(transaction.account), account_key(transaction.account)))
+                    == assignments.get(account_key(transaction.account),
+                                       mappings.get(account_key(transaction.account), account_key(transaction.account)))):
+                result['unchanged'] += 1
+                continue
+            self.db.execute('''INSERT INTO transactions(import_id,account,external_id,date,content_hash,payload)
+                VALUES(?,?,?,?,?,?)''', (iid, transaction.account, transaction.external_id,
+                                        transaction.date, fingerprint, json.dumps(data)))
+            transaction_key = account_key(transaction.account)
+            covered_keys.add(transaction_key)
+            covered_keys.add(mappings.get(transaction_key, transaction_key))
+            result['transactions'] += 1
+        if clear_coverage:
+            self.db.execute('DELETE FROM coverage')
+        elif covered_keys:
+            stale = [name for name in coverage_accounts if account_key(name) in covered_keys]
+            if stale:
+                self.db.executemany('DELETE FROM coverage WHERE account=?', [(name,) for name in stale])
+        for old in batch.replace_bank_bookings:
+            self.db.execute('''INSERT OR IGNORE INTO bank_booking_replacements
+                SELECT id,? FROM transactions WHERE import_id=? AND account=? AND external_id=?''',
+                (iid, old['import_id'], old['depot'], old['external_id']))
+
     def import_batch(self, batch):
         if batch.errors:
             raise ValueError('; '.join(batch.errors))
@@ -675,120 +813,20 @@ class Store:
         duplicate = self.db.execute('SELECT id FROM imports WHERE file_hash=? AND active=1', (import_key,)).fetchone()
         result = {'status': 'imported', 'snapshots': 0, 'balances': 0, 'transactions': 0, 'unchanged': 0}
         with self.db:
-            if original_content is not None:
-                self.db.execute('INSERT OR IGNORE INTO original_files VALUES(?,?,?)',
-                                (hashlib.sha256(original_content).hexdigest(), batch.path, original_content))
-            elif prepared_documents:
-                for metadata, content in prepared_documents:
-                    self.db.execute('INSERT OR IGNORE INTO original_files VALUES(?,?,?)',
-                                    (metadata['content_hash'], batch.path, content))
-            for name in new_accounts.values():
-                self._register_account(name)
-            records = self._account_view()
-            names = (batch.account_names + [s.account for s in batch.snapshots]
-                     + [b.account for b in batch.balances if b.account != 'Archiv']
-                     + [t.account for t in batch.transactions]
-                     + [t.account for t in batch.booking_evidence]
-                     + [d.account for d in batch.documents] + [r.account for r in batch.tax_details]
-                     + [r.account for r in batch.cost_reports])
-            for name in names:
-                if account_key(name) not in assignments:
-                    self._register_account(name)
-            for account in dict.fromkeys(s.account for s in batch.snapshots):
-                parent = account.split('/', 1)[0] if account.casefold().startswith('deka/') else account
-                target = assignments.get(account_key(account), account_key(parent))
-                if target not in records:
-                    self._register_account(parent)
-                self.db.execute('INSERT OR IGNORE INTO depot_accounts VALUES(?,?,?)',
-                                (account_key(account), account, target))
-            for source in batch.remember_assignments:
-                self.db.execute('INSERT OR REPLACE INTO import_account_rules VALUES(?,?,?)',
-                                (rule_scope(batch.path), source, assignments[source]))
+            self._persist_import_sources_and_accounts(
+                batch, assignments, new_accounts, records, rule_scope,
+                original_content, prepared_documents)
             if duplicate:
                 return {'status': 'duplicate', 'path': batch.path, 'id': duplicate['id']}
-            cur = self.db.execute('INSERT INTO imports(path,file_hash,parser,imported_at,report) VALUES(?,?,?,?,?)',
-                                  (batch.path, import_key, PARSER_VERSION, datetime.now(timezone.utc).isoformat(),
-                                   json.dumps({'source_sha256': batch.file_hash, **batch.summary(),
-                                               'account_assignments': assignments,
-                                               'source_sheet': batch.source_sheet,
-                                               'parser_provenance': {
-                                                   'plugin_id': batch.plugin_id,
-                                                   'plugin_version': batch.plugin_version,
-                                                   'handler': batch.plugin_handler,
-                                                   'detection_confidence': batch.detection_confidence,
-                                               }}, ensure_ascii=False)))
-            iid = cur.lastrowid
-            result['id'] = iid
-            result['documents'] = 0
-            result['model_records'] = 0
-            for kind in model_collections:
-                for ordinal, record in enumerate(payload.get(kind, [])):
-                    self.db.execute('INSERT INTO import_model_records VALUES(?,?,?,?)',
-                                    (iid, kind, ordinal, json.dumps(record, ensure_ascii=False)))
-                    result['model_records'] += 1
-            for metadata, content in prepared_documents:
-                self.db.execute('''INSERT INTO bank_documents(import_id,account,external_id,title,date,media_type,content_hash,content)
-                    VALUES(?,?,?,?,?,?,?,?)''', (iid, metadata['account'], metadata['external_id'], metadata['title'],
-                    metadata['date'], metadata['media_type'], metadata['content_hash'], content))
-                result['documents'] += 1
-            for source, target in assignments.items():
-                self.db.execute('INSERT INTO import_account_links VALUES(?,?,?)', (iid, source, target))
-            if assignments: self.db.execute('DELETE FROM coverage')
+            iid = self._persist_import_header_and_documents(
+                batch, import_key, assignments, payload, model_collections,
+                prepared_documents, result)
             links = self._import_links()
             mappings = self._depot_mappings()
-            for snapshot in batch.snapshots:
-                data = asdict(snapshot)
-                semantic = {k: data[k] for k in ('account', 'as_of', 'complete')}
-                semantic['positions'] = sorted([{k: v for k, v in p.items() if k != 'row'} for p in data['positions']], key=lambda p: p['key'])
-                fingerprint = digest(semantic)
-                old = self.db.execute('''SELECT s.content_hash,s.import_id FROM snapshots s JOIN imports i ON i.id=s.import_id
-                    WHERE i.active=1 AND s.account=? AND s.effective_date=? AND s.complete=? ORDER BY s.id DESC LIMIT 1''',
-                    (snapshot.account, snapshot.effective_date, snapshot.complete)).fetchone()
-                if not batch.force_import and old and old[0] == fingerprint and links.get((old['import_id'], account_key(snapshot.account)), mappings.get(account_key(snapshot.account))) == assignments.get(account_key(snapshot.account), mappings.get(account_key(snapshot.account))):
-                    result['unchanged'] += 1
-                    continue
-                self.db.execute('''INSERT INTO snapshots(import_id,account,period,as_of,effective_date,complete,content_hash,payload)
-                    VALUES(?,?,?,?,?,?,?,?)''', (iid, snapshot.account, snapshot.period, snapshot.as_of, snapshot.effective_date,
-                                                snapshot.complete, fingerprint, json.dumps(data, ensure_ascii=False)))
-                result['snapshots'] += 1
-            # Multiple columns/rows may describe the same account/category; sum within this file only.
-            grouped = defaultdict(list)
-            for b in batch.balances:
-                grouped[(b.period, b.category, b.account, b.priority, b.sheet)].append(b)
-            for (period, category, account, priority, sheet), values in grouped.items():
-                val = str(sum(Decimal(v.value) for v in values))
-                self.db.execute('''INSERT INTO balances(import_id,period,category,account,value,priority,sheet,row_number)
-                    VALUES(?,?,?,?,?,?,?,?)''', (iid, period, category, account, val, priority, sheet, values[0].row))
-                result['balances'] += 1
-            from .settlement import kind_of
-            coverage_accounts = [r[0] for r in self.db.execute('SELECT account FROM coverage')]
-            covered_keys, clear_coverage = set(), False
-            for tx in batch.transactions:
-                data = asdict(tx)
-                clear_coverage = clear_coverage or kind_of(data) == 'DIVIDEND'
-                fingerprint = digest({k: v for k, v in data.items() if k != 'row'})
-                old = self.db.execute('''SELECT t.content_hash,t.import_id FROM transactions t JOIN imports i ON i.id=t.import_id
-                    WHERE i.active=1 AND t.account=? AND t.external_id=? ORDER BY t.id DESC LIMIT 1''',
-                    (tx.account, tx.external_id)).fetchone()
-                if not batch.force_import and old and old[0] == fingerprint and links.get((old['import_id'], account_key(tx.account)), mappings.get(account_key(tx.account), account_key(tx.account))) == assignments.get(account_key(tx.account), mappings.get(account_key(tx.account), account_key(tx.account))):
-                    result['unchanged'] += 1
-                    continue
-                # A changed transaction ID is an explicit revision visible in the preview/audit.
-                self.db.execute('''INSERT INTO transactions(import_id,account,external_id,date,content_hash,payload)
-                    VALUES(?,?,?,?,?,?)''', (iid, tx.account, tx.external_id, tx.date, fingerprint, json.dumps(data)))
-                tx_key = account_key(tx.account)
-                covered_keys.add(tx_key); covered_keys.add(mappings.get(tx_key, tx_key))
-                result['transactions'] += 1
-            if clear_coverage:
-                self.db.execute('DELETE FROM coverage')
-            elif covered_keys:
-                stale = [name for name in coverage_accounts if account_key(name) in covered_keys]
-                if stale:
-                    self.db.executemany('DELETE FROM coverage WHERE account=?', [(name,) for name in stale])
-            for old in batch.replace_bank_bookings:
-                self.db.execute('''INSERT OR IGNORE INTO bank_booking_replacements
-                    SELECT id,? FROM transactions WHERE import_id=? AND account=? AND external_id=?''',
-                    (iid, old['import_id'], old['depot'], old['external_id']))
+            self._persist_snapshots_and_balances(
+                batch, iid, assignments, links, mappings, result)
+            self._persist_transactions_and_coverage(
+                batch, iid, assignments, links, mappings, result)
         return result
 
     def correct_import(self, iid, edits):
