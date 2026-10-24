@@ -461,9 +461,8 @@ class Store:
         with sqlite3.connect(path) as target:
             self.db.backup(target)
 
-    def import_batch(self, batch):
-        if batch.errors:
-            raise ValueError('; '.join(batch.errors))
+    def _prepare_import_accounts(self, batch):
+        """Validate and apply preview account assignments before persistence."""
         from .import_accounts import import_sources, required_target_kind, rule_scope, target_compatible
         source_rows = {r['key']: r for r in import_sources(batch)}
         sources = set(source_rows)
@@ -502,6 +501,11 @@ class Store:
                 report.account = records[mapped]['name'] if mapped in records else mapped
         if set(batch.remember_assignments) - set(assignments):
             raise ValueError('Für gemerkte Zuordnungen muss ein bestehendes Zielkonto gewählt werden.')
+        return assignments, records, new_accounts, rule_scope
+
+    @staticmethod
+    def _validate_import_rows(batch):
+        """Validate snapshot and transaction values and retain advisory warnings."""
         from .models import transaction_validation, valid_isin
         for snapshot in batch.snapshots:
             try:
@@ -528,80 +532,10 @@ class Store:
                 if hard_problems:
                     raise ValueError(source + ': ' + '; '.join(hard_problems))
                 batch.warnings.extend(source + ': ' + problem for problem in advisory)
-        from .comdirect_identity import preserve_booking_ids
-        batch = preserve_booking_ids(self, batch)
-        if batch.tax_events:
-            event_records = self.model_records(kind='tax_events')
-            existing_events = [record['payload'] for record in event_records]
-            by_id = {event.get('external_id'): event for event in existing_events if event.get('external_id')}
-            record_by_id = {record['payload'].get('external_id'): record for record in event_records
-                            if record['payload'].get('external_id')}
-            incoming = {event.external_id: asdict(event) for event in batch.tax_events if event.external_id}
-            # related_transaction_id is a derived reconciliation result.  It
-            # may be corrected after a later statement arrives and therefore
-            # must not turn the same immutable tax PDF into a new import.
-            def source_tax_fact(payload):
-                payload = dict(payload or {})
-                payload.pop('related_transaction_id', None)
-                return payload
-            if incoming and all(source_tax_fact(by_id.get(identifier)) == source_tax_fact(payload)
-                                for identifier, payload in incoming.items()):
-                old_imports = {record_by_id[identifier]['import_id'] for identifier in incoming}
-                if len(old_imports) == 1:
-                    old_import = next(iter(old_imports))
-                    report = self.db.execute('SELECT report FROM imports WHERE id=? AND active=1',
-                                             (old_import,)).fetchone()
-                    if report and json.loads(report['report']).get('source_sha256') == batch.file_hash:
-                        return {'status': 'duplicate', 'path': batch.path, 'id': old_import}
-            advance_types = {'vorabpauschale', 'vorabpauschale_ausland'}
-            by_period = {(account_key(event.get('account', '')), event.get('security_ref', ''),
-                          str(event.get('income_year') or ''), event.get('type', '')): event
-                         for event in existing_events if event.get('type') in advance_types}
-            unique = []
-            seen_ids = set()
-            for event in batch.tax_events:
-                serialized = asdict(event)
-                if not event.external_id or event.external_id in seen_ids:
-                    raise ValueError('Steuerereignis benötigt eine eindeutige externe ID; Doppelimport abgewiesen.')
-                seen_ids.add(event.external_id)
-                old = by_id.get(event.external_id)
-                if old is not None:
-                    # Derselbe Steuerbeleg darf als Dokument erneut auftauchen, aber nicht erneut gezählt werden.
-                    continue
-                period_key = (account_key(event.account), event.security_ref,
-                              str(event.income_year or ''), event.type)
-                conflict = by_period.get(period_key) if event.type in advance_types else None
-                if conflict is not None:
-                    raise ValueError(
-                        f'Für {event.security_ref or "das Wertpapier"} im Depot {event.account} ist für das '
-                        f'Ertragsjahr {event.income_year or "unbekannt"} bereits eine Vorabpauschale gespeichert.')
-                unique.append(event)
-                by_id[event.external_id] = serialized
-                if event.type in advance_types:
-                    by_period[period_key] = serialized
-            batch.tax_events = unique
-        if batch.tax_details:
-            existing_ids = {record['payload'].get('external_id'): record['import_id']
-                            for record in self.model_records(kind='tax_details')}
-            seen_ids = set()
-            unique = []
-            duplicate_imports = []
-            for record in batch.tax_details:
-                if not record.external_id or record.external_id in seen_ids:
-                    raise ValueError('Steuerdetail benötigt eine eindeutige externe ID; Doppelimport abgewiesen.')
-                seen_ids.add(record.external_id)
-                if record.external_id not in existing_ids:
-                    unique.append(record)
-                    existing_ids[record.external_id] = None
-                else:
-                    duplicate_imports.append(existing_ids[record.external_id])
-            batch.tax_details = unique
-            if (not unique and duplicate_imports and not batch.snapshots and not batch.balances
-                    and not batch.transactions and not batch.documents and not batch.tax_events
-                    and not batch.securities and not batch.accounts and not batch.statements
-                    and not batch.cost_reports and not batch.events):
-                return {'status': 'duplicate', 'path': batch.path,
-                        'id': next(iid for iid in duplicate_imports if iid is not None)}
+
+    @staticmethod
+    def _prepare_import_identity(batch, assignments):
+        """Build the stable import identity and validate archival documents."""
         payload = asdict(batch)
         identity = {'file': batch.file_hash, 'parser': PARSER_VERSION,
                     'snapshots': payload['snapshots'], 'balances': payload['balances'],
@@ -609,33 +543,135 @@ class Store:
         model_collections = ('securities', 'accounts', 'statements', 'tax_events', 'tax_details',
                              'booking_evidence', 'cost_reports', 'events')
         for name in model_collections:
-            if payload.get(name): identity[name] = payload[name]
+            if payload.get(name):
+                identity[name] = payload[name]
         prepared_documents = []
         original_path = Path(batch.path)
         original_content = original_path.read_bytes() if original_path.is_file() else None
-        if original_content is not None and len(batch.file_hash) == 64 and all(c in '0123456789abcdef' for c in batch.file_hash) and hashlib.sha256(original_content).hexdigest() != batch.file_hash:
+        if (original_content is not None and len(batch.file_hash) == 64
+                and all(c in '0123456789abcdef' for c in batch.file_hash)
+                and hashlib.sha256(original_content).hexdigest() != batch.file_hash):
             raise ValueError('Die Quelldatei wurde seit dem Einlesen verändert. Bitte erneut einlesen.')
         for document in batch.documents:
             try:
                 content = base64.b64decode(document.content_b64, validate=True)
             except (ValueError, TypeError):
                 raise ValueError('Ungültige Dokumentdaten.') from None
-            if document.media_type != 'application/pdf' or not content.startswith(b'%PDF-') or b'%%EOF' not in content[-4096:]:
+            if (document.media_type != 'application/pdf' or not content.startswith(b'%PDF-')
+                    or b'%%EOF' not in content[-4096:]):
                 raise ValueError('Nur vollständige PDF-Dokumente werden archiviert.')
             metadata = {k: v for k, v in asdict(document).items() if k != 'content_b64'}
             metadata['content_hash'] = hashlib.sha256(content).hexdigest()
             prepared_documents.append((metadata, content))
         if prepared_documents:
             identity['documents'] = [metadata for metadata, content in prepared_documents]
-        if assignments: identity['account_assignments'] = assignments
-        if batch.source_sheet: identity['source_sheet'] = batch.source_sheet
+        if assignments:
+            identity['account_assignments'] = assignments
+        if batch.source_sheet:
+            identity['source_sheet'] = batch.source_sheet
         if batch.history_end:
             identity['history_end'] = batch.history_end
             identity['history_path'] = batch.path
         if batch.force_import:
             from uuid import uuid4
             identity['repeat'] = uuid4().hex
-        import_key = digest(identity)
+        return payload, model_collections, prepared_documents, original_content, digest(identity)
+
+    def _deduplicate_tax_events(self, batch):
+        """Remove already persisted tax events and reject conflicting facts."""
+        if not batch.tax_events:
+            return None
+        event_records = self.model_records(kind='tax_events')
+        existing_events = [record['payload'] for record in event_records]
+        by_id = {event.get('external_id'): event for event in existing_events if event.get('external_id')}
+        record_by_id = {record['payload'].get('external_id'): record for record in event_records
+                        if record['payload'].get('external_id')}
+        incoming = {event.external_id: asdict(event) for event in batch.tax_events if event.external_id}
+
+        def source_tax_fact(payload):
+            # Reconciliation may be corrected after a later statement arrives.
+            payload = dict(payload or {})
+            payload.pop('related_transaction_id', None)
+            return payload
+
+        if incoming and all(source_tax_fact(by_id.get(identifier)) == source_tax_fact(payload)
+                            for identifier, payload in incoming.items()):
+            old_imports = {record_by_id[identifier]['import_id'] for identifier in incoming}
+            if len(old_imports) == 1:
+                old_import = next(iter(old_imports))
+                report = self.db.execute('SELECT report FROM imports WHERE id=? AND active=1',
+                                         (old_import,)).fetchone()
+                if report and json.loads(report['report']).get('source_sha256') == batch.file_hash:
+                    return {'status': 'duplicate', 'path': batch.path, 'id': old_import}
+        advance_types = {'vorabpauschale', 'vorabpauschale_ausland'}
+        by_period = {(account_key(event.get('account', '')), event.get('security_ref', ''),
+                      str(event.get('income_year') or ''), event.get('type', '')): event
+                     for event in existing_events if event.get('type') in advance_types}
+        unique = []
+        seen_ids = set()
+        for event in batch.tax_events:
+            serialized = asdict(event)
+            if not event.external_id or event.external_id in seen_ids:
+                raise ValueError('Steuerereignis benötigt eine eindeutige externe ID; Doppelimport abgewiesen.')
+            seen_ids.add(event.external_id)
+            if event.external_id in by_id:
+                continue
+            period_key = (account_key(event.account), event.security_ref,
+                          str(event.income_year or ''), event.type)
+            conflict = by_period.get(period_key) if event.type in advance_types else None
+            if conflict is not None:
+                raise ValueError(
+                    f'Für {event.security_ref or "das Wertpapier"} im Depot {event.account} ist für das '
+                    f'Ertragsjahr {event.income_year or "unbekannt"} bereits eine Vorabpauschale gespeichert.')
+            unique.append(event)
+            by_id[event.external_id] = serialized
+            if event.type in advance_types:
+                by_period[period_key] = serialized
+        batch.tax_events = unique
+        return None
+
+    def _deduplicate_tax_details(self, batch):
+        """Remove existing tax details, preserving the historical duplicate result."""
+        if not batch.tax_details:
+            return None
+        existing_ids = {record['payload'].get('external_id'): record['import_id']
+                        for record in self.model_records(kind='tax_details')}
+        seen_ids = set()
+        unique = []
+        duplicate_imports = []
+        for record in batch.tax_details:
+            if not record.external_id or record.external_id in seen_ids:
+                raise ValueError('Steuerdetail benötigt eine eindeutige externe ID; Doppelimport abgewiesen.')
+            seen_ids.add(record.external_id)
+            if record.external_id not in existing_ids:
+                unique.append(record)
+                existing_ids[record.external_id] = None
+            else:
+                duplicate_imports.append(existing_ids[record.external_id])
+        batch.tax_details = unique
+        if (not unique and duplicate_imports and not batch.snapshots and not batch.balances
+                and not batch.transactions and not batch.documents and not batch.tax_events
+                and not batch.securities and not batch.accounts and not batch.statements
+                and not batch.cost_reports and not batch.events):
+            return {'status': 'duplicate', 'path': batch.path,
+                    'id': next(iid for iid in duplicate_imports if iid is not None)}
+        return None
+
+    def import_batch(self, batch):
+        if batch.errors:
+            raise ValueError('; '.join(batch.errors))
+        assignments, records, new_accounts, rule_scope = self._prepare_import_accounts(batch)
+        self._validate_import_rows(batch)
+        from .comdirect_identity import preserve_booking_ids
+        batch = preserve_booking_ids(self, batch)
+        duplicate_result = self._deduplicate_tax_events(batch)
+        if duplicate_result:
+            return duplicate_result
+        duplicate_result = self._deduplicate_tax_details(batch)
+        if duplicate_result:
+            return duplicate_result
+        (payload, model_collections, prepared_documents, original_content,
+         import_key) = self._prepare_import_identity(batch, assignments)
         duplicate = self.db.execute('SELECT id FROM imports WHERE file_hash=? AND active=1', (import_key,)).fetchone()
         result = {'status': 'imported', 'snapshots': 0, 'balances': 0, 'transactions': 0, 'unchanged': 0}
         with self.db:
