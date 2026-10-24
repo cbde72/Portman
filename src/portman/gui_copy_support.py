@@ -57,9 +57,8 @@ class GlobalCopySupport(QObject):
     """Apply copy behaviour lazily and route table shortcuts by current focus."""
 
     def eventFilter(self, watched, event):
-        if event.type() in (QEvent.Type.Polish, QEvent.Type.Show):
-            if isinstance(watched, QWidget):
-                configure_copy_widget(watched)
+        if event.type() in (QEvent.Type.Polish, QEvent.Type.Show) and isinstance(watched, QWidget):
+            configure_copy_widget(watched)
         if event.type() == QEvent.Type.KeyPress and isinstance(event, QKeyEvent):
             table = _table_for(QApplication.focusWidget())
             if table is not None and event.matches(QKeySequence.StandardKey.Copy):
