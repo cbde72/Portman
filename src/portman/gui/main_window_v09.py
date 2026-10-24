@@ -72,7 +72,7 @@ class MainWindowV09Mixin:
             raise
         install_version_basics(self, "PortMan 09")
         self.job_center = JobCenter(self)
-        menu = self.create_v09_menus()
+        self.create_v09_menus()
         from portman.portfolio_dialogs import install_portfolio_menu
 
         install_portfolio_menu(self)
@@ -86,7 +86,7 @@ class MainWindowV09Mixin:
         self.set_compact(self.compact_action.isChecked())
         self.update_totals()
         self.repository.defer_initial_views = False
-        self.install_v09_workflows(menu)
+        self.install_v09_workflows()
         self._scope_dirty = set(self._scope_refreshers)
         self.show_workspace(self.settings.get("active_workspace", "dashboard"))
         self.setWindowTitle("PortMan 09 · " + self.portfolio_label + " · " + self.pages.get(self.settings.get("active_workspace"), ("Übersicht",))[0])
@@ -179,7 +179,7 @@ class MainWindowV09Mixin:
         else:
             super().refresh_all_views()
 
-    def install_v09_workflows(self, menu):
+    def install_v09_workflows(self):
         from portman.workflows_v09 import OperationsDialog, SessionDialog, SearchDialog
 
         edit_menu = getattr(self, "edit_menu", None)
@@ -192,20 +192,13 @@ class MainWindowV09Mixin:
             action.triggered.connect(callback)
             if shortcut:
                 action.setShortcut(shortcut)
-            if label == "Globale Suche":
+            if label in ("Globale Suche", "Buchungen, Gebühren und Regelmäßigkeit"):
                 if edit_menu is None:
                     edit_menu = self.menuBar().addMenu("&Bearbeiten")
                     self.edit_menu = edit_menu
                 edit_menu.addAction(action)
-            elif label == "Buchungen, Gebühren und Regelmäßigkeit":
-                if edit_menu is None:
-                    edit_menu = self.menuBar().addMenu("&Bearbeiten")
-                    self.edit_menu = edit_menu
-                edit_menu.addAction(action)
-            elif label == "Importsitzungen verwalten":
-                self.import_menu.addAction(action)
             else:
-                menu.addAction(action)
+                self.import_menu.addAction(action)
         from portman.gui.dockable_toolbar import DockableToolbar
 
         self.period_toolbar = DockableToolbar(self, "&Analysezeitraum", "v09_period")
