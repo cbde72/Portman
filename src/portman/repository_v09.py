@@ -240,9 +240,10 @@ class RepositoryV09(RepositoryV07):
         transactions = resolved_transactions
         by_external = {tx.get('external_id'): tx for tx in transactions if tx.get('external_id')}
         existing_fee_refs = {row['fee_ref'] for row in self.db.execute('SELECT fee_ref FROM fee_links')}
-        account_aliases = {row['account_key']: row['account_key'] for row in self.account_records()}
+        account_records = self.account_records()
+        account_aliases = {row['account_key']: row['account_key'] for row in account_records}
         account_aliases.update({account_key(row['name']): row['account_key']
-                                for row in self.account_records()})
+                                for row in account_records})
 
         def account_identity(value):
             key = account_key(value or '')

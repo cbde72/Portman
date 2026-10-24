@@ -16,11 +16,10 @@ def portfolio_name(folder):
 
 def available_portfolios(root):
     root = Path(root)
-    result = [('Standardportfolio', root / 'data/v09')]
-    for file in sorted((root / 'data/portfolios').glob('*/portfolio.json')):
-        if (file.parent / 'portfolio.sqlite').is_file():
-            result.append((portfolio_name(file.parent), file.parent))
-    return result
+    return [('Standardportfolio', root / 'data/v09'), *(
+        (portfolio_name(file.parent), file.parent)
+        for file in sorted((root / 'data/portfolios').glob('*/portfolio.json'))
+        if (file.parent / 'portfolio.sqlite').is_file())]
 
 
 def startup_portfolio(root):
