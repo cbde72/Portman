@@ -246,6 +246,28 @@ class ImportSession:
         return dict(files=len(results),imported=sum(r['status']=='imported' for r in results),unchanged=sum(r['status']=='duplicate' for r in results),
                     skipped_bookings=skipped,replaced_bookings=len(replacements),selected_bookings=sum(len(b.transactions) for b in selected),errors=sum(r['status']=='error' for r in results))
 
+    @staticmethod
+    def _record_replacements(repo, batch_index, replacements, active, result):
+        """Persist validated supersessions after a batch was imported."""
+        for key,old,reason,new_id in replacements:
+            if key[0] != batch_index:
+                continue
+            if reference(old) not in active:
+                raise ValueError('Zu ersetzende Buchung ist nicht mehr aktiv.')
+            if result['status'] != 'imported':
+                raise ValueError('Eine doppelte Datei kann keine Buchung ersetzen. Auswahl prüfen.')
+            saved = repo.db.execute(
+                'SELECT 1 FROM transactions WHERE import_id=? AND external_id=? AND account=?',
+                (result['id'], new_id, key[1]),
+            ).fetchone()
+            if not saved:
+                raise ValueError('Ersatzbuchung wurde nicht gespeichert.')
+            repo.db.execute(
+                'INSERT INTO transaction_supersessions(old_import,old_account,old_id,new_import,new_account,new_id,reason) '
+                'VALUES(?,?,?,?,?,?,?)',
+                (old['import_id'], old['depot'], old['external_id'], result['id'], key[1], new_id, reason),
+            )
+
     def apply(self,repo,job,resolved):
         report_phase(job, 'Buchungen und Belege übernehmen …')
         selected,replacements=resolved; results=[]
@@ -267,13 +289,9 @@ class ImportSession:
             result=repo.commit_batches([b])[0]
             result['path']=b.path; results.append(result)
             if result['status']=='error': raise ValueError('; '.join(result.get('errors',[])))
-            for key,old,reason,new_id in replacements:
-                if key[0]!=i: continue
-                if reference(old) not in active: raise ValueError('Zu ersetzende Buchung ist nicht mehr aktiv.')
-                if result['status']!='imported': raise ValueError('Eine doppelte Datei kann keine Buchung ersetzen. Auswahl prüfen.')
-                if not repo.db.execute('SELECT 1 FROM transactions WHERE import_id=? AND external_id=? AND account=?',(result['id'],new_id,key[1])).fetchone(): raise ValueError('Ersatzbuchung wurde nicht gespeichert.')
-                repo.db.execute('INSERT INTO transaction_supersessions(old_import,old_account,old_id,new_import,new_account,new_id,reason) VALUES(?,?,?,?,?,?,?)',
-                    (old['import_id'],old['depot'],old['external_id'],result['id'],key[1],new_id,reason))
+            # Some non-UI integration callers intentionally invoke apply with
+            # no session instance, so keep this helper independent of self.
+            ImportSession._record_replacements(repo, i, replacements, active, result)
             job.progress.emit(i+1,len(selected))
         report_phase(job, 'Wertpapier-Stammdaten abgleichen …')
         repo.sync_security_master()
