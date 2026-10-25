@@ -1,0 +1,10 @@
+﻿kind;path;old_severity;new_severity;old_codes;new_codes;content_changed
+regressions;baader/3128164_20261007 (1)/3128164/PDF/20240227/3128164_01_0__26172813_wertpapier-ereignis-swift-faehig_526758625_20240227.pdf;ERROR;WARNING;"[""CANCELLATION""]";"[""DIVIDEND_TAX""]";False
+regressions;baader/3128164_20261007 (1)/3128164/PDF/3128164_01_0__26172813_wertpapier-ereignis-swift-faehig_526758625_20240227.pdf;ERROR;WARNING;"[""CANCELLATION""]";"[""DIVIDEND_TAX""]";False
+regressions;baader/3128164_20261009/3128164/PDF/20240227/3128164_01_0__26172813_wertpapier-ereignis-swift-faehig_526758625_20240227.pdf;ERROR;WARNING;"[""CANCELLATION""]";"[""DIVIDEND_TAX""]";False
+resolved;baader/3128164_20261007 (1)/3128164/PDF/20240227/3128164_01_0__26172813_wertpapier-ereignis-swift-faehig_526758625_20240227.pdf;ERROR;WARNING;"[""CANCELLATION""]";"[""DIVIDEND_TAX""]";False
+resolved;baader/3128164_20261007 (1)/3128164/PDF/3128164_01_0__26172813_wertpapier-ereignis-swift-faehig_526758625_20240227.pdf;ERROR;WARNING;"[""CANCELLATION""]";"[""DIVIDEND_TAX""]";False
+resolved;baader/3128164_20261009/3128164/PDF/20240227/3128164_01_0__26172813_wertpapier-ereignis-swift-faehig_526758625_20240227.pdf;ERROR;WARNING;"[""CANCELLATION""]";"[""DIVIDEND_TAX""]";False
+changed;baader/3128164_20261007 (1)/3128164/PDF/20240227/3128164_01_0__26172813_wertpapier-ereignis-swift-faehig_526758625_20240227.pdf;ERROR;WARNING;"[""CANCELLATION""]";"[""DIVIDEND_TAX""]";False
+changed;baader/3128164_20261007 (1)/3128164/PDF/3128164_01_0__26172813_wertpapier-ereignis-swift-faehig_526758625_20240227.pdf;ERROR;WARNING;"[""CANCELLATION""]";"[""DIVIDEND_TAX""]";False
+changed;baader/3128164_20261009/3128164/PDF/20240227/3128164_01_0__26172813_wertpapier-ereignis-swift-faehig_526758625_20240227.pdf;ERROR;WARNING;"[""CANCELLATION""]";"[""DIVIDEND_TAX""]";False
