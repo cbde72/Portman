@@ -170,61 +170,93 @@ class ImportSession:
             rows.append(old)
         return rows
 
-    def resolve(self,batches,decisions):
-        selected=deepcopy(batches); replacements=[]; skip=set(); rename=set()
-        conflicts=self.conflicts(batches)
-        groups=defaultdict(list)
-        for c in conflicts: groups[(c['batch'],c['new']['account'],c['new']['external_id'])].append(c)
-        replaced=set()
-        for group in groups.values():
-            choices=[decisions.get(c['key'],{}).get('action') for c in group]
-            if 'skip' in choices and any(x!='skip' for x in choices): raise ValueError('Widersprüchliche Entscheidung: eine neue Buchung kann nicht zugleich übersprungen und übernommen werden.')
-            if choices.count('replace')>1: raise ValueError('Eine neue Buchung darf höchstens eine alte Buchung ersetzen.')
+    @staticmethod
+    def _validate_group_decisions(conflicts, decisions):
+        groups = defaultdict(list)
         for conflict in conflicts:
-            decision=decisions.get(conflict['key'],{})
-            action=decision.get('action')
-            if action not in ('keep','skip','replace'): raise ValueError('Alle Buchungsüberschneidungen ausdrücklich entscheiden.')
-            key=(conflict['batch'],conflict['new']['account'],conflict['new']['external_id'])
-            if action=='skip': skip.add(key)
-            elif action=='replace':
-                chosen=decision.get('old_ref')
-                if conflict['candidate_count']>1 and not chosen and len(self.candidates(conflict['key']))>1: raise ValueError('Bei mehreren Treffern den zu ersetzenden Beleg ausdrücklich auswählen.')
-                if chosen:
-                    matches=[t for t in self.candidates(conflict['key']) if reference(t)==chosen]
-                    if not matches: raise ValueError('Gewählter Ersatzbeleg passt nicht mehr zur Buchung.')
-                    conflict={**conflict,'old':matches[0],'old_ref':chosen}
-                if conflict['old']['import_id'] < 0: raise ValueError('Zwischen neuen Dateien nur Behalten oder Überspringen wählen.')
-                if not decision.get('reason','').strip(): raise ValueError('Ersetzung benötigt eine Begründung.')
-                if conflict['old_ref'] in replaced: raise ValueError('Eine alte Buchung kann nicht mehrfach ersetzt werden.')
-                replaced.add(conflict['old_ref'])
-                replacements.append((key,conflict['old'],decision['reason']))
-                rename.add(key)
-            elif action == 'keep':
-                # A kept conflict must still remain distinguishable from the current record.
-                # Otherwise same-account/date/amount duplicates can later be merged or hidden.
-                same_signature = (
-                    conflict.get('id_match')
-                    or conflict['old']['external_id'] == conflict['new']['external_id']
-                    or (
-                        conflict['old'].get('account') == conflict['new'].get('account')
-                        and conflict['old'].get('date') == conflict['new'].get('date')
-                        and conflict['old'].get('amount') == conflict['new'].get('amount')
-                        and conflict['old'].get('currency') == conflict['new'].get('currency')
-                    )
-                )
-                if same_signature:
+            key = (conflict['batch'], conflict['new']['account'], conflict['new']['external_id'])
+            groups[key].append(conflict)
+        for group in groups.values():
+            choices = [decisions.get(conflict['key'], {}).get('action') for conflict in group]
+            if 'skip' in choices and any(choice != 'skip' for choice in choices):
+                raise ValueError('Widersprüchliche Entscheidung: eine neue Buchung kann nicht zugleich übersprungen und übernommen werden.')
+            if choices.count('replace') > 1:
+                raise ValueError('Eine neue Buchung darf höchstens eine alte Buchung ersetzen.')
+
+    def _selected_replacement(self, conflict, decision):
+        chosen = decision.get('old_ref')
+        if conflict['candidate_count'] > 1 and not chosen and len(self.candidates(conflict['key'])) > 1:
+            raise ValueError('Bei mehreren Treffern den zu ersetzenden Beleg ausdrücklich auswählen.')
+        if chosen:
+            matches = [transaction for transaction in self.candidates(conflict['key'])
+                       if reference(transaction) == chosen]
+            if not matches:
+                raise ValueError('Gewählter Ersatzbeleg passt nicht mehr zur Buchung.')
+            conflict = {**conflict, 'old': matches[0], 'old_ref': chosen}
+        if conflict['old']['import_id'] < 0:
+            raise ValueError('Zwischen neuen Dateien nur Behalten oder Überspringen wählen.')
+        if not decision.get('reason', '').strip():
+            raise ValueError('Ersetzung benötigt eine Begründung.')
+        return conflict
+
+    @staticmethod
+    def _kept_conflict_requires_rename(conflict):
+        old, new = conflict['old'], conflict['new']
+        return bool(
+            conflict.get('id_match')
+            or old['external_id'] == new['external_id']
+            or (old.get('account') == new.get('account')
+                and old.get('date') == new.get('date')
+                and old.get('amount') == new.get('amount')
+                and old.get('currency') == new.get('currency')))
+
+    def _resolution_actions(self, conflicts, decisions):
+        skip, rename, replacements, replaced = set(), set(), [], set()
+        for conflict in conflicts:
+            decision = decisions.get(conflict['key'], {})
+            action = decision.get('action')
+            if action not in ('keep', 'skip', 'replace'):
+                raise ValueError('Alle Buchungsüberschneidungen ausdrücklich entscheiden.')
+            key = (conflict['batch'], conflict['new']['account'], conflict['new']['external_id'])
+            if action == 'skip':
+                skip.add(key)
+                continue
+            if action == 'keep':
+                if self._kept_conflict_requires_rename(conflict):
                     rename.add(key)
-        renamed={}
-        for i,b in enumerate(selected):
-            txs=[]
-            for t in b.transactions:
-                key=(i,t.account,t.external_id)
-                if key in skip: continue
+                continue
+            conflict = self._selected_replacement(conflict, decision)
+            if conflict['old_ref'] in replaced:
+                raise ValueError('Eine alte Buchung kann nicht mehrfach ersetzt werden.')
+            replaced.add(conflict['old_ref'])
+            replacements.append((key, conflict['old'], decision['reason']))
+            rename.add(key)
+        return skip, rename, replacements
+
+    def _apply_resolution(self, selected, skip, rename):
+        renamed = {}
+        for index, batch in enumerate(selected):
+            transactions = []
+            for transaction in batch.transactions:
+                key = (index, transaction.account, transaction.external_id)
+                if key in skip:
+                    continue
                 if key in rename:
-                    t.external_id += ':v09:'+digest([self.folder.name,i,t.external_id])[:16]
-                renamed[key]=t.external_id; txs.append(t)
-            b.transactions=txs
-        return selected,[(key,old,reason,renamed[key]) for key,old,reason in replacements if key not in skip]
+                    transaction.external_id += ':v09:' + digest(
+                        [self.folder.name, index, transaction.external_id])[:16]
+                renamed[key] = transaction.external_id
+                transactions.append(transaction)
+            batch.transactions = transactions
+        return renamed
+
+    def resolve(self,batches,decisions):
+        selected = deepcopy(batches)
+        conflicts = self.conflicts(batches)
+        self._validate_group_decisions(conflicts, decisions)
+        skip, rename, replacements = self._resolution_actions(conflicts, decisions)
+        renamed = self._apply_resolution(selected, skip, rename)
+        return selected, [(key, old, reason, renamed[key])
+                          for key, old, reason in replacements if key not in skip]
 
     def rebase(self):
         # Retain a decision only when both the incoming payload and the old record match.
