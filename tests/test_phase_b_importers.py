@@ -133,6 +133,31 @@ def test_comdirect_trade_prefers_business_quantity_for_both_text_layouts(executi
     assert tx.field_sources['quantity'] == 'comdirect Geschäftsabrechnung · Nennwert/Zum Kurs von'
 
 
+@pytest.mark.parametrize(('quantity', 'tax_quantity', 'price', 'market'), [
+    ('1,001', '1', '24,5859', '24,61'),
+    ('1,007', '1', '24,43577', '24,61'),
+    ('2,004', '2', '24,579', '49,26'),
+])
+def test_comdirect_trade_accepts_tax_page_whole_units_after_value_proof(
+        quantity, tax_quantity, price, market):
+    plugin = load_plugin('comdirect_ertraege.py')
+    source = comdirect_purchase_document(
+        f'Nennwert Zum Kurs von St. {quantity} EUR {price}',
+        tax_quantity=tax_quantity, market=market)
+    batch = plugin.parse(source, plugin.detect(source)[0],
+                         ParseContext(ImportBatch('fractional.pdf', quantity, source_sheet='PDF')))
+    assert batch.transactions[0].quantity == quantity.replace(',', '.')
+
+
+def test_comdirect_trade_still_rejects_unrelated_quantity_conflict():
+    plugin = load_plugin('comdirect_ertraege.py')
+    source = comdirect_purchase_document(
+        'Nennwert Zum Kurs von St. 1,001 EUR 24,5859', tax_quantity='2', market='24,61')
+    with pytest.raises(ValueError, match='Stückzahlangaben widersprüchlich'):
+        plugin.parse(source, plugin.detect(source)[0],
+                     ParseContext(ImportBatch('conflict.pdf', 'conflict', source_sheet='PDF')))
+
+
 def test_comdirect_trade_uses_positive_tax_quantity_only_after_value_check():
     plugin = load_plugin('comdirect_ertraege.py')
     source = comdirect_purchase_document(

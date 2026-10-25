@@ -58,17 +58,18 @@ def parse(source):
     return detection, importer.parse(source, detection, ParseContext(batch))
 
 
-def dividend_notice():
-    text = '''comdirect bank AG Datum: 27.05.2026 Depotnummer:476492400
+def dividend_notice(*, gross='4,07', taxable='4,07', used='4,07', after='0,00',
+                    kapst='0,00', soli='0,00', church='0,00', paid='0,00', net='4,07'):
+    text = f'''comdirect bank AG Datum: 27.05.2026 Depotnummer:476492400
 Referenz-Nummer:1SINHRMXMUV005VO
 SteuerlicheBehandlung:InländischeDividendevom27.05.2026
 Stk.3,878FRESENIUSSE+CO.KGAAO.N.,WKN/ISIN:578560/DE0005785604
-ZuIhrenGunstenvorSteuern:EUR4,07
-SteuerbemessungsgrundlagevorVerlustverrechnungEUR4,07
-inAnspruchgenommenerFreistellungsauftragEUR4,07
-SteuerbemessungsgrundlagenachVerlustverrechnungEUR0,00
-KapitalertragsteuerEUR0,00 SolidaritätszuschlagEUR0,00 KirchensteuerEUR0,00
-abgeführteSteuernEUR0,00 ZuIhrenGunstennachSteuern:EUR4,07
+ZuIhrenGunstenvorSteuern:EUR{gross}
+SteuerbemessungsgrundlagevorVerlustverrechnungEUR{taxable}
+{f'inAnspruchgenommenerFreistellungsauftragEUR{used}' if used is not None else ''}
+{f'SteuerbemessungsgrundlagenachVerlustverrechnungEUR{after}' if after is not None else ''}
+KapitalertragsteuerEUR{kapst} SolidaritätszuschlagEUR{soli} KirchensteuerEUR{church}
+abgeführteSteuernEUR{paid} ZuIhrenGunstennachSteuern:EUR{net}
 DieGutschrifterfolgtmitValuta27.05.2026aufKontoEURmitderIBANDE71200411330476492440'''
     return PdfDocument(Path('dividend-tax.pdf'), b'%PDF-test\n%%EOF', 'dividend-tax',
                        (PdfPage(1, text),))
@@ -148,6 +149,25 @@ def test_domestic_share_dividend_tax_notice_preserves_documented_zeroes():
     assert (event.capital_gains_tax, event.solidarity_surcharge,
             event.church_tax) == ('0.00', '0.00', '0.00')
     assert batch.documents[0].content_b64
+
+
+def test_domestic_dividend_without_fsa_block_keeps_optional_fields_missing():
+    _detection, batch = parse(dividend_notice(
+        gross='13,18', taxable='13,18', used=None, after=None,
+        kapst='3,30', soli='0,18', paid='3,48', net='9,70'))
+    event = batch.tax_events[0]
+    assert event.used_exemption is None
+    assert event.after_partial_exemption is None
+    assert batch.transactions == []
+
+
+def test_domestic_dividend_does_not_balance_original_document_contradiction():
+    _detection, batch = parse(dividend_notice(
+        gross='9,46', taxable='0,00', used=None, after=None, paid='0,00', net='6,96'))
+    event = batch.tax_events[0]
+    assert (event.gross_income, event.paid_taxes) == ('9.46', '0.00')
+    assert batch.transactions == []
+    assert any('nicht rechnerisch vereinbar' in warning for warning in batch.warnings)
 
 
 def test_existing_distribution_is_not_duplicated_and_reimport_is_idempotent(tmp_path):

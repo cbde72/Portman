@@ -204,6 +204,34 @@ Steuerbemessungsgrundlage vor Verlustverrechnung EUR 8,77
     assert event.account == 'Depot 476492400'
 
 
+def test_comdirect_vorabpauschale_without_fsa_line_keeps_usage_missing():
+    import importlib.util
+    path = Path(__file__).resolve().parents[1] / 'pdf_plugins' / 'comdirect_ertraege.py'
+    spec = importlib.util.spec_from_file_location('comdirect_advance_tax_no_fsa_test', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    text = '''comdirect bank AG
+Datum: 15.01.2021
+Referenz-Nummer: 1GKXGEYQM78003GK
+Depotnummer: 4764924 00
+Steuerliche Behandlung: Vorabpauschale Ausland vom 04.01.2021
+Stk. 182,082 IS C.MSCI EMIMI U.ETF DLA , WKN / ISIN: A111X9 / IE00BKM4GZ66
+Vorabpauschale EUR 2,22
+Teilfreistellung (30%) EUR -0,67
+Steuerbemessungsgrundlage vor Verlustverrechnung EUR 0,00
+'''
+    parsed_document = document(text)
+    detection = module.plugin.detect(parsed_document)[0]
+    batch = module.plugin.parse(
+        parsed_document, detection, ParseContext(ImportBatch('tax.pdf', 'no-fsa', source_sheet='PDF')))
+    event = batch.tax_events[0]
+    assert (event.advance_tax_base, event.partial_exemption_amount, event.taxable_income) == (
+        '2.22', '0.67', '0.00')
+    assert event.used_exemption is None
+    assert event.loss_offset is None
+    assert batch.transactions == []
+
+
 def test_comdirect_trade_extracts_provision_and_settlement_identity():
     import importlib.util
     path = Path(__file__).resolve().parents[1] / 'pdf_plugins' / 'comdirect_ertraege.py'

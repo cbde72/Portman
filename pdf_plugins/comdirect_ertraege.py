@@ -153,10 +153,6 @@ def _trade_quantity(document, tax_security):
         market = money(execution.group('market'))
         if primary_qty is not None and Decimal(primary_qty) <= 0:
             primary_qty = None
-        if primary_qty is not None and tax_qty is not None and Decimal(tax_qty) != Decimal(primary_qty):
-            raise ValueError(
-                f'Stückzahlangaben widersprüchlich: Geschäftsabrechnung {primary_qty} Stück, '
-                f'steuerliche Mitteilung {tax_qty} Stück.')
         qty = primary_qty or tax_qty
         if qty is None:
             raise ValueError('Stückzahl fehlt sowohl in der Geschäftsabrechnung als auch als positive Angabe '
@@ -169,6 +165,15 @@ def _trade_quantity(document, tax_security):
                 f'Geschäftsabrechnung widersprüchlich: {qty} Stück × {price} EUR ergeben '
                 f'{calculated:.2f} EUR, ausgewiesen sind {Decimal(market):.2f} EUR '
                 f'(Toleranz {TRADE_VALUE_TOLERANCE:.2f} EUR).')
+        if primary_qty is not None and tax_qty is not None and Decimal(tax_qty) != Decimal(primary_qty):
+            # Older savings-plan notices print only the whole-unit portion on
+            # the separate tax page (1 for 1,001; 2 for 2,004).  Accept that
+            # narrowly documented layout only after the business quantity has
+            # been independently proven by quantity × price = market value.
+            if not (Decimal(primary_qty) % 1 and Decimal(tax_qty) == Decimal(primary_qty) // 1):
+                raise ValueError(
+                    f'Stückzahlangaben widersprüchlich: Geschäftsabrechnung {primary_qty} Stück, '
+                    f'steuerliche Mitteilung {tax_qty} Stück.')
         source = ('comdirect Geschäftsabrechnung · Nennwert/Zum Kurs von' if primary_qty is not None
                   else 'comdirect steuerliche Mitteilung · Stk. (sekundär, gegen Geschäftsabrechnung geprüft)')
         return qty, price, market, page_number, source
@@ -835,17 +840,16 @@ class ComdirectErtraegePlugin:
         settlement = INVESTMENT_TAX_SETTLEMENT.search(compact)
         depot = INVESTMENT_TAX_DEPOT.search(compact)
         reference = INVESTMENT_TAX_REFERENCE.search(compact)
-        required = (title, security, gross, taxable, used, after, paid, net, settlement, depot, reference)
+        required = (title, security, gross, taxable, paid, net, settlement, depot, reference)
         if not all(required):
             raise ValueError('Inländische Dividende oder belegte Steuerfelder nicht vollständig erkannt.')
-        values = {name: money(match.group('a')) for name, match in (
+        values = {name: money(match.group('a')) if match else None for name, match in (
             ('gross', gross), ('taxable', taxable), ('used', used), ('after', after),
             ('paid', paid), ('net', net))}
-        if any(value is None for value in values.values()):
+        if any(values[name] is None for name in ('gross', 'taxable', 'paid', 'net')):
             raise ValueError('Ein Betrag der Dividenden-Steuermitteilung ist ungültig.')
-        if abs(Decimal(values['gross']) - Decimal(values['paid']) - Decimal(values['net'])) > Decimal('0.01'):
-            raise ValueError('Bruttodividende minus Gesamtsteuer passt nicht zur Nettoauszahlung.')
-        if Decimal(values['used']) > Decimal(values['taxable']):
+        unexplained_net = abs(Decimal(values['gross']) - Decimal(values['paid']) - Decimal(values['net']))
+        if values['used'] is not None and Decimal(values['used']) > Decimal(values['taxable']):
             raise ValueError('Freistellungsauftrag übersteigt die Steuerbemessungsgrundlage.')
         components = {name: money(match.group('a')) for name, pattern in INVESTMENT_TAX_COMPONENTS.items()
                       for match in [pattern.search(compact)] if match}
@@ -889,6 +893,10 @@ class ComdirectErtraegePlugin:
         batch.warnings.append(
             f'Separate Dividenden-Steuermitteilung: Brutto {values["gross"]} EUR, '
             f'Steuer {values["paid"]} EUR, Netto {values["net"]} EUR. Keine zweite Dividende erzeugt.')
+        if unexplained_net > Decimal('0.01'):
+            batch.warnings.append(
+                'Brutto, ausgewiesene Steuern und Netto sind im Originalbeleg nicht rechnerisch '
+                'vereinbar; Werte wurden nicht ausgeglichen und es wurde keine Kontobuchung erzeugt.')
         return batch
 
     def _investment_distribution_tax(self, document, batch):
@@ -1014,20 +1022,25 @@ class ComdirectErtraegePlugin:
         base, partial = ADVANCE_TAX_BASE.search(text), ADVANCE_TAX_PARTIAL.search(text)
         taxable, used = ADVANCE_TAX_TAXABLE.search(text), ADVANCE_TAX_USED.search(text)
         after = ADVANCE_TAX_AFTER.search(text)
-        if not all((title, security, base, partial, taxable, used)):
-            raise ValueError('Vorabpauschale, Teilfreistellung, Steuerbemessungsgrundlage oder Freistellungsnutzung nicht erkannt.')
+        if not all((title, security, base, partial, taxable)):
+            raise ValueError('Vorabpauschale, Teilfreistellung oder Steuerbemessungsgrundlage nicht erkannt.')
         treatment_date = parse_date(title.group('date'))
-        values = {name: money(match.group('a')) for name, match in
+        values = {name: money(match.group('a')) if match else None for name, match in
                   (('base', base), ('partial', partial), ('taxable', taxable), ('used', used))}
-        if not treatment_date or any(value is None for value in values.values()):
+        if not treatment_date or any(values[name] is None for name in ('base', 'partial', 'taxable')):
             raise ValueError('Datum oder Steuerbetrag der Vorabpauschale ist ungültig.')
-        if abs(Decimal(values['base']) - Decimal(values['partial']) - Decimal(values['taxable'])) > Decimal('0.01'):
+        after_partial = Decimal(values['base']) - Decimal(values['partial'])
+        if Decimal(values['taxable']) - after_partial > Decimal('0.01'):
+            raise ValueError('Steuerbemessungsgrundlage übersteigt Vorabpauschale nach Teilfreistellung.')
+        if used is not None and abs(after_partial - Decimal(values['taxable'])) > Decimal('0.01'):
             raise ValueError('Vorabpauschale minus Teilfreistellung passt nicht zur Steuerbemessungsgrundlage.')
-        if Decimal(values['used']) > Decimal(values['taxable']):
+        if values['used'] is not None and Decimal(values['used']) > Decimal(values['taxable']):
             raise ValueError('Der verbrauchte Freistellungsauftrag übersteigt die Steuerbemessungsgrundlage.')
         after_value = money(after.group('a')) if after else None
-        loss_offset = (Decimal(values['taxable']) - Decimal(values['used']) - Decimal(after_value or '0'))
-        if loss_offset < Decimal('-0.01'):
+        loss_offset = None
+        if values['used'] is not None and after_value is not None:
+            loss_offset = Decimal(values['taxable']) - Decimal(values['used']) - Decimal(after_value)
+        if loss_offset is not None and loss_offset < Decimal('-0.01'):
             raise ValueError('Freistellungsauftrag, Verlustverrechnung und verbleibende Steuerbasis widersprechen sich.')
 
         components = {name: money(match.group('a')) for name, pattern in ADVANCE_TAX_COMPONENTS.items()
@@ -1063,7 +1076,7 @@ class ComdirectErtraegePlugin:
             document_date=document_date, security_ref=isin, quantity=qty,
             currency='EUR', taxable_income=values['taxable'], advance_tax_base=values['base'],
             partial_exemption_amount=values['partial'], used_exemption=values['used'],
-            loss_offset=f'{max(loss_offset, Decimal()):.2f}',
+            loss_offset=(f'{max(loss_offset, Decimal()):.2f}' if loss_offset is not None else None),
             capital_gains_tax=components.get('capital_gains_tax'),
             solidarity_surcharge=components.get('solidarity_surcharge'),
             church_tax=components.get('church_tax'), paid_taxes=paid_taxes,
@@ -1099,7 +1112,13 @@ class ComdirectErtraegePlugin:
         batch.account_names.append(account)
         batch.warnings.append(
             f"Vorabpauschale {values['base']} EUR erkannt; nach {partial.group('rate')} % Teilfreistellung "
-            f"wurden {values['used']} EUR Freistellungsauftrag verbraucht. Keine Kontobuchung erzeugt.")
+            + (f"wurden {values['used']} EUR Freistellungsauftrag verbraucht. " if values['used'] is not None
+               else 'ist keine Freistellungsnutzung ausgewiesen. ')
+            + 'Keine Kontobuchung erzeugt.')
+        if used is None and abs(after_partial - Decimal(values['taxable'])) > Decimal('0.01'):
+            batch.warnings.append(
+                'Die niedrigere ausgewiesene Steuerbemessungsgrundlage kann ohne FSA-/Verlustzeile nicht '
+                'aufgeteilt werden; fehlende Komponenten bleiben unbekannt.')
         return batch
 
     def _trade(self, document, batch, options=None):
