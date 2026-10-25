@@ -1,0 +1,4 @@
+﻿kind;path;old_severity;new_severity;old_codes;new_codes;content_changed
+regressions;comdirect/Abrechnungen/Wertpapierabrechnung_Kauf_1,003_St._WKN_A0LEW8(ISHSII-DEV.MKT.PR.Y.DLDIS)_vom_01.06.2022_E051A2.pdf;ERROR;ERROR;"[""OCR_LAYOUT"", ""QUANTITY_CONFLICT""]";"[""OCR_LAYOUT"", ""TEXT_EXTRACTION""]";False
+resolved;comdirect/Abrechnungen/Wertpapierabrechnung_Kauf_1,003_St._WKN_A0LEW8(ISHSII-DEV.MKT.PR.Y.DLDIS)_vom_01.06.2022_E051A2.pdf;ERROR;ERROR;"[""OCR_LAYOUT"", ""QUANTITY_CONFLICT""]";"[""OCR_LAYOUT"", ""TEXT_EXTRACTION""]";False
+changed;comdirect/Abrechnungen/Wertpapierabrechnung_Kauf_1,003_St._WKN_A0LEW8(ISHSII-DEV.MKT.PR.Y.DLDIS)_vom_01.06.2022_E051A2.pdf;ERROR;ERROR;"[""OCR_LAYOUT"", ""QUANTITY_CONFLICT""]";"[""OCR_LAYOUT"", ""TEXT_EXTRACTION""]";False

@@ -401,6 +401,10 @@ class CostReport:
     assumed_years: str = ''
     holding_years: str = ''
     annual_projection: list[dict] = field(default_factory=list)
+    # ``ex_ante`` is a simulation before execution, ``ex_post`` reports
+    # actually incurred costs.  Kept in the JSON model record so no database
+    # schema migration is necessary.
+    information_type: str = ''
 
 
 @dataclass

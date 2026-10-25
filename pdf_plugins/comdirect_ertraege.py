@@ -67,15 +67,16 @@ MIFID_COST_TOTAL = re.compile(
     r'(?P<pct>' + AMOUNT + r')\s*%', re.I | re.S)
 MIFID_COST_PHASE_HEADERS = (
     ('kauf', True, re.compile(
-        r'Kosten\s+des\s+Wertpapierkaufes\s*,\s*pro\s+Jahr\s+(?P<amount>' + AMOUNT + r')\s+EU\w*', re.I)),
+        r'Kosten\s+des\s+Wertpapierkaufes\s*(?P<annual>,\s*pro\s+Jahr)?\s+'
+        r'(?P<amount>' + AMOUNT + r')\s*EU\w*', re.I)),
     ('haltedauer', True, re.compile(
         r'Kosten\s+w\S*hrend\s+der\s+Haltedauer\s*\(pro\s+Jahr\)\s+'
-        r'(?P<amount>' + AMOUNT + r')\s+EU\w*', re.I)),
+        r'(?P<amount>' + AMOUNT + r')\s*EU\w*', re.I)),
     ('verkauf', False, re.compile(
-        r'Kosten\s+des\s+Wertpapierverkaufes\s+(?P<amount>' + AMOUNT + r')\s+EU\w*', re.I)),
+        r'Kosten\s+des\s+Wertpapierverkaufes\s+(?P<amount>' + AMOUNT + r')\s*EU\w*', re.I)),
 )
 MIFID_COST_LINE = re.compile(
-    r'^(?P<label>[^\n]*?\[(?:E|F|P)\])\s+(?P<amount>' + AMOUNT + r')\s+EU\w*\s*$', re.I | re.M)
+    r'^(?P<label>[^\n]*?\[(?:E|F|P)\](?:\d+)?)\s*(?P<amount>' + AMOUNT + r')\s*EU\w*\s*$', re.I | re.M)
 MIFID_COST_MARKER_CATEGORY = {'E': 'eigen', 'F': 'fremd', 'P': 'produkt'}
 MIFID_COST_DETAILS = {
     'service_costs': ('Dienstleistungskosten der Bank', True),
@@ -238,7 +239,13 @@ INVESTMENT_TAX_GROSS = re.compile(r'ZuIhrenGunstenvorSteuern:EUR(?P<a>' + AMOUNT
 INVESTMENT_TAX_PARTIAL = re.compile(
     r'Teilfreistellung\((?P<rate>[\d,.]+)%\)EUR-?(?P<a>' + AMOUNT + r')', re.I)
 INVESTMENT_TAX_TAXABLE = re.compile(
-    r'Steuerbemessungsgrundlage(?:vorVerlustverrechnung)?(?:\(\d+\))?EUR(?P<a>' + AMOUNT + r')', re.I)
+    r'Steuerbemessungsgrundlage(?:vorVerlustverrechnung)?(?:\(\d+\))*EUR(?P<a>' + AMOUNT + r')', re.I)
+INVESTMENT_TAX_TAXABLE_BEFORE = re.compile(
+    r'SteuerbemessungsgrundlagevorVerlustverrechnung(?:\(\d+\))*EUR(?P<a>' + AMOUNT + r')', re.I)
+INVESTMENT_TAX_USED = re.compile(
+    r'inAnspruchgenommenerFreistellungsauftragEUR(?P<a>' + AMOUNT + r')', re.I)
+INVESTMENT_TAX_AFTER = re.compile(
+    r'SteuerbemessungsgrundlagenachVerlustverrechnungEUR(?P<a>' + AMOUNT + r')', re.I)
 INVESTMENT_TAX_COMPONENTS = {
     'capital_gains_tax': re.compile(r'KapitalertragsteuerEUR-?(?P<a>' + AMOUNT + r')', re.I),
     'solidarity_surcharge': re.compile(r'Solidarit.tszuschlagEUR-?(?P<a>' + AMOUNT + r')', re.I),
@@ -393,7 +400,9 @@ def _mifid_cost_components(text, security_ref):
             if header:
                 if phase_id in phase_totals:
                     raise ValueError(f'Kostenblock {phase_id} ist mehrfach ausgewiesen.')
-                phase, annual = phase_id, phase_annual
+                phase = phase_id
+                annual = (bool(header.groupdict().get('annual'))
+                          if phase_id == 'kauf' else phase_annual)
                 phase_totals[phase_id] = money(header.group('amount'))
                 matched_header = True
                 break
@@ -479,6 +488,16 @@ def _mifid_filename_metadata(stem, file_hash):
     suffix = re.search(r'_(?P<ref>[A-Z0-9]{6})$', stem, re.I)
     return (sparplan.group('n') if sparplan else '',
             suffix.group('ref').upper() if suffix else file_hash[:6].upper())
+
+
+def _mifid_information_type(text):
+    """Classify the bank's stated perspective without deriving it from values."""
+    if re.search(r'\b(?:Ex[ -]?post|nachtr.gliche|tats.chlich\s+angefallene)\b', text, re.I):
+        return 'ex_post'
+    if (re.search(r'\b(?:Ex[ -]?ante|Kostensimulation|geplante[ns]?\s+Wertpapiergesch.ft)\b', text, re.I)
+            or MIFID_COST_TITLE.search(text)):
+        return 'ex_ante'
+    return 'unknown'
 
 
 class ComdirectErtraegePlugin:
@@ -628,7 +647,8 @@ class ComdirectErtraegePlugin:
             inducements=details['inducements'],
             assumed_years=str(assumed_years) if assumed_years else '',
             holding_years=str(holding_years) if holding_years else '',
-            annual_projection=_mifid_cost_projection(text)))
+            annual_projection=_mifid_cost_projection(text),
+            information_type=_mifid_information_type(text)))
 
         document_title = (f'{document.path.name} · MiFID-II-Kosteninformation – '
                           'keine ausgeführte Transaktion')
@@ -802,7 +822,12 @@ class ComdirectErtraegePlugin:
         title = DIVIDEND_TAX_TITLE.search(compact)
         security = DIVIDEND_TAX_SECURITY.search(compact)
         gross = INVESTMENT_TAX_GROSS.search(compact)
-        taxable = INVESTMENT_TAX_TAXABLE.search(compact)
+        # A notice can print the post-offset basis on page one and the
+        # economically relevant pre-loss basis in the detailed block later.
+        # Prefer the explicitly labelled pre-loss value; never infer it from
+        # gross income or a tax rate.
+        taxable = (INVESTMENT_TAX_TAXABLE_BEFORE.search(compact)
+                   or INVESTMENT_TAX_TAXABLE.search(compact))
         used = DIVIDEND_TAX_USED.search(compact)
         after = DIVIDEND_TAX_AFTER.search(compact)
         paid = INVESTMENT_TAX_PAID.search(compact)
@@ -873,13 +898,16 @@ class ComdirectErtraegePlugin:
         security = INVESTMENT_TAX_SECURITY.search(compact)
         gross = INVESTMENT_TAX_GROSS.search(compact)
         partial = INVESTMENT_TAX_PARTIAL.search(compact)
-        taxable = INVESTMENT_TAX_TAXABLE.search(compact)
+        # Page one may contain the basis after offsets while the detailed
+        # block prints the source value before loss offset/FSA.
+        taxable = (INVESTMENT_TAX_TAXABLE_BEFORE.search(compact)
+                   or INVESTMENT_TAX_TAXABLE.search(compact))
         paid = INVESTMENT_TAX_PAID.search(compact)
         net = INVESTMENT_TAX_NET.search(compact)
         settlement = INVESTMENT_TAX_SETTLEMENT.search(compact)
         depot = INVESTMENT_TAX_DEPOT.search(compact)
         reference = INVESTMENT_TAX_REFERENCE.search(compact)
-        if not all((title, security, gross, partial, taxable, paid, net, settlement, depot, reference)):
+        if not all((title, security, gross, taxable, paid, net, settlement, reference)):
             raise ValueError('Investment-Ausschüttung, Wertpapier, Steuerbasis, Steuern oder Gutschrift nicht vollständig erkannt.')
 
         treatment_date = parse_date(title.group('date'))
@@ -887,11 +915,23 @@ class ComdirectErtraegePlugin:
         document_date_match = INVESTMENT_TAX_DOCUMENT_DATE.search(compact)
         document_date = parse_date(document_date_match.group('d')) if document_date_match else treatment_date
         values = {key: money(match.group('a')) for key, match in (
-            ('gross', gross), ('partial', partial), ('taxable', taxable), ('paid', paid), ('net', net))}
-        if not treatment_date or not value_date or any(value is None for value in values.values()):
+            ('gross', gross), ('taxable', taxable), ('paid', paid), ('net', net))}
+        values['partial'] = money(partial.group('a')) if partial else None
+        required_values = ('gross', 'taxable', 'paid', 'net')
+        if (not treatment_date or not value_date
+                or any(values[name] is None for name in required_values)):
             raise ValueError('Datum oder Betrag der Investment-Ausschüttung ist ungültig.')
-        if abs(Decimal(values['gross']) - Decimal(values['partial']) - Decimal(values['taxable'])) > Decimal('0.01'):
-            raise ValueError('Bruttoausschüttung minus Teilfreistellung passt nicht zur Steuerbemessungsgrundlage.')
+        if (values['partial'] is not None
+                and abs(Decimal(values['gross']) - Decimal(values['partial'])
+                        - Decimal(values['taxable'])) > Decimal('0.01')):
+            # The notice itself allows differences caused by the tax basis,
+            # loss-offset rules and accumulated deemed distributions.  Keep
+            # every printed value and flag the discrepancy instead of
+            # manufacturing an adjustment amount.
+            batch.warnings.append(
+                'Bruttoausschüttung minus Teilfreistellung weicht von der ausgewiesenen '
+                'Steuerbemessungsgrundlage ab; Originalwerte unverändert übernommen, '
+                'keine Ausgleichsbuchung erzeugt.')
         if abs(Decimal(values['gross']) - Decimal(values['paid']) - Decimal(values['net'])) > Decimal('0.01'):
             raise ValueError('Bruttoausschüttung minus Gesamtsteuer passt nicht zur Nettoauszahlung.')
 
@@ -906,13 +946,24 @@ class ComdirectErtraegePlugin:
         isin, wkn = security.group('isin').upper(), security.group('wkn').upper()
         qty = correction_number(security.group('qty'))
         name = ' '.join(security.group('name').split())
-        depot_account = 'Depot ' + depot.group('n')
+        depot_account = 'Depot ' + depot.group('n') if depot else 'comdirect Depot'
         cash_account = 'IBAN ' + settlement.group('iban')
         reference_no = reference.group('r')
         origin = 'inland' if title.group('origin').lower().startswith('inl') else 'ausland'
         event_id = 'pdf-comdirect-investment-distribution-tax-' + digest(
             [depot_account, isin, treatment_date, values['gross'], values['paid'], reference_no])
         payment_id = event_id + '-payment' if Decimal(values['paid']) else ''
+        used_match = INVESTMENT_TAX_USED.search(compact)
+        after_match = INVESTMENT_TAX_AFTER.search(compact)
+        used_exemption = money(used_match.group('a')) if used_match else None
+        after_offset = money(after_match.group('a')) if after_match else None
+        loss_offset = None
+        if used_exemption is not None and after_offset is not None:
+            calculated = (Decimal(values['taxable']) - Decimal(used_exemption)
+                          - Decimal(after_offset))
+            if calculated < Decimal('-0.01'):
+                raise ValueError('Freistellungsauftrag und Steuerbemessungsgrundlagen widersprechen sich.')
+            loss_offset = f'{max(calculated, Decimal()):.2f}'
         batch.tax_events.append(TaxEvent(
             external_id=event_id, account=depot_account,
             type='investment_ausschuettung_' + origin, date=treatment_date,
@@ -920,7 +971,8 @@ class ComdirectErtraegePlugin:
             security_ref=isin, quantity=qty, currency='EUR', gross_income=values['gross'],
             taxable_income=values['taxable'],
             partial_exemption_amount=values['partial'], after_partial_exemption=values['taxable'],
-            partial_exemption_rate=correction_number(partial.group('rate')),
+            partial_exemption_rate=(correction_number(partial.group('rate')) if partial else None),
+            used_exemption=used_exemption, loss_offset=loss_offset,
             capital_gains_tax=components.get('capital_gains_tax'),
             solidarity_surcharge=components.get('solidarity_surcharge'),
             church_tax=components.get('church_tax'), paid_taxes=values['paid'],

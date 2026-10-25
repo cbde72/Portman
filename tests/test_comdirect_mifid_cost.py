@@ -143,6 +143,26 @@ def test_mifid_cost_missing_category_stays_none_and_never_becomes_zero():
     assert report.total_costs == '60.81'
 
 
+def test_mifid_native_compact_eur_and_footnote_cost_lines_are_exact():
+    text = cost_text().replace('9,16 EUR', '9,16EUR')
+    text = text.replace(
+        'Kosten des Wertpapierverkaufes 15,03 EUR',
+        'Kosten des Wertpapierverkaufes 16,63EUR')
+    text = text.replace(
+        'Orderprovision [E] 12,53 EUR',
+        'Orderprovision [E] 12,53EUR\nZahlung von Dritten an die Bank [E]1 1,60 EUR')
+    report = parse(document(text)).cost_reports[0]
+    assert (report.purchase_costs, report.sale_costs) == ('9.16', '16.63')
+    assert report.items[-1].label == 'Zahlung von Dritten an die Bank [E]1'
+    assert report.items[-1].inducements == '1.60'
+
+
+def test_mifid_information_type_distinguishes_ex_ante_and_ex_post():
+    assert parse().cost_reports[0].information_type == 'ex_ante'
+    text = cost_text().replace('comdirect bank AG', 'comdirect bank AG\nEx-post-Kosteninformation')
+    assert parse(document(text)).cost_reports[0].information_type == 'ex_post'
+
+
 def test_mifid_cost_uses_isin_when_printed_but_never_guesses_one():
     report = parse(document(cost_text(isin='DE0005785604'))).cost_reports[0]
     assert (report.wkn, report.isin) == ('578560', 'DE0005785604')
