@@ -93,6 +93,32 @@ def test_reference_notice_is_structured_without_second_distribution():
     assert batch.documents[0].content_b64
 
 
+def test_pre_2018_notice_without_partial_exemption_keeps_field_missing():
+    source = notice(gross='9,10', partial='0,00', taxable='9,10', kapst='0,00',
+                    soli='0,00', paid='0,00', net='9,10')
+    text = source.pages[0].text.replace('Teilfreistellung (30%) EUR -0,00\n', '')
+    text = text.replace('Depotnummer: 476492400\n', '')
+    source = PdfDocument(source.path, source.content, 'old-distribution', (PdfPage(1, text),))
+    _detection, batch = parse(source)
+    event = batch.tax_events[0]
+    assert event.account == 'comdirect Depot'
+    assert event.partial_exemption_amount is None
+    assert event.partial_exemption_rate is None
+    assert batch.transactions == []
+    assert len(batch.documents) == 1
+
+
+def test_explicit_pre_loss_tax_base_takes_precedence_over_page_one_base():
+    source = notice(gross='14,86', partial='4,46', taxable='10,40', kapst='0,00',
+                    soli='0,00', paid='0,00', net='14,86')
+    text = source.pages[0].text.replace(
+        'Steuerbemessungsgrundlage (1) EUR 10,40',
+        'Steuerbemessungsgrundlage (1) EUR 0,00')
+    source = PdfDocument(source.path, source.content, 'two-tax-bases', (PdfPage(1, text),))
+    _detection, batch = parse(source)
+    assert batch.tax_events[0].taxable_income == '10.40'
+
+
 def test_foreign_notice_and_documented_zero_remain_cash_neutral():
     _, batch = parse(notice(origin='Ausländische', gross='9,10', partial='0,00', taxable='9,10',
                             kapst='0,00', soli='0,00', paid='0,00', net='9,10'))
