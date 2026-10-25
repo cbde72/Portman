@@ -1,4 +1,5 @@
 import importlib.util
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -130,3 +131,34 @@ Bewertung mit dem Rücknahmepreis vom 31.12.2016
     assert detections[0].document_type == 'Deka Jahresdepotauszug'
     batch = plugin.parse(source, detections[0], ParseContext(ImportBatch('deka.pdf', 'phase-c')))
     assert batch.snapshots[0].complete is True
+
+
+def test_deka_soft_hyphen_cross_page_turnover_and_ocr_page_are_supported():
+    overview = '''Deka
+Jahresdepotauszug per 31.12.2014
+Depot: 12345678
+Depotübersicht
+DE0008474511 01 AriDeka CF 100,00 +10,00
+Gesamt in EUR 100,00 +10,00
+'''
+    turnover_one = '''Umsatz\xadJahresübersicht Seite 1
+ISIN: DE0008474511 Unterdepot: 01
+Bestand am 31.12.2013 90,00 90,0000 1,000
+Abrechnungsbetrag Ausschüttung 10,00 100,0000 +0,100 21.02.2014 21.02.2014
+'''
+    turnover_two = '''Umsatz\xadJahresübersicht Seite 2
+ISIN: DE0008474511 Unterdepot: 01
+Bestand am 31.12.2014 100,00 90,0000 1,100
+Bewertung mit dem Rücknahmepreis vom 30.12.2014
+'''
+    source = PdfDocument(Path('historical.pdf'), b'pdf', 'historical', (
+        PdfPage(1, overview), PdfPage(2, turnover_one), PdfPage(3, turnover_two, True)))
+    plugin = load('deka_quartalsbericht.py')
+    batch = plugin.parse(source, plugin.detect(source)[0],
+                         ParseContext(ImportBatch('historical.pdf', 'historical')))
+
+    assert batch.snapshots[0].complete is True
+    assert batch.snapshots[0].positions[0].quantity == '1.100'
+    assert [(tx.kind, tx.amount, tx.quantity) for tx in batch.transactions] == [
+        ('DIVIDEND', '10.00', None), ('BUY', '-10.00', '0.100')]
+    assert sum(Decimal(tx.amount) for tx in batch.transactions) == 0

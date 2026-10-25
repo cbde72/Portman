@@ -17,7 +17,8 @@ AMOUNT = r'[0-9]{1,3}(?:\.[0-9]{3})*,\d{2}'
 TITLE = re.compile(r'(?P<title>Quartalsbericht|Jahresdepotauszug)\s*per\s*(?P<date>' + DATE + ')')
 OVERVIEW_PAGE = re.compile(r'(?m)^[ \t]*Depot(?:übersicht|�bersicht)[ \t]*$')
 TURNOVER_PAGE = re.compile(
-    r'(?m)^[ \t]*(?:Umsatz(?:übersicht|�bersicht)|Umsatz(?:-|�)Jahres(?:übersicht|�bersicht))[ \t]*$')
+    r'(?m)^[ \t]*(?:Umsatz(?:übersicht|�bersicht)|Umsatz(?:-|\xad|�)Jahres(?:übersicht|�bersicht))'
+    r'(?:[ \t]+Seite[ \t]+\d+)?[ \t]*$')
 DEPOT = re.compile(r'Depot:\s*(?P<id>\d{6,})')
 OVERVIEW_ROW = re.compile(
     r'(?m)^[ \t]*(?P<isin>[A-Z]{2}[A-Z0-9]{9}\d)[ \t]+(?P<ud>\d{2})[ \t]+(?P<name>\S.*?)[ \t]+'
@@ -31,7 +32,8 @@ STOCK = re.compile(
 VALUATION = re.compile(r'Bewertung\s+mit\s+dem\s+Rücknahmepreis\s+vom\s+(?P<date>' + DATE + ')')
 DATED_ROW = re.compile(r'(?m)^(?P<line>[^\n]*' + DATE + r'[ \t]+' + DATE + r')[ \t]*$')
 DISTRIBUTION = re.compile(
-    r'Ausschüttung\s*/\s*Kauf\s+aus\s+Ertrag[ \t]+(?P<amount>' + AMOUNT + r')[ \t]+'
+    r'(?:Ausschüttung\s*/\s*Kauf\s+aus\s+Ertrag|Abrechnungsbetrag\s+Ausschüttung)'
+    r'[ \t]+(?P<amount>' + AMOUNT + r')[ \t]+'
     r'(?P<price>[0-9.]+,\d+)[ \t]+(?P<shares>[+-][0-9.]+,\d+)[ \t]+'
     r'(?P<date>' + DATE + r')[ \t]+(?P<settled>' + DATE + r')')
 
@@ -51,8 +53,6 @@ class DekaQuartalsberichtPlugin:
                           f'Deka, {title} und Depotübersicht erkannt')]
 
     def parse(self, document, detection, context):
-        if any(page.used_ocr for page in document.pages):
-            raise ValueError('Deka-Berichte benötigen eingebetteten Text zur sicheren Bestandsprüfung.')
         if detection.handler_id != 'quartalsbericht':
             raise ValueError('Nicht unterstützter Dokumenttyp: ' + detection.handler_id)
         batch = context.batch
@@ -88,12 +88,23 @@ class DekaQuartalsberichtPlugin:
 
         # 2) Umsatzübersicht: Anteile, Bewertungsdatum und Ausschüttungen je Unterdepot
         turnover = {}
+        joined, page_ranges = '', []
         for page in turnover_pages:
-            blocks = list(BLOCK.finditer(page.text))
-            for index, block in enumerate(blocks):
-                end = blocks[index + 1].start() if index + 1 < len(blocks) else len(page.text)
-                turnover[(block.group('isin'), block.group('ud'))] = (page, page.text[block.start():end], block.start())
-        # Berichte, bei denen ein Unterdepot-Block über eine Seitengrenze läuft, sind nicht belegt.
+            start = len(joined)
+            joined += page.text + '\n'
+            page_ranges.append((start, len(joined), page))
+        blocks = list(BLOCK.finditer(joined))
+        for index, block in enumerate(blocks):
+            end = blocks[index + 1].start() if index + 1 < len(blocks) else len(joined)
+            page_start, _, page = next(item for item in page_ranges
+                                       if item[0] <= block.start() < item[1])
+            key = (block.group('isin'), block.group('ud'))
+            body = joined[block.start():end]
+            if key in turnover:
+                first_page, previous, offset = turnover[key]
+                turnover[key] = (first_page, previous + '\n' + body, offset)
+            else:
+                turnover[key] = (page, body, block.start() - page_start)
 
         positions, transactions, evidence, warnings = [], [], [], []
         for order, row in enumerate(rows, 1):
