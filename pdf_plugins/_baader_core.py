@@ -219,7 +219,7 @@ def parse_baader_portfolio(batch, pages, content):
             raise ValueError('Stückzahl und Ausführungskurs passen nicht zum Kurswert.')
         if gross + (fees + taxes) * (1 if kind == 'Kauf' else -1) != number(settlement[4]):
             raise ValueError('Kurswert, Gebühren und Steuern passen nicht zum Abrechnungsbetrag.')
-        amount = number(settlement[4])
+        amount = number(settlement[4]) * (-1 if kind == 'Kauf' else 1)
         tx = BankTransaction(account, 'baader-trade-' + depot + '-' + reference, day,
             'BUY' if kind == 'Kauf' else 'SELL', str(amount), settlement[3],
             security=isin, quantity=str(quantity), value_date=parse_date(settlement[2]) or '',

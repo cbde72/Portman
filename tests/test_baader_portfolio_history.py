@@ -57,7 +57,7 @@ def test_quarter_checks_total_and_retains_statement_date():
 def test_trade_uses_execution_day_net_amount_and_fees():
     tx = parsed(TRADE).transactions[0]
     assert (tx.date, tx.value_date, tx.kind, tx.quantity, tx.amount, tx.fees) == (
-        '2026-07-01', '2026-07-03', 'BUY', '2', '121.00', '1.00')
+        '2026-07-01', '2026-07-03', 'BUY', '2', '-121.00', '1.00')
     assert not tx.affects_cash
     assert 'Nominale STK 2' in tx.booking_text and 'Kurswert EUR 120.00' in tx.booking_text
     split_header = TRADE.replace('Handelsdatum Handelsuhrzeit\n01.07.2026 10:00:00',
@@ -127,7 +127,7 @@ def test_depot_only_cost_survives_online_snapshot_without_cash_or_price(tmp_path
         p = repo.holdings()[0]
         assert (p['quantity'], p['cost'], p['value']) == ('2', '121.00', None)
         assert not repo.transactions()[0]['affects_cash']
-        assert Decimal(repo.transactions()[0]['amount']) > 0
+        assert Decimal(repo.transactions()[0]['amount']) < 0
         assert repo.account_overview()[0]['balance'] is None
         assert PerformanceService(repo).overview()['value'] is None
         flows = PerformanceService(repo)._transactions(ACCOUNT, '2026-01-01', '2026-12-31')
