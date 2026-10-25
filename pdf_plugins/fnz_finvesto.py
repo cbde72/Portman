@@ -4,7 +4,7 @@ import re
 from decimal import Decimal
 
 from portfolio_v5.models import (BankDocument, FeeItem, Position, SecurityInfo, Snapshot,
-                                 Transaction, correction_number, digest, money, parse_date,
+                                 TaxItem, Transaction, correction_number, digest, money, parse_date,
                                  valid_isin)
 from portfolio_v5.pdf_plugins import Detection
 
@@ -39,6 +39,13 @@ DIVIDEND_ROW = re.compile(
     r'(?P<per_share>' + NUMBER + r')\s+(?P<currency>[A-Z]{3})\s+(?P<amount>' + MONEY + r')\s+(?P=currency)\s*$')
 FEE = re.compile(r'(?:ETF-)?Transaktionsentgelt\s+(?P<amount>' + MONEY + r')\s*EUR', re.I)
 PAYMENT = re.compile(r'Zahlungsbetrag(?:\s+aus\s+.berweisung)?\s*(?P<amount>' + MONEY + r')\s*(?P<currency>[A-Z]{3})', re.I)
+TAX_TOTAL = re.compile(
+    r'abzgl\.\s*Steuern\s*(?P<amount>' + MONEY + r')\s*(?P<currency>[A-Z]{3})', re.I)
+TAX_COMPONENTS = re.compile(
+    r'Kapitalertragsteuer\s+Solidarit(?:.|ae)tszuschlag\s+Kirchensteuer\s+Devisenkurs\s+abzgl\.\s*Steuern\s+'
+    r'(?P<capital>' + MONEY + r')\s*EUR\s+(?P<solidarity>' + MONEY + r')\s*EUR\s+'
+    r'(?P<church>' + MONEY + r')\s*EUR\s+(?P<fx>' + NUMBER + r')\s+'
+    r'(?P<total>' + MONEY + r')\s*(?P<currency>[A-Z]{3})', re.I)
 
 POSITION_HEADER = re.compile(r'(?:Bestand\s+Depotpositionen|Bestand\s+der\s*Depotpositionen)', re.I)
 POSITION_ROW = re.compile(
@@ -72,8 +79,6 @@ class FnzFinvestoPlugin:
         return []
 
     def parse(self, document, detection, context):
-        if any(page.used_ocr for page in document.pages):
-            raise ValueError('FNZ-Belege benötigen eingebetteten Text für Betrags- und Vollständigkeitskontrollen.')
         text, batch = document.text, context.batch
         depot = DEPOT.search(text)
         if not depot:
@@ -134,7 +139,28 @@ class FnzFinvestoPlugin:
             fees = money(fee.group('amount')) if fee else None
             payment = PAYMENT.search(body)
             cash_amount = money(payment.group('amount')) if payment else amount
-            expected_payment = Decimal(amount) + (Decimal(fees) if kind == 'BUY' and fees else Decimal())
+            tax_items, fx_rate = [], None
+            components = TAX_COMPONENTS.search(body) if kind == 'DIVIDEND' else None
+            tax_total = None if components else (TAX_TOTAL.search(body) if kind == 'DIVIDEND' else None)
+            taxes = money(components.group('total')) if components else (
+                money(tax_total.group('amount')) if tax_total else None)
+            if components:
+                if components.group('currency') != currency:
+                    raise ValueError('FNZ-Steuerblock ist in sich widersprüchlich.')
+                fx_rate = correction_number(components.group('fx'))
+                converted = []
+                for label, group in (('kapitalertragsteuer', 'capital'),
+                                     ('solidaritaetszuschlag', 'solidarity'),
+                                     ('kirchensteuer', 'church')):
+                    original = money(components.group(group))
+                    converted_amount = money(Decimal(original) * Decimal(fx_rate))
+                    converted.append(Decimal(converted_amount))
+                    tax_items.append(TaxItem(label, converted_amount,
+                                             original_amount=original, original_currency='EUR'))
+                if abs(sum(converted, Decimal()) - Decimal(taxes)) > Decimal('.01'):
+                    raise ValueError('FNZ-Steuerkomponenten stimmen nicht mit dem Gesamtsteuerabzug überein.')
+            expected_payment = (Decimal(amount) - (Decimal(taxes) if kind == 'DIVIDEND' and taxes else Decimal())
+                                + (Decimal(fees) if kind == 'BUY' and fees else Decimal()))
             if payment and (payment.group('currency') != currency
                             or abs(Decimal(cash_amount) - expected_payment) > Decimal('.01')):
                 raise ValueError('FNZ-Zahlungsbetrag stimmt nicht mit Umsatz und Entgelt überein.')
@@ -145,6 +171,7 @@ class FnzFinvestoPlugin:
                 security=row.group('isin'), security_ref=row.group('isin'), quantity=quantity,
                 gross_amount=amount,
                 fees=fees, fee_items=[FeeItem('transaktionsentgelt', fees)] if fees is not None else [],
+                taxes=taxes, tax_items=tax_items, fx_rate=fx_rate,
                 document_reference=reference.group('ref'), transaction_reference=reference.group('ref'),
                 depot_account=account, pay_date=booked, **extra))
             batch.securities.append(SecurityInfo(key=row.group('isin'), isin=row.group('isin'),

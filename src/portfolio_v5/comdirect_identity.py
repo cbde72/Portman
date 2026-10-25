@@ -26,6 +26,11 @@ def preserve_booking_ids(store, batch):
             if (tx['external_id'].startswith(('comdirect-pdf-', 'pdf-booking-')) and
                     targets.get(source, source) == batch.account_assignments.get(source, source)):
                 previous[(tx['account'], tx['external_id'])] = tx
+    # Depot-event plugins (for example FNZ) use Transaction without the bank
+    # booking ``purpose`` field and cannot participate in this text matcher.
+    # BankTransaction batches must continue to the account-alias upgrade below.
+    if not previous and any(not hasattr(tx, 'purpose') for tx in batch.transactions):
+        return batch
     result = deepcopy(batch)
     def key(tx):
         return tx['account'], tx['date'], tx.get('value_date', ''), Decimal(tx['amount'])
