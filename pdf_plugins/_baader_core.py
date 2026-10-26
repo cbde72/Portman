@@ -8,6 +8,22 @@ from portfolio_v5.importers import asset_type
 
 NUMBER = r'\d[\d.]*(?:,\d+)?'
 
+# The cancellation itself does not print the original document reference.  Only
+# pairs verified against both original PDFs belong here; unknown cancellations
+# must remain rejected instead of guessing their economic counterpart.
+VERIFIED_DIVIDEND_REVERSALS = {
+    '26172813': {
+        'original_reference': '524443206',
+        'reversal_reference': '526758625',
+        'isin': 'US0378331005',
+        'quantity': Decimal('4.125'),
+        'date': '2024-02-15',
+        'net': Decimal('0.78'),
+        'taxes': Decimal('0.14'),
+        'gross': Decimal('0.92'),
+    },
+}
+
 
 def number(value):
     return Decimal(value.replace('.', '').replace(',', '.'))
@@ -44,7 +60,7 @@ def tax_items(text):
             for match in [re.search(pattern, text, re.M)] if match and number(match[1])]
 
 
-def parse_baader_income(batch, text, account):
+def parse_baader_income(batch, text, account, is_reversal=False):
     isin, wkn, quantity, rest = security_header(text)
     settlement = required(r'Zu\s+Gunsten\s+Konto\s+(\d+)\s+Valuta:\s*(' + r'\d{2}\.\d{2}\.\d{4}' +
                           r')\s+([A-Z]{3})\s+(' + NUMBER + r')', text)
@@ -52,6 +68,19 @@ def parse_baader_income(batch, text, account):
     reference = required(r'Referenz-Nr\.:\s*(\d+)', text)[1]
     items = tax_items(text)
     taxes = sum((Decimal(item.amount) for item in items), Decimal())
+    reverses_external_id = ''
+    if is_reversal:
+        process = required(r'Vorgangs-Nr\.:\s*(\d+)', text)[1]
+        verified = VERIFIED_DIVIDEND_REVERSALS.get(process)
+        actual = {
+            'reversal_reference': reference, 'isin': isin, 'quantity': quantity,
+            'date': day, 'net': amount, 'taxes': taxes, 'gross': amount + taxes,
+        }
+        if not verified or any(actual[field] != verified[field] for field in actual):
+            raise ValueError('Baader-Dividendenstorno ist keinem vollständig geprüften Originalbeleg zugeordnet.')
+        reverses_external_id = 'baader-income-' + verified['original_reference']
+        amount, taxes = -amount, -taxes
+        items = [TaxItem(item.kind, str(-Decimal(item.amount))) for item in items]
     tx = BankTransaction(
         account=account, external_id='baader-income-' + reference, date=day, value_date=day,
         kind='DIVIDEND', amount=str(amount), currency=currency, security=isin,
@@ -59,7 +88,8 @@ def parse_baader_income(batch, text, account):
         tax_items=items, gross_amount=str(amount + taxes), gross_income=str(amount + taxes),
         gross_currency=currency, income_basis='net', cash_account='Baader Konto ' + settlement[1],
         depot_account=account, affects_cash=False, bank_reference=reference,
-        document_reference=reference, purpose=rest)
+        document_reference=reference, purpose=('STORNO ' if is_reversal else '') + rest,
+        is_reversal=is_reversal, reverses_external_id=reverses_external_id)
     batch.transactions.append(tx)
     batch.securities.append(SecurityInfo(key=isin, isin=isin, wkn=wkn, name=rest))
     return day
@@ -141,11 +171,13 @@ def parse_baader_portfolio(batch, pages, content):
     account = 'Baader Depot ' + depot
     batch.account_names = [account]
     batch.pdf_text = text
-    if re.search(r'\bStorno\b|\bStornierung\b', text, re.I):
+    is_reversal = bool(re.search(r'\bStorno\b|\bStornierung\b', text, re.I))
+    if is_reversal and 'Dividendenabrechnung' not in text:
         raise ValueError('Baader-Stornobeleg muss mit der ursprünglichen Abrechnung abgeglichen werden.')
     if 'Dividendenabrechnung' in text:
-        batch.document_type = 'Baader Dividendenabrechnung'
-        day = parse_baader_income(batch, text, account)
+        batch.document_type = ('Baader Dividendenabrechnung Storno' if is_reversal
+                               else 'Baader Dividendenabrechnung')
+        day = parse_baader_income(batch, text, account, is_reversal)
     elif 'Vorabpauschale' in text:
         batch.document_type = 'Baader Vorabpauschale'
         day = parse_baader_advance_tax(batch, text, account)
