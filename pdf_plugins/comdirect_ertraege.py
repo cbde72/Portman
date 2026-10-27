@@ -44,7 +44,6 @@ AMOUNT = r'[0-9]{1,3}(?:\.[0-9]{3})*,\d{2}|\d+,\d{2}'
 # MiFID-II cost information ("Kosteninformation zum Wertpapiergeschäft").
 # These PDFs are simulations only and must never create a transaction, cash
 # flow, balance or depot position.
-MIFID_COST_MARKER = re.compile(r'Kosteninformation\s+zum\s+Wertpapiergesch\w*', re.I)
 MIFID_COST_TITLE = re.compile(
     r'Kosteninformation\s+zum\s+Wertpapiergesch\w*\s+'
     r'(?P<date>\d{2}\.\d{2}\.\d{4})\s*-\s*(?P<time>\d{2}:\d{2})', re.I)

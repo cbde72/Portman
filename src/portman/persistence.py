@@ -73,36 +73,6 @@ def backup_database(connection, folder, reason='automatic', keep=12):
     return path
 
 
-def initialize_v07(root):
-    root = Path(root)
-    folder = root / 'data' / 'v07'
-    folder.mkdir(parents=True, exist_ok=True)
-    database = folder / 'portfolio.sqlite'
-    legacy = root / 'data' / 'portfolio_v05.sqlite'
-    if not database.exists() and legacy.exists():
-        inspect_database(legacy)
-        temporary = folder / 'migration.sqlite.tmp'
-        with closing(sqlite3.connect(legacy.resolve().as_uri() + '?mode=ro', uri=True)) as src:
-            backup_database(src, folder / 'backups', 'before-v07')
-            with closing(sqlite3.connect(temporary)) as dst:
-                src.backup(dst)
-        os.replace(temporary, database)
-    for filename in ('portfolio_settings.json', 'etf_cache.json'):
-        target = folder / filename
-        if not target.exists():
-            source = next((p for p in (root / 'src' / 'Gui' / filename, root / filename) if p.exists()), None)
-            if source:
-                atomic_json(target, read_json(source))
-    banking = root / 'data' / 'banking'
-    if banking.is_dir() and not (folder / 'banking').exists():
-        import shutil
-        with tempfile.TemporaryDirectory(dir=folder) as temporary:
-            staged = Path(temporary) / 'banking'
-            shutil.copytree(banking, staged)
-            os.replace(staged, folder / 'banking')
-    return folder
-
-
 def migrate_v07(db):
     version = db.execute('PRAGMA user_version').fetchone()[0]
     if version > 7:
