@@ -239,6 +239,13 @@ def parser_fingerprint():
     return digest.hexdigest()
 
 
+def audit_worker_count(allow_ocr, cpu_count=None):
+    """Bound OCR process contention; two RapidOCR workers stay below file timeouts."""
+    available = cpu_count if cpu_count is not None else (os.cpu_count() or 1)
+    limit = 2 if allow_ocr else 4
+    return max(1, min(limit, available))
+
+
 def economic_signature(row):
     fields = ('external_id', 'kind', 'account', 'date', 'amount', 'currency', 'security',
               'quantity', 'gross_amount', 'fees', 'taxes', 'is_reversal', 'reverses_external_id')
@@ -463,7 +470,7 @@ def main(argv=None):
         else:
             pending.append(path)
     started = time.perf_counter()
-    workers = max(1, min(4, os.cpu_count() or 1))
+    workers = audit_worker_count(args.allow_ocr)
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(run_child, path, root, args.allow_ocr, args.timeout): path
                    for path in pending}

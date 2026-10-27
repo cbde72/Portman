@@ -227,3 +227,9 @@ def test_powershell_launcher_refuses_to_overwrite_existing_output(tmp_path):
     assert result.returncode != 0
     assert 'Output directory already exists' in result.stderr
     assert sentinel.read_text(encoding='utf-8') == 'do not overwrite'
+
+
+def test_ocr_audit_limits_process_contention_without_serializing_plain_text():
+    assert AUDIT.audit_worker_count(True, 16) == 2
+    assert AUDIT.audit_worker_count(False, 16) == 4
+    assert AUDIT.audit_worker_count(True, 1) == 1
