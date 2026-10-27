@@ -38,7 +38,7 @@ DIVIDEND_ROW = re.compile(
     r'(?m)^\s*(?P<isin>[A-Z]{2}[A-Z0-9]{9}\d)\s+(?P<qty>' + NUMBER + r')\s+'
     r'(?P<per_share>' + NUMBER + r')\s+(?P<currency>[A-Z]{3})\s+(?P<amount>' + MONEY + r')\s+(?P=currency)\s*$')
 FEE = re.compile(r'(?:ETF-)?Transaktionsentgelt\s+(?P<amount>' + MONEY + r')\s*EUR', re.I)
-PAYMENT = re.compile(r'Zahlungsbetrag(?:\s+aus\s+.berweisung)?\s*(?P<amount>' + MONEY + r')\s*(?P<currency>[A-Z]{3})', re.I)
+PAYMENT = re.compile(r'Zahlungsbetrag(?:\s*aus\s+.berweisung)?\s*(?P<amount>' + MONEY + r')\s*(?P<currency>[A-Z]{3})', re.I)
 TAX_TOTAL = re.compile(
     r'abzgl\.\s*Steuern\s*(?P<amount>' + MONEY + r')\s*(?P<currency>[A-Z]{3})', re.I)
 TAX_COMPONENTS = re.compile(

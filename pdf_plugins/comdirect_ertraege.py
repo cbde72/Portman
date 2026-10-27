@@ -94,9 +94,14 @@ TRADE_MARKER = re.compile(r'Wertpapier(?P<type>kauf|verkauf)', re.I)
 TRADE_FEES = {
     'provision': re.compile(r'Provision\s*:?\s*EUR\s*(?:-\s*)?(?P<a>' + AMOUNT + ')', re.I),
     'orderentgelt': re.compile(r'Orderentgelt\s*:?\s*EUR\s*(?:-\s*)?(?P<a>' + AMOUNT + ')', re.I),
+    'abwicklungsentgelt': re.compile(
+        r'Abwickl(?:\.?|ungs)entgelt(?:Clearstream)?\s*:?\s*EUR\s*(?:-\s*)?(?P<a>' + AMOUNT + ')', re.I),
+    'boersenplatzentgelt': re.compile(
+        r'B.rsenplatzabh.ng\.?Entgelt\s*:?\s*EUR\s*(?:-\s*)?(?P<a>' + AMOUNT + ')', re.I),
     'handelsplatzgebuehr': re.compile(r'(?:Handelsplatzgeb.hr|B.rsengeb.hr)\s*:?\s*EUR\s*(?:-\s*)?(?P<a>' + AMOUNT + ')', re.I),
     'fremdspesen': re.compile(r'(?:Fremdspesen|fremde\s+Spesen)\s*:?\s*EUR\s*(?:-\s*)?(?P<a>' + AMOUNT + ')', re.I),
 }
+TRADE_FEE_TOTAL = re.compile(r'SummeEntgelte\s*:?\s*EUR\s*(?:-\s*)?(?P<a>' + AMOUNT + ')', re.I)
 TRADE_LINE = re.compile(
     r'Stk\.\s*(?P<qty>\d[\d.]*(?:,\d+)?)\s*(?P<name>.+?)\s*,?\s*WKN/ISIN\s*:\s*'
     r'(?P<wkn>[A-Z0-9]{6})\s*/\s*(?P<isin>[A-Z]{2}[A-Z0-9]{9}\d)', re.I | re.S)
@@ -1184,7 +1189,12 @@ class ComdirectErtraegePlugin:
             raise ValueError('Steuerkomponenten passen nicht zur ausgewiesenen Steuersumme.')
         if fee_matches:
             fee_items = [FeeItem(kind, money(match.group('a'))) for kind, match in fee_matches]
-            provision = money(sum((Decimal(item.amount) for item in fee_items), Decimal()))
+            documented_fee_total = sum((Decimal(item.amount) for item in fee_items), Decimal())
+            printed_fee_total = TRADE_FEE_TOTAL.search(compact)
+            if (printed_fee_total and
+                    abs(documented_fee_total - Decimal(money(printed_fee_total.group('a')))) > Decimal('0.01')):
+                raise ValueError('Entgeltkomponenten passen nicht zur ausgewiesenen Entgeltsumme.')
+            provision = money(documented_fee_total)
         elif gross is not None:
             tax_value = Decimal(taxes or '0')
             provision_value = ((Decimal(amount) - Decimal(gross) - tax_value) if kind == Kind.BUY
@@ -1225,7 +1235,7 @@ class ComdirectErtraegePlugin:
             security_ref=isin, order_id=trade.group('order'), document_reference=reference,
             transaction_reference=reference, operation='Wertpapiere', booking_text=booking_text,
             purpose=purpose, raw_text=purpose,
-            field_sources={'fees': 'comdirect Wertpapierabrechnung · Provision',
+            field_sources={'fees': 'comdirect Wertpapierabrechnung · Entgeltkomponenten',
                            **({'taxes': 'comdirect Wertpapierabrechnung · abgeführte Steuern'}
                               if tax_total_match else {}),
                            'quantity': quantity_source,

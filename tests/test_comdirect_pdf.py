@@ -227,10 +227,7 @@ def test_skip_depot_excludes_snapshot_and_source(tmp_path):
         for _, source, combo, _ in dialog.mapping_rows:
             if source['name'].startswith('Depot '):
                 combo.setCurrentIndex(combo.findData('__skip__'))
-        batch = dialog.selected_batches()[0]
-        assert not batch.snapshots
-        assert batch.account_names == ['IBAN DE89370400440532013000']
-        assert len(batch.transactions) == 2
+        assert dialog.selected_batches() == []
         dialog.close()
     finally:
         repo.close()

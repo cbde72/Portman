@@ -80,10 +80,8 @@ def test_skip_counterparty(tmp_path):
     dialog = ImportPreviewDialog(repo, [batch])
     for row, target in zip(dialog.mapping_rows, ['a', '__skip__']):
         row[2].setCurrentIndex(row[2].findData(target))
-    selected = dialog.selected_batches()[0]
-    assert len(selected.documents) == 1
+    assert dialog.selected_batches() == []
     assert len(batch.documents) == 2
-    assert len(selected.account_assignments) == 1
     dialog.close()
     repo.close()
 
@@ -215,9 +213,7 @@ def test_skipped_account_removes_its_bookings(tmp_path, monkeypatch):
         row[2].setCurrentIndex(row[2].findData(target))
     for _, _, row in dialog.pdf_booking_rows:
         dialog.pdf_bookings_table.item(row, 0).setCheckState(Qt.CheckState.Checked)
-    selected = dialog.selected_batches()[0]
-    assert len(selected.transactions) == 2
-    assert {tx.account for tx in selected.transactions} == {'Konto 12345678'}
+    assert dialog.selected_batches() == []
     dialog.close()
     repo.close()
 

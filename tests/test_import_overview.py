@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
@@ -28,6 +29,7 @@ def test_grouped_account_choice_updates_every_selected_file(tmp_path):
         assert 'min-height: 34px' in combo.view().styleSheet()
         assert dialog.mapping_table.verticalHeader().defaultSectionSize() == 52
         assert all(row[2] is combo for row in dialog.mapping_rows)
+        assert combo.itemText(combo.findData('__skip__')) == 'Gesamte Datei nicht importieren'
         combo.setCurrentIndex(combo.findData('alternative'))
         assert all(row[2].currentData() == 'alternative' for row in dialog.mapping_rows)
         assert '0 offen' in dialog.import_summary.text()
@@ -37,7 +39,30 @@ def test_grouped_account_choice_updates_every_selected_file(tmp_path):
         assert not dialog.mapping_table.isRowHidden(0)
         assert '1 offen' in dialog.import_summary.text()
         dialog.table.item(0, 0).setCheckState(Qt.CheckState.Unchecked)
-        assert dialog.mapping_table.item(0, 0).text() == '2 Datei(en)'
+        assert dialog.mapping_table.item(0, 0).text() == 'report1.pdf, report2.pdf'
+        dialog.close()
+    finally:
+        repo.close()
+
+
+def test_single_mapping_filename_is_visible_and_double_click_opens_pdf(tmp_path, monkeypatch):
+    QApplication.instance() or QApplication([])
+    source = tmp_path / 'unbekanntes-konto.pdf'
+    source.write_bytes(b'%PDF-test\n%%EOF')
+    batch = batches()[0]
+    batch.path = str(source)
+    repo = PortfolioRepository(tmp_path / 'open.sqlite')
+    opened = []
+    monkeypatch.setattr('portman.import_preview.QDesktopServices.openUrl',
+                        lambda url: opened.append(url.toLocalFile()) or True)
+    try:
+        repo.save_account('Bank', {'iban': 'DE89370400440532013000'})
+        dialog = ImportPreviewDialog(repo, [batch])
+        assert dialog.mapping_table.item(0, 0).text() == source.name
+        assert dialog.mapping_table.item(0, 0).toolTip() == str(source)
+        dialog.open_mapping_file(0)
+        dialog.open_import_file(0)
+        assert [Path(path) for path in opened] == [source.resolve(), source.resolve()]
         dialog.close()
     finally:
         repo.close()

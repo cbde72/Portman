@@ -581,6 +581,9 @@ class Store:
         """Remove already persisted tax events and reject conflicting facts."""
         if not batch.tax_events:
             return None
+        incoming_ids = [event.external_id for event in batch.tax_events]
+        if any(not identifier for identifier in incoming_ids) or len(set(incoming_ids)) != len(incoming_ids):
+            raise ValueError('Steuerereignis benötigt eine eindeutige externe ID; Doppelimport abgewiesen.')
         event_records = self.model_records(kind='tax_events')
         existing_events = [record['payload'] for record in event_records]
         by_id = {event.get('external_id'): event for event in existing_events if event.get('external_id')}
@@ -615,6 +618,9 @@ class Store:
                 raise ValueError('Steuerereignis benötigt eine eindeutige externe ID; Doppelimport abgewiesen.')
             seen_ids.add(event.external_id)
             if event.external_id in by_id:
+                if source_tax_fact(by_id[event.external_id]) != source_tax_fact(serialized):
+                    raise ValueError(
+                        f'Steuerereignis-ID {event.external_id!r} ist bereits mit abweichenden Daten gespeichert.')
                 continue
             period_key = (account_key(event.account), event.security_ref,
                           str(event.income_year or ''), event.type)
@@ -634,8 +640,16 @@ class Store:
         """Remove existing tax details, preserving the historical duplicate result."""
         if not batch.tax_details:
             return None
-        existing_ids = {record['payload'].get('external_id'): record['import_id']
+        existing_ids = {record['payload'].get('external_id'): record
                         for record in self.model_records(kind='tax_details')}
+
+        def source_tax_detail(payload):
+            # Links and match state are derived reconciliation data; all source
+            # fields, including the lossless original row, remain immutable.
+            payload = dict(payload or {})
+            for field in ('linked_tax_event_id', 'linked_transaction_id', 'match_status', 'source_name'):
+                payload.pop(field, None)
+            return payload
         seen_ids = set()
         unique = []
         duplicate_imports = []
@@ -647,7 +661,11 @@ class Store:
                 unique.append(record)
                 existing_ids[record.external_id] = None
             else:
-                duplicate_imports.append(existing_ids[record.external_id])
+                existing = existing_ids[record.external_id]
+                if existing is not None and source_tax_detail(existing['payload']) != source_tax_detail(asdict(record)):
+                    raise ValueError(
+                        f'Steuerdetail-ID {record.external_id!r} ist bereits mit abweichenden Daten gespeichert.')
+                duplicate_imports.append(existing['import_id'] if existing is not None else None)
         batch.tax_details = unique
         if (not unique and duplicate_imports and not batch.snapshots and not batch.balances
                 and not batch.transactions and not batch.documents and not batch.tax_events

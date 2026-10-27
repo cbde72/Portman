@@ -267,6 +267,78 @@ Referenz-Nummer: 24INLL4XX5T001NI
     assert batch.securities[0].wkn == '593399'
 
 
+@pytest.mark.parametrize(('quantity', 'price', 'market', 'clearstream', 'venue',
+                          'fee_total', 'cash_total'), (
+    ('16', '21,76', '348,16', '2,90', '1,50', '14,30', '362,46'),
+    ('12', '18,164', '217,97', None, '2,50', '12,40', '230,37'),
+    ('20', '69,81', '1396,20', '2,90', '2,50', '15,30', '1411,50'),
+    ('4', '115,14', '460,56', None, '2,50', '12,40', '472,96'),
+))
+def test_comdirect_trade_aggregates_all_documented_fee_components(
+        quantity, price, market, clearstream, venue, fee_total, cash_total):
+    import importlib.util
+    path = Path(__file__).resolve().parents[1] / 'pdf_plugins' / 'comdirect_ertraege.py'
+    spec = importlib.util.spec_from_file_location('comdirect_complete_trade_fee_test', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    clearstream_line = (f'Abwickl.entgelt Clearstream : EUR {clearstream}\n'
+                        if clearstream is not None else '')
+    text = f'''comdirect
+Wertpapierkauf Nr. 91159075 vom 23.07.2026
+Stk. {quantity} TEST, WKN/ISIN: 593399/DE0005933998
+Nennwert Zum Kurs von St. {quantity} EUR {price}
+Kurswert: EUR {market}
+Eigene Entgelte
+{clearstream_line}Provision : EUR 9,90
+Börsenplatzabhäng. Entgelt : EUR {venue}
+Summe Entgelte : EUR {fee_total}
+ZuIhrenLastenvorSteuern: EUR -{cash_total}
+Valuta 27.07.2026 auf Konto mit der IBAN DE84200411330476492400
+Depotnummer: 476492400
+Referenz-Nummer: 24INLL4XX5T001NI
+'''
+    parsed_document = document(text)
+    detection = module.plugin.detect(parsed_document)[0]
+    batch = module.plugin.parse(
+        parsed_document, detection, ParseContext(ImportBatch('trade.pdf', 'hash', source_sheet='PDF')))
+
+    tx = batch.transactions[0]
+    expected_items = [('provision', '9.90')]
+    if clearstream is not None:
+        expected_items.append(('abwicklungsentgelt', clearstream.replace(',', '.')))
+    expected_items.append(('boersenplatzentgelt', venue.replace(',', '.')))
+    assert tx.amount == '-' + cash_total.replace(',', '.')
+    assert tx.gross_amount == market.replace(',', '.')
+    assert tx.fees == fee_total.replace(',', '.')
+    assert [(item.kind, item.amount) for item in tx.fee_items] == expected_items
+    assert not any('stimmen nicht überein' in warning for warning in batch.warnings)
+
+
+def test_comdirect_trade_rejects_fee_component_double_count_or_omission():
+    import importlib.util
+    path = Path(__file__).resolve().parents[1] / 'pdf_plugins' / 'comdirect_ertraege.py'
+    spec = importlib.util.spec_from_file_location('comdirect_trade_fee_total_guard_test', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    text = '''comdirect
+Wertpapierkauf Nr. 91159075 vom 23.07.2026
+Stk. 4 TEST, WKN/ISIN: 593399/DE0005933998
+Nennwert Zum Kurs von St. 4 EUR 100,00
+Kurswert: EUR 400,00
+Provision: EUR 9,90
+Börsenplatzabhäng. Entgelt: EUR 2,50
+Summe Entgelte: EUR 9,90
+ZuIhrenLastenvorSteuern: EUR -412,40
+Valuta 27.07.2026 auf Konto mit der IBAN DE84200411330476492400
+Depotnummer: 476492400
+'''
+    parsed_document = document(text)
+    detection = module.plugin.detect(parsed_document)[0]
+    with pytest.raises(ValueError, match='Entgeltkomponenten'):
+        module.plugin.parse(
+            parsed_document, detection, ParseContext(ImportBatch('trade.pdf', 'hash', source_sheet='PDF')))
+
+
 @pytest.mark.parametrize(('heading', 'course_label', 'wkn', 'isin', 'quantity', 'price',
                           'gross', 'fee', 'total'), (
     ('Wertpapierkauf', 'Mischkurs', 'A111X9', 'IE00BKM4GZ66', '0,630', '48,401',

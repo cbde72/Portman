@@ -44,6 +44,42 @@ def test_distribution_reinvestment_and_purchase_are_three_economic_events():
     assert batch.snapshots[0].positions[0].quantity == '5.600'
 
 
+def test_purchase_cashflow_includes_fee_when_extracted_payment_has_no_separator():
+    text = '''FNZ Bank SE
+Umsatzabrechnung-Nr. 45
+Umsatzabrechnung für Ihr finvesto Depot bei der FNZ Bank
+Depot-Nr. 12345678901
+Kauf 40,00 EUR mit Kursdatum 26.10.2023 in Depotposition 12345678901.02
+Ref. Nr. 10001/20001, Buchungsdatum 26.10.2023
+ISIN Anteile Abrechnungskurs Devisenkurs Betrag
+IE0032077012 0,117702 355,800000 USD 1,049058 39,92 EUR
+ETF-Transaktionsentgelt 0,08 EUR
+Zahlungsbetragaus Überweisung 40,00 EUR
+Kauf 40,00 EUR mit Kursdatum 01.12.2023 in Depotposition 12345678901.02
+Ref. Nr. 10002/20002, Buchungsdatum 01.12.2023
+ISIN Anteile Abrechnungskurs Devisenkurs Betrag
+IE0032077012 0,111184 389,526900 USD 1,084896 39,92 EUR
+ETF-Transaktionsentgelt 0,08 EUR
+Zahlungsbetragaus Überweisung 40,00 EUR
+Bestand der Depotpositionen mit Umsatz nach Verbuchung
+Pos. Fonds Anteile Bewertungskurs zum Datum Devisenkurs Bestand
+02 IE0032077012 0,228886 380,000000 USD 01.12.2023 1,0000 86,98 EUR
+Depotgesamtwert 86,98 EUR
+'''
+    path = FIXTURES / 'umsatzabrechnung/fnz-current-v1/source.txt'
+    document = PdfDocument(path, text.encode(), 'fnz-payment-spacing', (PdfPage(1, text),))
+    selected = plugin()
+    batch = selected.parse(document, selected.detect(document)[0],
+                           ParseContext(ImportBatch(path.name, 'fnz-payment-spacing', source_sheet='PDF')))
+
+    assert [(tx.amount, tx.gross_amount, tx.fees) for tx in batch.transactions] == [
+        ('-40.00', '39.92', '0.08'),
+        ('-40.00', '39.92', '0.08'),
+    ]
+    assert all([(item.kind, item.amount) for item in tx.fee_items] ==
+               [('transaktionsentgelt', '0.08')] for tx in batch.transactions)
+
+
 def test_quarterly_depot_statement_is_complete_only_after_total_check():
     batch = parse('depotauszug/fnz-current-v1')
     snapshot = batch.snapshots[0]

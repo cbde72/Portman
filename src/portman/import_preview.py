@@ -5,7 +5,8 @@ import json
 import re
 from .import_combo_style import style_target_account_combo
 from .security_names import preferred_security_name
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QDialogButtonBox,
  QHeaderView, QLabel, QMessageBox, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout,
  QApplication, QPushButton, QTextEdit, QWidget, QHBoxLayout, QLineEdit, QCheckBox)
@@ -96,6 +97,7 @@ class ImportPreviewDialog(QDialog):
         self.table.resizeColumnsToContents()
         self.table.setColumnWidth(1, 240)
         self.table.setColumnWidth(2, 220)
+        self.table.cellDoubleClicked.connect(self.open_import_file)
         for column in (5, 6, 7, 8): self.table.setColumnHidden(column, True)
         self.show_technical = QCheckBox('Details zu Bestandsänderungen anzeigen')
         self.show_technical.toggled.connect(lambda visible: [self.table.setColumnHidden(c, not visible) for c in (5, 6, 7, 8)])
@@ -141,7 +143,7 @@ class ImportPreviewDialog(QDialog):
                 style_target_account_combo(combo)
                 combo.addItem('Bitte Zielkonto auswählen', None)
                 if batch.source_sheet == 'PDF':
-                    combo.addItem('Diese Kennung nicht zuordnen', '__skip__')
+                    combo.addItem('Gesamte Datei nicht importieren', '__skip__')
                 if suggestion['new_name']:
                     combo.addItem('Neu anlegen: ' + suggestion['new_name'], '__new__')
                 for account in accounts:
@@ -172,10 +174,11 @@ class ImportPreviewDialog(QDialog):
                 self.mapping_groups[group_key] = dict(row=row, combo=combo, remember=remember,
                     files=[(batch_index, batch.path)], kinds=set(suggestion['kinds']),
                     proposed=target, reason=suggestion['reason'])
-        for column, width in [(0, 85), (1, 235), (2, 110), (3, 370), (5, 75)]:
+        for column, width in [(0, 260), (1, 235), (2, 110), (3, 370), (5, 75)]:
             self.mapping_table.setColumnWidth(column, width)
         self.mapping_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         self.mapping_table.verticalHeader().setDefaultSectionSize(52)
+        self.mapping_table.cellDoubleClicked.connect(self.open_mapping_file)
         if self.mapping_rows:
             tabs.setCurrentIndex(1)
         if any(batch.source_sheet == 'PDF' and batch.transactions for batch in batches):
@@ -240,23 +243,53 @@ class ImportPreviewDialog(QDialog):
         return (scope, source['key'], source['target_key'], source['new_name'], source['remembered'],
                 batch.account_assignments.get(source['key']), batch.source_sheet == 'PDF')
 
+    def open_import_file(self, row, _column=0):
+        path = Path(self.batches[row].path)
+        if path.is_file() and path.suffix.casefold() == '.pdf':
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve())))
+
+    def open_mapping_file(self, row, _column=0):
+        group = next((value for value in self.mapping_groups.values() if value['row'] == row), None)
+        if not group:
+            return
+        selected = {i for i, _ in group['files']
+                    if self.table.item(i, 0).checkState() == Qt.CheckState.Checked}
+        paths = list(dict.fromkeys(path for i, path in group['files'] if i in selected))
+        if len(paths) == 1:
+            path = Path(paths[0])
+            if path.is_file() and path.suffix.casefold() == '.pdf':
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve())))
+        elif paths:
+            QMessageBox.information(
+                self, 'Mehrere PDF-Dateien',
+                'Diese Zuordnung betrifft mehrere Dateien:\n\n' + '\n'.join(paths) +
+                '\n\nIm Reiter „Dateien“ die gewünschte PDF doppelt anklicken.')
+
+    def skipped_file_indices(self):
+        """A rejected PDF account identity rejects its complete source file."""
+        return {index for index, _source, combo, _remember in self.mapping_rows
+                if combo.currentData() == '__skip__'}
+
     def refresh_import_summary(self, *args):
-        selected = {i for i, b in enumerate(self.batches) if not b.errors and
-                    (self.always_sync_depot(b) or self.table.item(i, 0).checkState() == Qt.CheckState.Checked)}
+        checked = {i for i, b in enumerate(self.batches) if not b.errors and
+                   (self.always_sync_depot(b) or self.table.item(i, 0).checkState() == Qt.CheckState.Checked)}
+        selected = checked - self.skipped_file_indices()
         unresolved = active = 0
         query = self.mapping_search.text().strip().casefold()
         for group in self.mapping_groups.values():
             row, combo = group['row'], group['combo']
-            files = [path for i, path in group['files'] if i in selected]
+            files = [path for i, path in group['files'] if i in checked]
             paths = list(dict.fromkeys(files))
-            self.mapping_table.item(row, 0).setText(f'{len(paths)} Datei(en)')
+            names = [Path(path).name for path in paths]
+            self.mapping_table.item(row, 0).setText(
+                names[0] if len(names) == 1 else ', '.join(names) if names else 'Keine Datei ausgewählt')
             self.mapping_table.item(row, 0).setToolTip('\n'.join(paths))
             self.mapping_table.item(row, 2).setText(', '.join(sorted(group['kinds'])))
             combo.setToolTip(combo.currentText())
             combo.view().setMinimumWidth(560)
             target = combo.currentData()
             missing = target is None
-            status = ('Bitte Zielkonto wählen' if missing else 'Wird ausgelassen' if target == '__skip__'
+            status = ('Bitte Zielkonto wählen' if missing else 'Gesamte Datei wird nicht importiert' if target == '__skip__'
                       else 'Wird neu angelegt' if target == '__new__' else group['reason']
                       if target == group['proposed'] else 'Manuell zugeordnet')
             self.mapping_table.item(row, 4).setText(status)
@@ -643,6 +676,7 @@ class ImportPreviewDialog(QDialog):
     def selected_batches(self):
         result = []
         remembered = {}
+        skipped_files = self.skipped_file_indices()
         from portfolio_v5.accounts import account_key
         from portfolio_v5.settlement import portfolio_cash_kind, depot_candidates
         records = {r['account_key']: r for r in self.repo.account_records() if r['active']}
@@ -650,7 +684,8 @@ class ImportPreviewDialog(QDialog):
         candidate_cache = {}
         for row, original in enumerate(self.batches):
             always_sync = self.always_sync_depot(original)
-            if original.errors or (not always_sync and self.table.item(row, 0).checkState() != Qt.CheckState.Checked):
+            if (row in skipped_files or original.errors
+                    or (not always_sync and self.table.item(row, 0).checkState() != Qt.CheckState.Checked)):
                 continue
             batch = deepcopy(original)
             # The checkbox controls creation of cash transactions.  A comdirect
@@ -701,15 +736,6 @@ class ImportPreviewDialog(QDialog):
                 target = combo.currentData()
                 if target is None:
                     raise ValueError('Bitte ein Zielkonto für „' + source['name'] + '“ auswählen.')
-                if target == '__skip__':
-                    from portfolio_v5.accounts import account_key
-                    batch.documents = [d for d in batch.documents if account_key(d.account) != source['key']]
-                    batch.transactions = [t for t in batch.transactions if account_key(t.account) != source['key']]
-                    batch.snapshots = [s for s in batch.snapshots if account_key(s.account) != source['key']]
-                    batch.balances = [b for b in batch.balances if account_key(b.account) != source['key']]
-                    batch.cost_reports = [r for r in batch.cost_reports if account_key(r.account) != source['key']]
-                    batch.account_names = [n for n in batch.account_names if account_key(n) != source['key']]
-                    continue
                 if target == '__new__':
                     batch.new_accounts.append(source['new_name'])
                     target = source['key']
