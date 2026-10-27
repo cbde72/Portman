@@ -1,5 +1,7 @@
 import importlib.util
 import json
+import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -22,6 +24,26 @@ def row(path='bank/test.pdf', sha='a' * 64, severity='PASS'):
 
 def completed(stdout='', stderr='', returncode=0):
     return subprocess.CompletedProcess(['worker'], returncode, stdout, stderr)
+
+
+def powershell_executable():
+    return shutil.which('pwsh') or shutil.which('powershell')
+
+
+def test_worker_stdio_is_reconfigured_to_strict_utf8(monkeypatch):
+    calls = []
+
+    class Stream:
+        def reconfigure(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr(AUDIT.sys, 'stdout', Stream())
+    monkeypatch.setattr(AUDIT.sys, 'stderr', Stream())
+    AUDIT.configure_worker_stdio()
+    assert calls == [
+        {'encoding': 'utf-8', 'errors': 'strict'},
+        {'encoding': 'utf-8', 'errors': 'strict'},
+    ]
 
 
 def test_unicode_worker_output_uses_explicit_utf8_without_pythonioencoding(monkeypatch, tmp_path):
@@ -168,3 +190,40 @@ def test_complete_result_files_are_written_with_unicode(tmp_path):
     decoded = json.loads((tmp_path / 'audit.json').read_text(encoding='utf-8'))
     assert decoded['files'][0]['path'] == 'Bänk/Überblick → −10€.pdf'
     assert 'Bänk' in (tmp_path / 'report.md').read_text(encoding='utf-8')
+
+
+@pytest.mark.skipif(not powershell_executable(), reason='PowerShell is not installed')
+def test_powershell_launcher_sets_import_path_before_environment_check(tmp_path):
+    pdf_root = tmp_path / 'pdfs'
+    output = tmp_path / 'fresh-output'
+    baseline = tmp_path / 'baseline.json'
+    pdf_root.mkdir()
+    baseline.write_text('{"files": []}', encoding='utf-8')
+    environment = os.environ.copy()
+    environment['PYTHONPATH'] = ''
+    environment['PYTHONIOENCODING'] = 'cp1252'
+    result = subprocess.run([
+        powershell_executable(), '-NoProfile', '-File', str(ROOT / 'tools' / 'powershell_audit_v3.ps1'),
+        '-PdfRoot', str(pdf_root), '-Baseline', str(baseline), '-Output', str(output),
+    ], cwd=tmp_path, env=environment, capture_output=True, text=True, encoding='utf-8', timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert (output / 'audit.json').is_file()
+
+
+@pytest.mark.skipif(not powershell_executable(), reason='PowerShell is not installed')
+def test_powershell_launcher_refuses_to_overwrite_existing_output(tmp_path):
+    pdf_root = tmp_path / 'pdfs'
+    output = tmp_path / 'existing-output'
+    baseline = tmp_path / 'baseline.json'
+    pdf_root.mkdir()
+    output.mkdir()
+    sentinel = output / 'keep.txt'
+    sentinel.write_text('do not overwrite', encoding='utf-8')
+    baseline.write_text('{"files": []}', encoding='utf-8')
+    result = subprocess.run([
+        powershell_executable(), '-NoProfile', '-File', str(ROOT / 'tools' / 'powershell_audit_v3.ps1'),
+        '-PdfRoot', str(pdf_root), '-Baseline', str(baseline), '-Output', str(output),
+    ], cwd=tmp_path, capture_output=True, text=True, encoding='utf-8', timeout=30)
+    assert result.returncode != 0
+    assert 'Output directory already exists' in result.stderr
+    assert sentinel.read_text(encoding='utf-8') == 'do not overwrite'
