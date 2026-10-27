@@ -55,7 +55,6 @@ TAX_PAGE = {
 }
 REINVEST = re.compile(r'automatisch\s+wieder\s+an')
 ORDER = re.compile(r'Ordernummer\s+(?P<order>[0-9.]+)')
-EXECUTION = re.compile(r'Ausführungstag\s*/\s*-zeit\s+(?P<date>' + DATE + r')\s+um\s+(?P<time>\d{2}:\d{2}:\d{2})')
 EXECUTION_DAY = re.compile(r'Ausführungstag(?:\s*/\s*-zeit)?\s+(?P<date>' + DATE + r')(?:\s+um\s+(?P<time>\d{2}:\d{2}:\d{2}))?')
 MARKET_VALUE = re.compile(r'Kurswert\s+(?P<currency>[A-Z]{3})\s+(?P<amount>' + AMOUNT + ')')
 PRICE = re.compile(r'\bKurs(?:[ \t]*\([^)\n]*\))?\s+(?P<currency>[A-Z]{3})\s+(?P<amount>' + AMOUNT + ')')

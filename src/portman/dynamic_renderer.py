@@ -22,11 +22,10 @@ from matplotlib.patches import Rectangle
 from matplotlib.ticker import FuncFormatter, MaxNLocator
 from typing import Any
 
-# SciPy und Squarify sind optionale Abhängigkeiten.  Hier wird nur ihre
-# Verfügbarkeit geprüft; importiert werden sie erst bei Bedarf, damit der
-# Programmstart nicht durch schwere Importe verzögert wird.
+# SciPy ist eine optionale Abhängigkeit. Hier wird nur die Verfügbarkeit
+# geprüft; importiert wird es erst bei Bedarf, damit der Programmstart nicht
+# durch schwere Importe verzögert wird.
 SCIPY_AVAILABLE = find_spec("scipy") is not None
-SQUARIFY_AVAILABLE = find_spec("squarify") is not None
 
 from .chart_config import ChartConfig, DEFAULT_STYLING, ALL_ACCOUNTS
 from .chart_style import (
