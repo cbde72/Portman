@@ -212,10 +212,27 @@ def test_conflicting_advance_tax_for_same_depot_is_rejected(tmp_path):
     try:
         repo.save_account('Depot 12345678900', {'kind': 'Depot', 'institution': 'comdirect'})
         first = parse(notice(), 'first'); first.documents = []
-        conflict = parse(notice(reference='ANONYMIZED-CORRECTION'), 'conflict'); conflict.documents = []
+        conflict = parse(notice(used='69,00', reference='ANONYMIZED-CORRECTION'), 'conflict')
+        conflict.documents = []
         repo.commit_batches([first])
         with pytest.raises(ValueError, match='Ertragsjahr 2025 bereits'):
             repo.store.import_batch(conflict)
+    finally:
+        repo.close()
+
+
+def test_same_advance_tax_with_new_source_identity_is_idempotent(tmp_path):
+    repo = RepositoryV09(tmp_path / 'portfolio.sqlite', backups=False)
+    try:
+        repo.save_account('Depot 12345678900', {'kind': 'Depot', 'institution': 'comdirect'})
+        first = parse(notice(reference='ANONYMIZED-ORIGINAL'), 'first')
+        repeated = parse(notice(reference='ANONYMIZED-REDOWNLOAD'), 'second')
+        first.documents = repeated.documents = []
+        assert repo.commit_batches([first])[0]['status'] == 'imported'
+        assert repo.commit_batches([repeated])[0]['status'] == 'imported'
+        events = repo.tax_events('Depot 12345678900', income_year=2025)
+        assert len(events) == 1
+        assert events[0]['taxable_income'] == '70.00'
     finally:
         repo.close()
 

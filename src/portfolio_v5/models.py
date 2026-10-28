@@ -797,6 +797,10 @@ def check_transaction(tx):
                     add('GROSS_NET_MISMATCH', 'warning',
                         f'Brutto/Netto passt nicht: erwartet {rendered}, Betrag {amount}')
         rate = values.get('fx_rate')
+        price_currency = text(getattr(tx, 'price_currency', '')).upper()
+        booking_currency = text(getattr(tx, 'currency', '')).upper()
+        cross_currency_price = bool(price_currency and booking_currency
+                                    and price_currency != booking_currency)
         fx_from = text(getattr(tx, 'fx_from_currency', '')).upper()
         fx_to = text(getattr(tx, 'fx_to_currency', '')).upper()
         explicit_fx = bool(fx_from or fx_to)
@@ -818,9 +822,9 @@ def check_transaction(tx):
         if rate is not None:
             if rate <= 0:
                 add('FX_RATE_INVALID', 'warning', 'Devisenkurs muss endlich und größer als null sein', 'fx_rate')
-            if tx.original_amount is None:
+            if tx.original_amount is None and not cross_currency_price:
                 add('FX_AMOUNT_MISSING', 'warning', 'Devisenkurs ohne Fremdwährungsbetrag ist nicht eindeutig', 'original_amount')
-            if not tx.original_currency:
+            if not tx.original_currency and not cross_currency_price:
                 add('FX_CURRENCY_MISSING', 'warning', 'Devisenkurs ohne Fremdwährung ist nicht eindeutig', 'original_currency')
             elif tx.original_currency.upper() == tx.currency.upper() and rate != 1:
                 add('FX_SAME_CURRENCY_RATE', 'warning', 'Devisenkurs für identische Währungen muss 1 sein', 'fx_rate')
@@ -834,7 +838,20 @@ def check_transaction(tx):
                 add('FX_AMOUNT_MISMATCH', 'warning',
                     'Historischer Devisenkurs passt nicht: Originalbetrag ÷ Kurs ergibt nicht den Bruttobetrag')
         if {'price', 'quantity', 'gross_amount'} <= values.keys() and tx.kind in (Kind.BUY, Kind.SELL):
-            if abs(values['price'] * values['quantity'] - values['gross_amount']) > tolerance:
+            expected_gross = values['price'] * values['quantity']
+            if cross_currency_price and rate is None:
+                add('FX_RATE_MISSING', 'warning',
+                    'Fremdwährungskurs benötigt einen Devisenkurs', 'fx_rate')
+                expected_gross = None
+            elif cross_currency_price and rate > 0:
+                if explicit_fx and price_currency == fx_from and booking_currency == fx_to:
+                    expected_gross *= rate
+                else:
+                    # Legacy bank quotations state units of price currency per
+                    # unit of booking currency (for example USD per EUR).
+                    expected_gross /= rate
+            if (expected_gross is not None
+                    and abs(expected_gross - values['gross_amount']) > tolerance):
                 add('PRICE_QUANTITY_MISMATCH', 'warning', 'Kurs x Stückzahl passt nicht zum Kurswert')
         advance_base = getattr(tx, 'advance_tax_base', None)
         advance_currency = text(getattr(tx, 'advance_tax_currency', '')).upper()

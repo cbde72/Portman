@@ -597,6 +597,21 @@ class Store:
             payload.pop('related_transaction_id', None)
             return payload
 
+        def compatible_period_fact(existing, current):
+            """Accept the same economic fact after parser/source identity upgrades."""
+            ignored = {'external_id', 'reference_no', 'document_date',
+                       'related_transaction_id', 'cash_account'}
+            old, new = dict(existing or {}), dict(current or {})
+            for field in (old.keys() | new.keys()) - ignored:
+                old_value, new_value = old.get(field), new.get(field)
+                # Historic events can be sparse.  A later parser may add source
+                # fields, but two documented non-empty values may never differ.
+                if old_value in (None, '') or new_value in (None, ''):
+                    continue
+                if old_value != new_value:
+                    return False
+            return True
+
         if incoming and all(source_tax_fact(by_id.get(identifier)) == source_tax_fact(payload)
                             for identifier, payload in incoming.items()):
             old_imports = {record_by_id[identifier]['import_id'] for identifier in incoming}
@@ -626,6 +641,8 @@ class Store:
                           str(event.income_year or ''), event.type)
             conflict = by_period.get(period_key) if event.type in advance_types else None
             if conflict is not None:
+                if compatible_period_fact(conflict, serialized):
+                    continue
                 raise ValueError(
                     f'Für {event.security_ref or "das Wertpapier"} im Depot {event.account} ist für das '
                     f'Ertragsjahr {event.income_year or "unbekannt"} bereits eine Vorabpauschale gespeichert.')

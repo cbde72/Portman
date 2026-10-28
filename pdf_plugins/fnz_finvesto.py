@@ -139,7 +139,9 @@ class FnzFinvestoPlugin:
             fees = money(fee.group('amount')) if fee else None
             payment = PAYMENT.search(body)
             cash_amount = money(payment.group('amount')) if payment else amount
-            tax_items, fx_rate = [], None
+            tax_items = []
+            fx_rate = (correction_number(row.group('fx'))
+                       if kind == 'BUY' and 'fx' in row.groupdict() and row.group('fx') else None)
             components = TAX_COMPONENTS.search(body) if kind == 'DIVIDEND' else None
             tax_total = None if components else (TAX_TOTAL.search(body) if kind == 'DIVIDEND' else None)
             taxes = money(components.group('total')) if components else (

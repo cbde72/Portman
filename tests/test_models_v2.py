@@ -144,6 +144,20 @@ def test_explicit_fx_pair_round_trips_without_changing_positional_constructor():
     assert check_transaction(decoded) == []
 
 
+def test_foreign_currency_trade_price_uses_documented_exchange_rate():
+    tx = Transaction('Depot', 'fnz-buy', '2024-01-01', Kind.BUY, '-161.00', 'EUR',
+        quantity='2', price='100', price_currency='USD', gross_amount='160',
+        fees='1', fx_rate='1.25')
+    assert check_transaction(tx) == []
+
+    missing_rate = Transaction('Depot', 'fnz-missing-fx', '2024-01-01', Kind.BUY,
+        '-161.00', 'EUR', quantity='2', price='100', price_currency='USD',
+        gross_amount='160', fees='1')
+    issues = check_transaction(missing_rate)
+    assert any(issue.code == 'FX_RATE_MISSING' for issue in issues)
+    assert not any(issue.code == 'PRICE_QUANTITY_MISMATCH' for issue in issues)
+
+
 def test_tax_and_fee_components_must_match_aggregates_and_cash_direction():
     inconsistent = Transaction('Depot', 'components', '2026-01-01', Kind.DIVIDEND, '84', 'EUR',
         gross_amount='100', taxes='15', fees='1', withholding_tax='16', solidarity_tax='16',
