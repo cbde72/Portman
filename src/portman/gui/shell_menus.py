@@ -10,34 +10,37 @@ class ShellMenusMixin:
         # --- MENÜ: Datei ---
         file_menu = menubar.addMenu("&Datei")
         self.import_menu = file_menu.addMenu('&Importieren')
-        try:
-            self.import_menu.setTitle('Imports')
-        except Exception:
-            pass
+        self.import_menu.setTitle('Importieren')
         self.online_menu = file_menu.addMenu('&Online')
 
         act_import = QAction("&Dateien importieren …", self)
         act_import.setShortcut(QKeySequence("Ctrl+O"))
         act_import.triggered.connect(self.import_csv)
         self.import_menu.addAction(act_import)
+        self.import_files_action = act_import
         self.import_menu.addSeparator()
         act_renault_pdf = QAction('&Renault PDF importieren …', self)
         act_renault_pdf.triggered.connect(self.import_renault_pdf)
         self.import_menu.addAction(act_renault_pdf)
+        self.register_expert_action(act_renault_pdf)
         act_baader_pdf = QAction('&Baader PDFs aus Ordner importieren (rekursiv) …', self)
         act_baader_pdf.triggered.connect(self.import_baader_pdf)
         self.import_menu.addAction(act_baader_pdf)
+        self.register_expert_action(act_baader_pdf)
         act_comdirect_pdf = QAction('&comdirect Finanzreports (PDF) importieren …', self)
         act_comdirect_pdf.triggered.connect(self.import_comdirect_pdf)
         self.import_menu.addAction(act_comdirect_pdf)
+        self.register_expert_action(act_comdirect_pdf)
         self.import_menu.addSeparator()
 
         act_history = QAction("&History: Blatt aus allen Excel-Dateien importieren …", self)
         act_history.triggered.connect(self.sync_history)
         self.import_menu.addAction(act_history)
+        self.register_expert_action(act_history)
         act_savings = QAction("&History: Tagesgeld und Festgeld importieren …", self)
         act_savings.triggered.connect(lambda: self.sync_history(savings=True))
         self.import_menu.addAction(act_savings)
+        self.register_expert_action(act_savings)
 
         act_accounts = QAction("&Konten verwalten …", self)
         act_accounts.triggered.connect(self.manage_accounts)
@@ -58,9 +61,11 @@ class ShellMenusMixin:
         credentials = QAction("&Marktdaten-Zugänge …", self)
         credentials.triggered.connect(lambda: self.market_widget.configure_credentials())
         self.online_menu.addAction(credentials)
+        self.register_expert_action(credentials)
         history = QAction('&Kursverläufe seit Besitzbeginn laden und speichern', self)
         history.triggered.connect(lambda: self.market_widget.open_history(auto_start=True))
         self.online_menu.addAction(history)
+        self.register_expert_action(history)
 
         act_save = QAction("&Einstellungen und Metadaten speichern", self)
         act_save.setShortcut(QKeySequence("Ctrl+S"))
@@ -72,22 +77,26 @@ class ShellMenusMixin:
         act_fetch_etf = QAction("&ETF-Positionen aus Factsheets laden", self)
         act_fetch_etf.triggered.connect(self.fetch_etf_holdings_online)
         file_menu.addAction(act_fetch_etf)
+        self.register_expert_action(act_fetch_etf)
 
         act_names = QAction("&Anzeigenamen aus ISIN ermitteln", self)
         act_names.triggered.connect(self.resolve_isin_names)
         file_menu.addAction(act_names)
+        self.register_expert_action(act_names)
 
         # --- MENÜ: Ansicht ---
         view_menu = menubar.addMenu("&Ansicht")
         self.view_menu = view_menu
 
+        dock_menu = view_menu.addMenu('&Bereiche und Fenster')
+        self.register_expert_action(dock_menu.menuAction())
         for dock in self.docks:
             action = dock.toggleViewAction()
             action.setStatusTip(f"Fenster '{dock.windowTitle()}' ein- oder ausblenden")
             cleaned = action.text().replace('🔍 ', '')
             cleaned = cleaned.replace('Risiko & Kennzahlen-Analyse', 'Risiko & Kennzahlen-Analyse')  # no-op
             action.setText(cleaned)
-            view_menu.addAction(action)
+            dock_menu.addAction(action)
 
         view_menu.addSeparator()
         show_all_action = QAction("&Alle Bereiche anzeigen", self)
@@ -128,7 +137,15 @@ class ShellMenusMixin:
         self.lock_docks_action.setShortcut(QKeySequence("Ctrl+Shift+L"))
         self.lock_docks_action.setChecked(self.lock_editable_checked())
         self.lock_docks_action.toggled.connect(self.on_lock_docks_toggled)
-        view_menu.addAction(self.lock_docks_action)
+        dock_menu.addSeparator()
+        dock_menu.addAction(self.lock_docks_action)
+
+        view_menu.addSeparator()
+        self.expert_mode_action = QAction('&Expertenfunktionen anzeigen', self)
+        self.expert_mode_action.setCheckable(True)
+        self.expert_mode_action.setChecked(bool(self.settings.get('expert_mode', False)))
+        self.expert_mode_action.toggled.connect(self.set_expert_mode)
+        view_menu.addAction(self.expert_mode_action)
 
         # --- MENÜ: Bearbeiten / Hilfe ---
         self.edit_menu = menubar.addMenu("&Bearbeiten")
@@ -145,6 +162,7 @@ class ShellMenusMixin:
         rebal_export_action = QAction("&Rebalancing-Orders exportieren", self)
         rebal_export_action.triggered.connect(self.export_rebalancing_plan)
         tools_menu.addAction(rebal_export_action)
+        self.register_expert_action(rebal_export_action)
 
         from portman.gui.dockable_toolbar import DockableToolbar
         self.scope_toolbar = DockableToolbar(self, '&Konto und Datum', 'toolbar_scope')
@@ -165,6 +183,7 @@ class ShellMenusMixin:
             button.clicked.connect(lambda checked=False, d=days, m=months: self.shift_date(d, m))
             setattr(self, name, button)
             self.scope_toolbar.addWidget(button)
+            self.register_expert_widget(button)
         self.btn_previous_date = QPushButton('‹')
         self.btn_previous_date.setFixedWidth(24)
         self.btn_previous_date.setToolTip('Einen Tag zurück')
@@ -201,19 +220,6 @@ class ShellMenusMixin:
             button.clicked.connect(lambda checked=False, d=days, m=months: self.shift_date(d, m))
             setattr(self, name, button)
             self.scope_toolbar.addWidget(button)
+            self.register_expert_widget(button)
         self.combo_snapshot.currentIndexChanged.connect(self.update_date_navigation)
         self.update_date_navigation()
-        self.scope_toolbar.addSeparator()
-        from PySide6.QtWidgets import QComboBox
-
-        self.scope_toolbar.addSeparator()
-
-        # Layout preset dropdown
-        self.layout_preset_combo = QComboBox()
-        self.layout_preset_combo.addItems(['Übersicht', 'Analyse', 'Historie'])
-        self.layout_preset_combo.setToolTip('Layout-Preset auswählen')
-        self.layout_preset_combo.setMinimumWidth(90)
-        preset_map = {0: 'overview', 1: 'analysis', 2: 'history'}
-        self.layout_preset_combo.currentIndexChanged.connect(lambda i: self.apply_layout_preset(preset_map.get(i, 'overview')))
-        self.scope_toolbar.addWidget(QLabel('Layout'))
-        self.scope_toolbar.addWidget(self.layout_preset_combo)

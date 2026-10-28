@@ -1014,7 +1014,13 @@ class ComdirectErtraegePlugin:
             document_type='Steuermitteilung Investment-Ausschüttung', bank_name='comdirect',
             document_no=reference_no, page_count=len(document.pages), extraction_method='PDF-Text',
             linked_ids=[event_id, *([payment_id] if payment_id else [])]))
-        batch.account_names.extend([depot_account, cash_account])
+        # ``cash_account`` is documented evidence on the tax event (and, when
+        # taxes were actually withheld, on the non-cash reconciliation row).
+        # It is not a second account that a pure tax notice must map.  Keeping
+        # it out of account_names avoids a redundant mandatory preview row;
+        # the IBAN remains losslessly available via TaxEvent.cash_account.
+        if depot_account not in batch.account_names:
+            batch.account_names.append(depot_account)
         batch.warnings.append(
             f'Separate Steuermitteilung: Brutto {values["gross"]} EUR, Steuer {values["paid"]} EUR, '
             f'Netto {values["net"]} EUR. Keine zweite Ausschüttung erzeugt.')

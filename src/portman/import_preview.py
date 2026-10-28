@@ -75,7 +75,7 @@ class ImportPreviewDialog(QDialog):
         self.table.setHorizontalHeaderLabels(headers)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
-        tabs.addTab(self.table, 'Dateien')
+        tabs.addTab(self.table, '1 · Dateien auswählen')
         for row, batch in enumerate(batches):
             s = repository.preview_summary(batch)
             values = ['', Path(batch.path).name, s['accounts'], s['dates'], s['positions'], s['new'], s['changed'], s['missing'], '', s['balances'], s['transactions'], len(s['warnings']) + len(s['errors']), s['documents']]
@@ -115,7 +115,7 @@ class ImportPreviewDialog(QDialog):
         self.only_unassigned = QCheckBox('Nur offene Zuordnungen')
         filters.addWidget(self.mapping_search); filters.addWidget(self.only_unassigned)
         mapping_layout.addLayout(filters); mapping_layout.addWidget(self.mapping_table)
-        tabs.addTab(mapping_panel, '1 · Konten zuordnen')
+        tabs.addTab(mapping_panel, '2 · Konten zuordnen')
         self.mapping_groups = {}
         accounts = [r for r in repository.account_records() if r['active']]
         self.target_account_names = {r['account_key']: r['name'] for r in accounts}
@@ -143,7 +143,9 @@ class ImportPreviewDialog(QDialog):
                 style_target_account_combo(combo)
                 combo.addItem('Bitte Zielkonto auswählen', None)
                 if batch.source_sheet == 'PDF':
-                    combo.addItem('Gesamte Datei nicht importieren', '__skip__')
+                    combo.addItem(
+                        'Vorhandenes Zielkonto nicht zuordnen · gesamte Datei überspringen',
+                        '__skip__')
                 if suggestion['new_name']:
                     combo.addItem('Neu anlegen: ' + suggestion['new_name'], '__new__')
                 for account in accounts:
@@ -198,7 +200,7 @@ class ImportPreviewDialog(QDialog):
                 details.setPlainText('\n\n'.join(b.errors + b.warnings) + '\n\n' + b.pdf_text)
             self.pdf_file_choice.currentIndexChanged.connect(show_pdf)
             pdf_layout.addWidget(self.pdf_file_choice); pdf_layout.addWidget(details)
-            show_pdf(0); tabs.addTab(panel, 'Originaltexte und Hinweise')
+            show_pdf(0); tabs.addTab(panel, 'Details · Original und Hinweise')
         if any(batch.document_type == 'comdirect Finanzreport' or batch.source_sheet in ('Online ING', 'Online comdirect', 'Online Baader', 'Online Renault Bank direkt') for batch in batches):
             self.add_bank_details(tabs)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok)
@@ -289,7 +291,7 @@ class ImportPreviewDialog(QDialog):
             combo.view().setMinimumWidth(560)
             target = combo.currentData()
             missing = target is None
-            status = ('Bitte Zielkonto wählen' if missing else 'Gesamte Datei wird nicht importiert' if target == '__skip__'
+            status = ('Bitte Zielkonto wählen' if missing else 'Gesamte Datei wird übersprungen' if target == '__skip__'
                       else 'Wird neu angelegt' if target == '__new__' else group['reason']
                       if target == group['proposed'] else 'Manuell zugeordnet')
             self.mapping_table.item(row, 4).setText(status)
@@ -428,7 +430,7 @@ class ImportPreviewDialog(QDialog):
             button.clicked.connect(select_rows)
             actions.addWidget(button)
         layout.addLayout(actions)
-        tabs.addTab(panel, 'PDF-Buchungen')
+        tabs.addTab(panel, '3 · Buchungen prüfen')
         self.refresh_pdf_bookings()
 
     def add_mifid_cost_reports(self, tabs):
@@ -541,7 +543,7 @@ class ImportPreviewDialog(QDialog):
         table.itemSelectionChanged.connect(show_cost_items)
         for column, width in [(0, 120), (1, 280), (2, 150), (3, 90), (4, 130)]:
             item_table.setColumnWidth(column, width)
-        tabs.addTab(panel, 'MiFID-II-Kosten')
+        tabs.addTab(panel, 'Details · MiFID-II-Kosten')
         if table.rowCount():
             table.selectRow(0)
             show_cost_items()
@@ -670,8 +672,9 @@ class ImportPreviewDialog(QDialog):
         details.resizeColumnsToContents()
         banks = {batch.source_sheet.removeprefix('Online ') for batch in self.batches
                  if batch.source_sheet in ('Online ING', 'Online comdirect', 'Online Baader', 'Online Renault Bank direkt')}
-        tabs.addTab(details, 'comdirect · Importdetails' if any(b.document_type == 'comdirect Finanzreport' for b in self.batches)
-                    else f'{next(iter(banks)) if len(banks) == 1 else "Bank"} · Abrufdetails')
+        source = 'comdirect' if any(b.document_type == 'comdirect Finanzreport' for b in self.batches) else (
+            next(iter(banks)) if len(banks) == 1 else 'Bank')
+        tabs.addTab(details, f'4 · Validierung · {source}')
 
     def selected_batches(self):
         result = []

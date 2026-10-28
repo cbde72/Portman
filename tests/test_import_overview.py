@@ -29,7 +29,8 @@ def test_grouped_account_choice_updates_every_selected_file(tmp_path):
         assert 'min-height: 34px' in combo.view().styleSheet()
         assert dialog.mapping_table.verticalHeader().defaultSectionSize() == 52
         assert all(row[2] is combo for row in dialog.mapping_rows)
-        assert combo.itemText(combo.findData('__skip__')) == 'Gesamte Datei nicht importieren'
+        assert combo.itemText(combo.findData('__skip__')) == (
+            'Vorhandenes Zielkonto nicht zuordnen · gesamte Datei überspringen')
         combo.setCurrentIndex(combo.findData('alternative'))
         assert all(row[2].currentData() == 'alternative' for row in dialog.mapping_rows)
         assert '0 offen' in dialog.import_summary.text()

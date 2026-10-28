@@ -159,6 +159,63 @@ class ImportSession:
             return deepcopy(result)
         finally: repo.close()
 
+    @staticmethod
+    def _advance_tax_fact(event):
+        """Comparable source fact without mutable linkage/document identity."""
+        ignored = {'external_id', 'reference_no', 'document_date',
+                   'related_transaction_id', 'cash_account', 'source',
+                   'import_id', 'depot'}
+        return {key: value for key, value in event.items()
+                if key not in ignored and value not in (None, '')}
+
+    def advance_tax_conflicts(self, batches):
+        """Find advance-tax uniqueness conflicts before any simulation writes."""
+        repo = RepositoryV09(self.snapshot, backups=False)
+        try:
+            advance_types = {'vorabpauschale', 'vorabpauschale_ausland'}
+            existing = {}
+            for event in repo.tax_events():
+                if event.get('type') not in advance_types:
+                    continue
+                key = (account_key(event.get('account', '')),
+                       event.get('security_ref', ''),
+                       str(event.get('income_year') or ''), event.get('type', ''))
+                existing[key] = event
+            names = {row['account_key']: row['name'] for row in repo.account_records()}
+            result = []
+            for batch_index, batch in enumerate(batches):
+                for event_index, event in enumerate(batch.tax_events):
+                    if event.type not in advance_types:
+                        continue
+                    target = batch.account_assignments.get(
+                        account_key(event.account), account_key(event.account))
+                    effective_account = names.get(target, event.account)
+                    current = asdict(event)
+                    current['account'] = effective_account
+                    current['source'] = batch.path
+                    period_key = (account_key(effective_account), event.security_ref,
+                                  str(event.income_year or ''), event.type)
+                    old = existing.get(period_key)
+                    if old is None:
+                        existing[period_key] = current
+                        continue
+                    key = digest(['advance-tax', batch.path, event.external_id,
+                                  batch_index, event_index, period_key])
+                    old_fact = self._advance_tax_fact(old)
+                    new_fact = self._advance_tax_fact(current)
+                    differences = sorted(field for field in old_fact.keys() | new_fact.keys()
+                                         if old_fact.get(field) != new_fact.get(field))
+                    result.append(dict(
+                        key=key, batch=batch_index, event=event_index,
+                        external_id=event.external_id, old=old, new=current,
+                        identical=not differences, differences=differences,
+                        identity_conflict=(old.get('external_id') == event.external_id
+                                           and bool(differences)),
+                    ))
+            return result
+        finally:
+            repo.close()
+
     def candidates(self,key):
         a,na,b,nb,new=self._candidate_buckets[key]; seen=set(); rows=[]
         from itertools import chain,islice
@@ -255,6 +312,24 @@ class ImportSession:
         self._validate_group_decisions(conflicts, decisions)
         skip, rename, replacements = self._resolution_actions(conflicts, decisions)
         renamed = self._apply_resolution(selected, skip, rename)
+        advance_conflicts = self.advance_tax_conflicts(batches)
+        for conflict in advance_conflicts:
+            if decisions.get(conflict['key'], {}).get('action') != 'ignore':
+                raise ValueError('Alle Vorabpauschalen-Konflikte ausdrücklich entscheiden.')
+        skipped_events = defaultdict(set)
+        for conflict in advance_conflicts:
+            skipped_events[conflict['batch']].add(conflict['external_id'])
+        for index, batch in enumerate(selected):
+            identifiers = skipped_events.get(index, set())
+            if not identifiers:
+                continue
+            batch.tax_events = [event for event in batch.tax_events
+                                if event.external_id not in identifiers]
+            batch.tax_details = [detail for detail in batch.tax_details
+                                 if detail.linked_tax_event_id not in identifiers]
+            batch.warnings.append(
+                f'{len(identifiers)} bereits vorhandene Vorabpauschale(n) '
+                'nach ausdrücklicher Benutzerentscheidung ignoriert.')
         return selected, [(key, old, reason, renamed[key])
                           for key, old, reason in replacements if key not in skip]
 
@@ -380,6 +455,10 @@ class ImportSession:
                 results=self.apply(repo,job,resolved)
                 if job.isInterruptionRequested(): raise ValueError('Import abgebrochen; keine Änderungen gespeichert.')
                 report_phase(job, 'Änderungen gemeinsam speichern …')
+            if results and getattr(self, 'suppressed_warning_count', 0):
+                # UI-only information for the completion dialog.  The full
+                # warnings remain unchanged in each persisted import report.
+                results[0]['suppressed_warnings'] = self.suppressed_warning_count
             try: atomic_json(self.folder/'completed.json',dict(results=results))
             except OSError:
                 for result in results: result.setdefault('warnings',[]).append('Import gespeichert; Sitzungsabschlussdatei konnte nicht geschrieben werden.')

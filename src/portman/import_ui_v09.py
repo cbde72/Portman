@@ -131,9 +131,24 @@ class ImportWizard(ImportPreviewDialog):
         self.tabs.addTab(self.all_transactions, "Alle Buchungen · Auswahl")
         self.conflict_table = QTableWidget()
         self.tabs.addTab(self.conflict_table, "Überschneidungen · Entscheidungen")
-        from .import_conflict_actions import install_conflict_actions
+        from .import_conflict_actions import ImportDecisionPolicy, install_conflict_actions
 
+        self.import_decision_policy = ImportDecisionPolicy()
+        settings_owner = parent if hasattr(parent, "settings") else None
+        self.persistent_warning_rules = dict(
+            settings_owner.settings.get("ignored_import_warnings", {}) if settings_owner else {})
+
+        def save_persistent_warning_rules(rules):
+            if settings_owner is None:
+                return
+            settings_owner.settings["ignored_import_warnings"] = dict(rules)
+            settings_owner.save_settings()
+
+        self.save_persistent_warning_rules = save_persistent_warning_rules
         install_conflict_actions(self)
+        self.policy_status = QLabel(self.import_decision_policy.summary())
+        self.policy_status.setWordWrap(True)
+        self.layout().addWidget(self.policy_status)
         self.conflict_detail = QTableWidget()
         self.tabs.addTab(self.conflict_detail, "Feldvergleich")
         self.conflict_table.cellClicked.connect(self.show_conflict)
@@ -209,14 +224,18 @@ class ImportWizard(ImportPreviewDialog):
     def read_decisions(self):
         if not hasattr(self, "conflicts"):
             return self.decisions
-        return {
+        booking_keys = {conflict["key"] for conflict in self.conflicts}
+        result = {key: value for key, value in self.decisions.items()
+                  if key not in booking_keys}
+        result.update({
             c["key"]: dict(
                 action=self.conflict_table.cellWidget(i, 0).currentData(),
                 reason=self.conflict_table.cellWidget(i, 1).text(),
                 old_ref=self.selected_old.get(c["key"]),
             )
             for i, c in enumerate(self.conflicts)
-        }
+        })
+        return result
 
     def choose_candidate(self):
         from PySide6.QtWidgets import QInputDialog
@@ -280,6 +299,19 @@ class ImportWizard(ImportPreviewDialog):
                 if not self._selected:
                     raise ValueError("Mindestens eine Datei auswählen.")
                 self.conflicts = run_job(self, self.session.live_path, "Überschneidungen suchen", lambda job: self.session.conflicts(self._selected))
+                self.advance_tax_conflicts = run_job(
+                    self, self.session.live_path, 'Vorabpauschalen prüfen',
+                    lambda job: self.session.advance_tax_conflicts(self._selected))
+                from .import_conflict_actions import resolve_advance_tax_conflicts_interactively
+                if (self.advance_tax_conflicts
+                        and not resolve_advance_tax_conflicts_interactively(
+                            self, self.advance_tax_conflicts)):
+                    # Stay on the current wizard state. No simulation has run,
+                    # and account/booking decisions remain available.
+                    self.review_note.setText(
+                        'Importwirkung abgebrochen. Es wurden keine Daten geändert; '
+                        'Ihre bisherigen Zuordnungen und Entscheidungen bleiben erhalten.')
+                    return
 
                 def description(t, source):
                     return (
@@ -304,10 +336,18 @@ class ImportWizard(ImportPreviewDialog):
                 for i, c in enumerate(self.conflicts):
                     combo = QComboBox()
                     combo.addItem("Bitte entscheiden", None)
-                    for label, key in [("Beide behalten", "keep"), ("Neue überspringen", "skip"), ("Alte ersetzen (Revision)", "replace")]:
+                    saved = self.decisions.get(c["key"], {})
+                    # Old saved sessions may contain the former "keep both"
+                    # choice.  Keep it resumable, but do not offer it for new
+                    # decisions: the guided UI deliberately distinguishes only
+                    # replacement from keeping the old booking.
+                    choices = [("Alte behalten · neue überspringen", "skip"),
+                               ("Alte überschreiben · Revision", "replace")]
+                    if saved.get("action") == "keep":
+                        choices.insert(0, ("Beide behalten · bestehende Sitzungsentscheidung", "keep"))
+                    for label, key in choices:
                         if key != "replace" or c["old"]["import_id"] >= 0 or c["candidate_count"] > 1:
                             combo.addItem(label, key)
-                    saved = self.decisions.get(c["key"], {})
                     combo.setCurrentIndex(max(0, combo.findData(saved.get("action"))))
                     reason = QLineEdit(saved.get("reason", ""))
                     self.conflict_table.setCellWidget(i, 0, combo)
@@ -319,13 +359,26 @@ class ImportWizard(ImportPreviewDialog):
                 self.conflict_table.setColumnWidth(3, 490)
                 self._stage = 1
                 self.next.setText("Weiter · Zusammenfassung")
+                from .import_conflict_actions import warning_notice
+                warnings = [warning_notice(batch, message)
+                            for batch in self._selected for message in batch.warnings]
+                from .import_conflict_actions import (
+                    resolve_conflicts_interactively,
+                    resolve_warnings_interactively,
+                )
+                if warnings and not resolve_warnings_interactively(self, warnings):
+                    self.reject()
+                    return
+                self.session.suppressed_warning_count = self.import_decision_policy.ignored_warning_count
                 if self.conflicts:
-                    from .import_conflict_actions import ask_conflict_policy
-
-                    ask_conflict_policy(self)
+                    if not resolve_conflicts_interactively(self):
+                        self.reject()
+                        return
                     self.show_conflict(0, 0)
                     self.show_review_tab(self.conflict_table)
+                    self.policy_status.setText(self.import_decision_policy.summary())
                     return
+                self.policy_status.setText(self.import_decision_policy.summary())
             self.decisions = self.read_decisions()
             data = run_job(self, self.session.live_path, "Importwirkung berechnen", lambda job: self.session.simulate(job, self._selected, self.decisions))
             populate(self.review, ["Depot", "Position", "Stück vorher", "Stück nachher", "Wert vorher", "Wert nachher"], data["changes"])

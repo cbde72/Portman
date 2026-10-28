@@ -76,6 +76,7 @@ class MainWindowV09Mixin:
         from portman.portfolio_dialogs import install_portfolio_menu
 
         install_portfolio_menu(self)
+        self.install_depot_overview()
         self.install_position_details()
         for chart in (self.visuals_widget, self.dashboard.visuals, self.performance_widget):
             enhance_chart(chart, self.repository)
@@ -100,9 +101,12 @@ class MainWindowV09Mixin:
         from portman.gui.appearance import install_appearance_menu
 
         install_appearance_menu(self)
+        self.set_expert_mode(bool(self.settings.get("expert_mode", False)))
         try:
             self.resize(max(self.width(), 1200), max(self.height(), 800))
             self.setMinimumSize(900, 650)
+            if "window_width" not in self.settings and "window_height" not in self.settings:
+                self.showMaximized()
         except Exception:
             pass
         self.statusBar().showMessage(f"PortMan 09 · {self.portfolio_label} · Automatische Speicherung · {self.data_folder}", 12000)
@@ -111,15 +115,18 @@ class MainWindowV09Mixin:
         excel_action = QAction("Excel-Assistent · Blätter und Unterdepots", self)
         excel_action.triggered.connect(self.excel_import)
         self.import_menu.addAction(excel_action)
+        self.register_expert_action(excel_action)
         booking_action = QAction("Manuell ein- oder ausbuchen …", self)
         booking_action.triggered.connect(self.manual_booking)
         self.import_menu.addAction(booking_action)
         cost_split_action = QAction("&Kaufwert / Aktiensplit nachtragen …", self)
         cost_split_action.triggered.connect(self.adjust_cost_split)
         self.import_menu.addAction(cost_split_action)
+        self.register_expert_action(cost_split_action)
         plugin_action = QAction("&PDF-Import-Plugins …", self)
         plugin_action.triggered.connect(self.open_pdf_plugins)
         self.import_menu.addAction(plugin_action)
+        self.register_expert_action(plugin_action)
         # The shared shell owns the top-level menus.  Reuse them so V09 does
         # not create duplicate Bearbeiten/Hilfe and Extras/Werkzeuge entries.
         tools_menu = getattr(self, "tools_menu", None)
@@ -141,6 +148,10 @@ class MainWindowV09Mixin:
             action.triggered.connect(callback)
             target = self.import_menu if label in ("Importsitzung fortsetzen", "CSV mit Profil importieren", "comdirect-Steuerdetails importieren") else tools_menu
             target.addAction(action)
+            if label in ("Aufträge / Fortschritt", "Importsitzung fortsetzen", "CSV mit Profil importieren",
+                         "comdirect-Steuerdetails importieren", "Steuerliche Detailansicht",
+                         "Umbuchungen / Kapitalmaßnahmen / Wechselkurse"):
+                self.register_expert_action(action)
         self.compact_action = QAction("&Kompakte Darstellung", self)
         self.compact_action.setCheckable(True)
         self.compact_action.setChecked(self.settings.get("compact_v09", False))
@@ -170,6 +181,14 @@ class MainWindowV09Mixin:
         # Search updates are debounced through refresh_tables, which recomputes
         # the footer; only tab switches need the immediate hook here.
         self.tabs.currentChanged.connect(self.update_totals)
+
+    def install_depot_overview(self):
+        """Add the read-only activity report as its own depot tab."""
+        from portman.gui.depot_overview import DepotOverviewWidget
+
+        self.depot_overview = DepotOverviewWidget(self.repository, self)
+        self.depot_overview.setObjectName('depotOverview')
+        self.tabs.addTab(self.depot_overview, 'Depotübersicht')
 
     def refresh_all_views(self):
         if getattr(self.repository, "defer_initial_views", False):
@@ -215,6 +234,7 @@ class MainWindowV09Mixin:
         self.period_note = QLabel("Bestände: Stichtag oben · Analysen: Zeitraum hier")
         self.period_note.setMinimumWidth(180)
         self.period_toolbar.addWidget(self.period_note)
+        self.period_toolbar.setVisible(False)
         state = self.settings.get("dock_state")
         if state:
             try:
@@ -427,6 +447,8 @@ class MainWindowV09Mixin:
             )
             self._navigation = self._navigation[-30:]
         super().show_workspace(name)
+        if hasattr(self, "period_toolbar"):
+            self.period_toolbar.setVisible(name in ("analysis", "grid", "performance", "income_costs", "rebalance"))
         self.statusBar().showMessage("Konto und Bewertungsstichtag oben wählen. Layout über „Ansicht / Fenster → Layout bearbeiten“ anpassen.", 6000)
         self.setWindowTitle("PortMan 09 · " + self.portfolio_label + " · " + self.pages.get(name, (name,))[0])
         if hasattr(self, "period_start") and name in ("dashboard", "analysis", "performance"):

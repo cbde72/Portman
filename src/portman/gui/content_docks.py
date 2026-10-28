@@ -46,6 +46,8 @@ class ContentDocks:
     def __init__(self, window):
         self.window, self.entries = window, {}
         menu = window.view_menu.addMenu('&Tabellen und Graphen')
+        if hasattr(window, 'register_expert_action'):
+            window.register_expert_action(menu.menuAction())
         reset = menu.addAction('&Alle in ursprüngliche Bereiche zurücklegen')
         reset.triggered.connect(self.attach_all)
         menu.addSeparator()

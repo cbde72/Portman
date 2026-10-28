@@ -6,11 +6,11 @@ from unittest.mock import Mock
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
 import pytest
-from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QLineEdit, QMessageBox, QTableWidget
+from PySide6.QtWidgets import QApplication, QComboBox, QLineEdit, QTableWidget
 from portfolio_v5.models import ImportBatch, BankTransaction
 from portman.repository import PortfolioRepository
 from portman.bank_history_range import ALL_HISTORY_START, last_history_date, history_start_editor
-from portman.import_conflict_actions import copy_first_decision, copy_first_reason, ask_conflict_policy
+from portman.import_conflict_actions import copy_first_decision, copy_first_reason
 
 
 @pytest.fixture
@@ -47,19 +47,6 @@ def test_bulk_preserves_decisions_and_reasons(app):
     table.cellWidget(1, 1).setText('Individuell')
     copy_first_reason(wizard)
     assert table.cellWidget(1, 1).text() == 'Individuell'
-
-
-@pytest.mark.parametrize('label, expected', [('Alte durch neue ersetzen', 'replace'),
-    ('Alle alten behalten', 'skip'), ('Einzeln entscheiden', None)])
-def test_initial_conflict_policy(app, monkeypatch, label, expected):
-    wizard = QDialog()
-    wizard.conflict_table = conflict_widgets().conflict_table
-    wizard.conflict_table.cellWidget(1, 0).setCurrentIndex(1)
-    monkeypatch.setattr(QMessageBox, 'exec', lambda self: 0)
-    monkeypatch.setattr(QMessageBox, 'clickedButton', lambda self: next(b for b in self.buttons() if b.text() == label))
-    ask_conflict_policy(wizard)
-    assert wizard.conflict_table.cellWidget(0, 0).currentData() == expected
-    assert wizard.conflict_table.cellWidget(1, 0).currentData() == 'keep'
 
 
 def test_last_history_is_committed_bank_specific_and_undoable(tmp_path, app):

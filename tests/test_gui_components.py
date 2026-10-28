@@ -74,7 +74,11 @@ def test_v09_window_initializes_menus_preferences_and_layout(tmp_path, monkeypat
         assert 'grid' in window.pages
         assert window.chart_grid_widget.rows >= 1 and window.chart_grid_widget.cols >= 1
         assert len(window.chart_grid_widget.tiles) == window.chart_grid_widget.rows * window.chart_grid_widget.cols
-        assert window.import_menu.title() == 'Imports'
+        assert window.import_menu.title() == 'Importieren'
+        assert list(window.nav_buttons) == ['dashboard', 'holdings', 'accounts', 'history', 'analysis']
+        assert [button.text() for button in window.nav_buttons.values()] == [
+            'Übersicht', 'Depots', 'Konten', 'Transaktionen', 'Auswertungen']
+        assert window.import_files_action.text().replace('&', '') == 'Dateien importieren …'
         assert labels.count('Dateien importieren …') == 1
         assert labels.count('Renault PDF importieren …') == 1
         assert [a.text() for a in window.online_menu.actions()] == [
@@ -84,7 +88,11 @@ def test_v09_window_initializes_menus_preferences_and_layout(tmp_path, monkeypat
         settings_labels = [action.text() for action in window.settings_menu.actions() if action.text()]
         assert settings_labels == ['Hell', 'Dunkel', 'Nord', 'Hoher Kontrast',
                                    'Tabellenschriften …', 'Diagramme …', 'Import-Erkennung …',
-                                   'Online-Anbindung …']
+                                   'Import', 'Online-Anbindung …']
+        import_settings = next(action.menu() for action in window.settings_menu.actions()
+                               if action.text() == 'Import')
+        assert [action.text() for action in import_settings.actions()] == [
+            'Ignorierte Meldungen …']
         top_level = [action.text().replace('&', '') for action in window.menuBar().actions()]
         assert top_level.count('Bearbeiten') == 1
         assert top_level.count('Hilfe') == 1
@@ -120,5 +128,64 @@ def test_v09_window_initializes_menus_preferences_and_layout(tmp_path, monkeypat
         window.select_gui_style('nord')
         assert window.settings['gui_style'] == 'nord'
         window.select_gui_style('light')
+    finally:
+        window.close()
+
+
+def test_redesign_keeps_functional_actions_reachable_in_expert_mode(tmp_path, monkeypatch, qtbot):
+    from PySide6.QtCore import SIGNAL
+    from PySide6.QtGui import QAction
+    from PySide6.QtWidgets import QMenu, QPushButton
+    from Gui import PortMan_V09 as gui
+    from portman.gui import window_shell
+
+    monkeypatch.setattr(window_shell, 'PROJECT_ROOT', tmp_path)
+    monkeypatch.setattr(window_shell, 'HAS_WEBENGINE', False)
+    monkeypatch.chdir(tmp_path)
+    window = gui.MainWindow()
+    qtbot.addWidget(window)
+    try:
+        expected = {
+            'Dateien importieren …', 'Renault PDF importieren …',
+            'Baader PDFs aus Ordner importieren (rekursiv) …',
+            'comdirect Finanzreports (PDF) importieren …', 'Konten verwalten …',
+            'Alle Online-Konten synchronisieren …', 'Bankzugang einrichten …',
+            'Marktdaten aktualisieren', 'Einstellungen und Metadaten speichern',
+            'Globale Suche', 'Buchungen, Gebühren und Regelmäßigkeit',
+            'Portfolio-Bericht exportieren (HTML)', 'Rebalancing-Orders exportieren',
+            'Aufgaben und Datenlücken', 'Aufträge / Fortschritt',
+            'Steuerliche Detailansicht', 'Steuerliche Jahresübersicht',
+            'Umbuchungen / Kapitalmaßnahmen / Wechselkurse',
+            'Veränderungen und Bestände abstimmen', 'Belege und Datenherkunft',
+            'Datensicherung / Wiederherstellung', 'Änderungshistorie',
+            'Neues Portfolio …', 'Portfolio öffnen …',
+            'Konten / Depots exportieren …', 'Konten / Depots importieren …',
+        }
+        standard_visible = {action.text().replace('&', '') for action in window.findChildren(QAction)
+                            if action.isVisible() and not action.isSeparator()}
+        assert {'Dateien importieren …', 'Konten verwalten …', 'Globale Suche'} <= standard_visible
+        assert 'PDF-Import-Plugins …' not in standard_visible
+
+        window.expert_mode_action.setChecked(True)
+        available = {action.text().replace('&', '') for action in window.findChildren(QAction)
+                     if action.isVisible() and not action.isSeparator()}
+        assert expected <= available
+        connected = [action for action in window.findChildren(QAction)
+                     if action.text().replace('&', '') in expected and not action.menu()]
+        assert connected and all(action.receivers(SIGNAL('triggered(bool)')) > 0 for action in connected)
+        assert all(action.isVisible() for action in window.expert_actions)
+
+        primary = next(button for button in window.findChildren(QPushButton)
+                       if button.objectName() == 'primaryImportButton')
+        assert primary.isVisibleTo(window) and primary.toolTip()
+        assert any(menu.title().replace('&', '') == 'Bereiche und Fenster'
+                   for menu in window.view_menu.findChildren(QMenu))
+        window.show_workspace('performance')
+        assert window.nav_buttons['analysis'].isChecked()
+        assert window.period_toolbar.isVisibleTo(window)
+        window.show_workspace('dashboard')
+        assert not window.period_toolbar.isVisibleTo(window)
+        window.save_settings()
+        assert window.settings['expert_mode'] is True
     finally:
         window.close()

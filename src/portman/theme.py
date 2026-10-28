@@ -75,6 +75,7 @@ def apply_theme(dark=False, table_fonts=None):
         QToolBar#navigation {{ background: {alternate}; border: none; border-right: 1px solid {border}; padding: 0; border-radius: 0; }}
         QWidget#navigationPanel, QScrollArea#navigationScroll {{ background: {alternate}; }}
         QLabel#brand {{ color: {text}; font-size: 18px; font-weight: 700; padding: 6px 10px; }}
+        QLabel#navSubtitle {{ color: {muted}; font-size: 10px; padding: 0 10px 10px; }}
         QLabel#navCaption {{ color: {muted}; font-size: 9px; font-weight: 600; padding: 12px 10px 6px; text-transform: uppercase; letter-spacing: 0.06em; }}
         QPushButton#navButton {{ color: {text}; background: transparent; text-align: left;
             border: 1px solid transparent; border-radius: 6px; padding: 8px 10px; font-weight: 500; }}
@@ -82,6 +83,12 @@ def apply_theme(dark=False, table_fonts=None):
         QPushButton#navButton:checked {{ background: {panel}; color: #3b82f6;
             border: 1px solid {border}; border-left: 3px solid #3b82f6; font-weight: 600; }}
         QPushButton#navButton:focus {{ border: 1px solid #3b82f6; outline: none; }}
+        QToolButton#secondaryNavigation {{ color: {muted}; background: transparent; text-align: left;
+            border: 1px solid transparent; border-radius: 6px; padding: 7px 10px; }}
+        QToolButton#secondaryNavigation:hover {{ color: {text}; background: {border}; }}
+        QPushButton#primaryImportButton {{ color: white; background: #2563eb; border: none;
+            border-radius: 7px; padding: 9px 10px; font-weight: 700; }}
+        QPushButton#primaryImportButton:hover {{ background: #1d4ed8; }}
         QLabel#pageTitle {{ font-size: 18px; font-weight: 700; }}
         QLabel#muted {{ color: {muted}; }}
         QLabel#metricValue {{ font-size: 22px; font-weight: 700; }}

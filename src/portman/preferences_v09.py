@@ -57,10 +57,13 @@ class TablePreferences:
                 default_order.remove('symbol'); default_order.insert(1, 'symbol')
                 default_order.remove('wkn'); default_order.insert(2, 'wkn')
                 default_order.remove('profit_percent'); default_order.insert(default_order.index('profit_eur') + 1, 'profit_percent')
+            default_hidden = ({'security', 'symbol', 'wkn', 'asset_type', 'region', 'capitalization',
+                               'dividend_percent', 'dividend_eur', 'first_activity'}
+                              if key.startswith('positions.') and not record else set())
             for logical,column in enumerate(columns):
                 state=record.get(column,{})
                 if 'width' in state: table.setColumnWidth(logical,max(30,min(1500,state['width'])))
-                table.setColumnHidden(logical,state.get('hidden',False))
+                table.setColumnHidden(logical,state.get('hidden', column in default_hidden))
             for visual,column in enumerate(sorted(columns,key=lambda c:record.get(c,{}).get('order',default_order.index(c)))):
                 header.moveSection(header.visualIndex(columns.index(column)),visual)
             table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)

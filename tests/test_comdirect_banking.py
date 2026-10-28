@@ -473,7 +473,7 @@ def test_continue_existing_comdirect_depot_and_preview(tmp_path):
         dialog.accept()
         preview = ImportPreviewDialog(repo, dialog.batches)
         tabs = preview.findChild(QTabWidget)
-        assert any(tabs.tabText(i) == 'comdirect · Abrufdetails' for i in range(tabs.count()))
+        assert any(tabs.tabText(i) == '4 · Validierung · comdirect' for i in range(tabs.count()))
         preview.reject()
         assert len(repo.imports()) == 1
         repo.commit_batches([batch])

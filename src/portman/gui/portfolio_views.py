@@ -26,6 +26,11 @@ class PortfolioViewsMixin:
         return filtered
 
     def on_tab_changed(self, index: int):
+        if self.tabs.widget(index).objectName() == 'depotOverview':
+            if hasattr(self, 'totals'): self.totals.hide()
+            self.tabs.widget(index).refresh()
+            return
+        if hasattr(self, 'totals'): self.totals.show()
         category = self.get_current_category()
         self.dock_risk.setWindowTitle(f"Risiko & Kennzahlen ({category})")
         self.dock_rebalance.setWindowTitle(f"Rebalancing-Rechner ({category})")

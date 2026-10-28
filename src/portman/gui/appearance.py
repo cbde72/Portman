@@ -2,7 +2,8 @@
 from PySide6.QtGui import QActionGroup, QAction, QFont
 from PySide6.QtWidgets import (QDialog, QFormLayout, QVBoxLayout, QHBoxLayout,
                               QFontComboBox, QSpinBox, QDialogButtonBox, QLabel, QWidget,
-                              QLineEdit)
+                              QLineEdit, QPushButton, QTableWidget, QTableWidgetItem, QMenu)
+from PySide6.QtCore import Qt
 from portman.theme import STYLES, TABLE_FONT_TYPES, TABLE_FONTS, DEFAULT_TABLE_FONT, apply_theme
 from portman.gui.chart_settings import open_chart_settings_dialog
 
@@ -47,10 +48,74 @@ def install_appearance_menu(window):
     parser_action = QAction('Import-Erkennung …', window)
     parser_action.triggered.connect(lambda: open_import_tags_dialog(window))
     menu.addAction(parser_action)
+    window.register_expert_action(parser_action)
+    import_settings = QMenu('Import', menu)
+    menu.addMenu(import_settings)
+    window.import_settings_menu = import_settings
+    ignored_action = QAction('Ignorierte Meldungen …', window)
+    ignored_action.triggered.connect(lambda: open_ignored_import_warnings_dialog(window))
+    import_settings.addAction(ignored_action)
     menu.addSeparator()
     connection_action = QAction('Online-Anbindung …', window)
     connection_action.triggered.connect(window.open_connection_proposal)
     menu.addAction(connection_action)
+    window.register_expert_action(connection_action)
+
+
+def open_ignored_import_warnings_dialog(window):
+    """Manage persistent warning-display rules stored in GUI settings."""
+    from portman.import_conflict_actions import (
+        persistent_warning_rows, remove_persistent_warning, reset_persistent_warnings)
+
+    dialog = QDialog(window)
+    dialog.setWindowTitle('Import · Ignorierte Meldungen')
+    dialog.resize(720, 380)
+    layout = QVBoxLayout(dialog)
+    note = QLabel('Diese Regeln unterdrücken nur die Anzeige gleichartiger, nichtkritischer Hinweise. '
+                  'Import- und Auditprotokolle bleiben vollständig.')
+    note.setWordWrap(True); layout.addWidget(note)
+    table = QTableWidget(0, 3)
+    table.setHorizontalHeaderLabels(['Meldungstyp', 'Plugin / Bank', 'Technischer Code'])
+    table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+    table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+    layout.addWidget(table)
+
+    def refresh():
+        rows = persistent_warning_rows(window.settings)
+        table.setRowCount(len(rows))
+        for row, rule in enumerate(rows):
+            values = (rule.get('category') or rule['key'], rule.get('plugin', ''), rule.get('code', ''))
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                if column == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, rule['key'])
+                table.setItem(row, column, item)
+        table.resizeColumnsToContents()
+
+    actions = QHBoxLayout()
+    remove = QPushButton('Ausgewählte Regel löschen')
+    clear = QPushButton('Alle Regeln zurücksetzen')
+    actions.addWidget(remove); actions.addWidget(clear); actions.addStretch(1)
+    layout.addLayout(actions)
+
+    def remove_selected():
+        row = table.currentRow()
+        if row < 0:
+            return
+        key = table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        if remove_persistent_warning(window.settings, key):
+            window.save_settings(); refresh()
+
+    def clear_all():
+        if reset_persistent_warnings(window.settings):
+            window.save_settings(); refresh()
+
+    remove.clicked.connect(remove_selected)
+    clear.clicked.connect(clear_all)
+    buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+    buttons.rejected.connect(dialog.reject); layout.addWidget(buttons)
+    refresh()
+    dialog.exec()
 
 
 def open_import_tags_dialog(window):

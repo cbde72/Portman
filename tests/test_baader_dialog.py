@@ -145,6 +145,6 @@ def test_zero_history_continues_and_crypto_is_preserved(tmp_path):
     assert repo.previous_bank_depot(batch.path) == 'ZERO'
     preview = ImportPreviewDialog(repo, batches)
     tabs = preview.findChild(QTabWidget)
-    assert any(tabs.tabText(i) == 'Baader · Abrufdetails' for i in range(tabs.count()))
+    assert any(tabs.tabText(i) == '4 · Validierung · Baader' for i in range(tabs.count()))
     preview.reject()
     repo.close()

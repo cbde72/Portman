@@ -187,7 +187,7 @@ def test_preview_details_cancel_does_not_persist(tmp_path):
     batches = fetch(FakeClient(), tmp_path)
     dialog = ImportPreviewDialog(repo, batches)
     tabs = dialog.findChild(QTabWidget)
-    assert any(tabs.tabText(i) == 'ING · Abrufdetails' for i in range(tabs.count()))
+    assert any(tabs.tabText(i) == '4 · Validierung · ING' for i in range(tabs.count()))
     assert dialog.table.item(0, 3).text() == '09.2026'
     dialog.reject()
     assert not repo.imports()

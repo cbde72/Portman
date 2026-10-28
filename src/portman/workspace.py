@@ -2,7 +2,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction
 import re
 from PySide6.QtWidgets import (QToolBar, QWidget, QVBoxLayout, QLabel, QPushButton,
-                              QButtonGroup, QTableWidget, QTableView, QTreeWidget, QScrollArea, QFrame)
+                              QButtonGroup, QTableWidget, QTableView, QTreeWidget, QScrollArea, QFrame,
+                              QMenu, QToolButton)
 from .theme import apply_theme, TABLE_FONTS, row_height_for
 from .chart_style import COLORS, style_figure, style_axis
 
@@ -63,26 +64,75 @@ class WorkspaceMixin:
         self.navigation.setObjectName('navigation'); self.navigation.setMovable(False); self.navigation.setFloatable(False)
         self.navigation.setOrientation(Qt.Orientation.Vertical)
         self.addToolBar(Qt.ToolBarArea.LeftToolBarArea, self.navigation)
-        panel = QWidget(); panel.setObjectName('navigationPanel'); panel.setMinimumWidth(166)
-        layout = QVBoxLayout(panel); layout.setContentsMargins(8, 12, 8, 12); layout.setSpacing(3)
+        panel = QWidget(); panel.setObjectName('navigationPanel'); panel.setMinimumWidth(152)
+        layout = QVBoxLayout(panel); layout.setContentsMargins(10, 14, 10, 12); layout.setSpacing(6)
         brand = QLabel('PortMan'); brand.setObjectName('brand'); layout.addWidget(brand)
+        subtitle = QLabel('Portfolio im Blick'); subtitle.setObjectName('navSubtitle'); layout.addWidget(subtitle)
         self.nav_buttons = {}; group = QButtonGroup(self); group.setExclusive(True)
-        sections = {'dashboard': 'VERMÖGEN', 'analysis': 'AUSWERTUNG', 'history': 'VERWALTUNG'}
-        for index, (key, (title, docks)) in enumerate(self.pages.items(), 1):
-            if key in sections:
-                caption = QLabel(sections[key]); caption.setObjectName('navCaption'); layout.addWidget(caption)
+        main_pages = (
+            ('dashboard', 'Übersicht'),
+            ('holdings', 'Depots'),
+            ('accounts', 'Konten'),
+            ('history', 'Transaktionen'),
+            ('analysis', 'Auswertungen'),
+        )
+        for index, (key, title) in enumerate(main_pages, 1):
             button = QPushButton(title); button.setObjectName('navButton'); button.setCheckable(True)
             button.setShortcut(f'Alt+{index}')
             button.setToolTip(f'{title} (Alt+{index})')
             button.clicked.connect(lambda checked=False, p=key: self.show_workspace(p))
             group.addButton(button); layout.addWidget(button); self.nav_buttons[key] = button
+        reports = QToolButton(panel)
+        reports.setObjectName('secondaryNavigation')
+        reports.setText('Weitere Auswertungen')
+        reports.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        reports.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        reports_menu = QMenu(reports)
+        for key in ('grid', 'performance', 'income_costs', 'market', 'rebalance', 'etf'):
+            action = reports_menu.addAction(self.pages[key][0])
+            action.triggered.connect(lambda checked=False, page=key: self.show_workspace(page))
+        reports.setMenu(reports_menu)
+        layout.addWidget(reports)
         layout.addStretch(1)
+        import_button = QPushButton('Dateien importieren …', panel)
+        import_button.setObjectName('primaryImportButton')
+        import_button.setToolTip('PDF-, CSV- oder Excel-Dateien auswählen (Strg+O)')
+        import_button.clicked.connect(lambda: self.import_files_action.trigger())
+        layout.addWidget(import_button)
         scroll = QScrollArea(); scroll.setObjectName('navigationScroll'); scroll.setWidgetResizable(True); scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setFixedWidth(184); scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setFixedWidth(174); scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(panel); self.navigation.addWidget(scroll)
         self.dashboard.navigate.connect(self.show_workspace)
         self.modernize_tables()
         self.apply_table_fonts()
+
+    def register_expert_action(self, action):
+        self.expert_actions = getattr(self, 'expert_actions', [])
+        if action not in self.expert_actions:
+            self.expert_actions.append(action)
+        action.setVisible(bool(self.settings.get('expert_mode', False)))
+        return action
+
+    def register_expert_widget(self, widget):
+        self.expert_widgets = getattr(self, 'expert_widgets', [])
+        if widget not in self.expert_widgets:
+            self.expert_widgets.append(widget)
+        widget.setVisible(bool(self.settings.get('expert_mode', False)))
+        return widget
+
+    def set_expert_mode(self, enabled):
+        changed = bool(self.settings.get('expert_mode', False)) != bool(enabled)
+        self.settings['expert_mode'] = bool(enabled)
+        for action in getattr(self, 'expert_actions', []):
+            action.setVisible(bool(enabled))
+        for widget in getattr(self, 'expert_widgets', []):
+            widget.setVisible(bool(enabled))
+        if hasattr(self, 'expert_mode_action') and self.expert_mode_action.isChecked() != bool(enabled):
+            self.expert_mode_action.blockSignals(True)
+            self.expert_mode_action.setChecked(bool(enabled))
+            self.expert_mode_action.blockSignals(False)
+        if changed and getattr(self, '_v09_ready', False):
+            self.save_settings()
 
     def apply_table_fonts(self):
         compact = bool(self.settings.get('compact_v09'))
@@ -115,7 +165,12 @@ class WorkspaceMixin:
                 dock.show()
             for dock in selected[1:]: self.tabifyDockWidget(selected[0], dock)
             selected[0].raise_()
-            self.nav_buttons[name].setChecked(True)
+            main_name = {
+                'grid': 'analysis', 'performance': 'analysis', 'income_costs': 'analysis',
+                'market': 'analysis', 'rebalance': 'analysis', 'etf': 'analysis',
+            }.get(name, name)
+            if main_name in self.nav_buttons:
+                self.nav_buttons[main_name].setChecked(True)
             self.setWindowTitle(f'PortMan · {title}')
             self.settings['active_workspace'] = name
         finally: self.setUpdatesEnabled(True)

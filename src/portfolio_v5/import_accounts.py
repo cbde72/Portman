@@ -124,6 +124,39 @@ def pdf_account_match(name, records, *, required_kind='', bank=''):
     return None, ''
 
 
+def tax_depot_from_cash_account(source, batch, records):
+    """Infer one tax-event depot through its documented settlement IBAN.
+
+    This is intentionally restricted to the parser's generic comdirect depot
+    placeholder.  Explicit depot numbers continue through pdf_account_match,
+    and ambiguous or missing links always remain a manual decision.
+    """
+    if source['name'].casefold() != 'comdirect depot' \
+            or not source['kinds'] & {'Steuerereignisse', 'Steuerdetails'}:
+        return None, ''
+    cash_names = {event.cash_account for event in batch.tax_events
+                  if account_key(event.account) == source['key'] and event.cash_account}
+    if len(cash_names) != 1:
+        return None, ('Keine eindeutige IBAN im Steuerbeleg – bitte Depot wählen'
+                      if cash_names else '')
+    cash_key, cash_reason = pdf_account_match(next(iter(cash_names)), records)
+    if not cash_key:
+        return None, (cash_reason or
+                      'Verrechnungskonto zur belegten IBAN nicht gefunden – bitte Depot wählen')
+    linked = set()
+    for key, record in records.items():
+        if not record['active']:
+            continue
+        details = json.loads(record.get('details') or '{}')
+        if details.get('kind') == 'Depot' and details.get('cash_account_key') == cash_key:
+            linked.add(key)
+    if len(linked) == 1:
+        return next(iter(linked)), 'Depot über eindeutig erkanntes Verrechnungskonto vorgeschlagen'
+    if linked:
+        return None, 'Mehrere Depots nutzen das erkannte Verrechnungskonto – bitte Depot wählen'
+    return None, 'Kein Depot mit dem erkannten Verrechnungskonto verknüpft – bitte Depot wählen'
+
+
 def suggest_accounts(store, batch):
     records = store._account_view()
     rules = {r['source_key']: r['account_key'] for r in store.db.execute(
@@ -143,9 +176,11 @@ def suggest_accounts(store, batch):
             banks = [name for name in ('comdirect', 'renault', 'baader', 'ing')
                      if re.search(r'\b' + name + r'\b', batch.pdf_text, re.I)]
             bank = banks[0] if len(banks) == 1 else ''
-            target, reason = pdf_account_match(
-                source['name'], records, required_kind=target_kind, bank=bank
-            ) if batch.source_sheet == 'PDF' else (None, '')
+            target, reason = tax_depot_from_cash_account(source, batch, records)
+            if not reason:
+                target, reason = pdf_account_match(
+                    source['name'], records, required_kind=target_kind, bank=bank
+                ) if batch.source_sheet == 'PDF' else (None, '')
             if not reason:
                 target = depot_mappings.get(key, key)
                 if target in records and not target_compatible(records[target], target_kind):

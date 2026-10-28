@@ -6,6 +6,7 @@ from pypdf.generic import DecodedStreamObject, NameObject, DictionaryObject
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from portfolio_v5.importers import parse_file
+from portfolio_v5.models import TaxEvent
 from portfolio_v5.pdf_importer import analyse_pages
 from portman.repository import PortfolioRepository
 
@@ -75,6 +76,9 @@ def test_skip_counterparty(tmp_path):
     from portman.import_preview import ImportPreviewDialog
     QApplication.instance() or QApplication([])
     batch = parse_file(make_pdf(tmp_path / 'two.pdf', ['Konto: 12345678', 'Konto: 87654321']))
+    batch.tax_events.append(TaxEvent(
+        'tax-from-skipped-file', 'Konto 12345678', 'vorabpauschale',
+        '2021-01-04', income_year='2020', security_ref='IE00BKM4GZ66'))
     repo = PortfolioRepository(tmp_path / 'skip.sqlite')
     repo.create_accounts(['A'])
     dialog = ImportPreviewDialog(repo, [batch])
@@ -82,6 +86,7 @@ def test_skip_counterparty(tmp_path):
         row[2].setCurrentIndex(row[2].findData(target))
     assert dialog.selected_batches() == []
     assert len(batch.documents) == 2
+    assert len(batch.tax_events) == 1
     dialog.close()
     repo.close()
 

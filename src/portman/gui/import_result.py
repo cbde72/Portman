@@ -7,7 +7,11 @@ from portman.widgets_shared import EvidenceDialog, populate
 def show_import_results(window, results):
     dialog = QDialog(window); dialog.setWindowTitle('Import abgeschlossen'); dialog.resize(850, 440)
     layout = QVBoxLayout(dialog)
-    layout.addWidget(QLabel('Auswahl gespeichert. Doppelklick auf eine Datei öffnet den lokalen Beleg.'))
+    suppressed = sum(int(result.get('suppressed_warnings', 0)) for result in results)
+    message = 'Auswahl gespeichert. Doppelklick auf eine Datei öffnet den lokalen Beleg.'
+    if suppressed:
+        message += f' Unterdrückte Hinweise: {suppressed}. Die Hinweise bleiben im Importprotokoll enthalten.'
+    layout.addWidget(QLabel(message))
     table = QTableWidget(); populate(table, ['Datei', 'Ergebnis', 'Import-ID'],
         [[r['path'], {'imported': 'Importiert', 'duplicate': 'Bereits vorhanden'}.get(r['status'], r['status']), r.get('id')] for r in results])
     table.cellDoubleClicked.connect(lambda row, column: EvidenceDialog.open_source(dialog, results[row]['path']))
