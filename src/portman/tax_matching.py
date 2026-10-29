@@ -60,17 +60,16 @@ def _security_refs(repository, value, cache):
     return refs
 
 
-def match_tax_events(repository, events=None, transactions=None):
-    """Return unique event-id -> economic dividend/distribution booking matches.
-
-    A candidate must agree on security, depot, a close date and a documented
-    gross or net amount.  Ties and reused cash bookings remain deliberately
-    unmatched instead of creating an unsafe association.
-    """
+def _scored_candidates(repository, events=None, transactions=None):
     events = list(events if events is not None else repository.tax_events())
     transactions = list(transactions if transactions is not None else repository.transactions())
     cash = [tx for tx in transactions if tx.get('kind') in ('DIVIDEND', 'DISTRIBUTION')]
     security_cache = {}
+    account_aliases = {account_key(row['name']): row['account_key']
+                       for row in repository.account_records()}
+    def account_identity(value):
+        key = account_key(value)
+        return account_aliases.get(key, key)
     candidates = {}
     for event in events:
         if event.get('type') not in ('investment_ausschuettung_inland',
@@ -85,14 +84,25 @@ def match_tax_events(repository, events=None, transactions=None):
             gross = taxable + (partial or Decimal()) if taxable is not None else None
         paid = _amount(event.get('paid_taxes')) or Decimal()
         net = gross - paid if gross is not None else None
-        event_depot = account_key(event.get('account', ''))
+        event_depot = account_identity(event.get('account', ''))
         scored = []
         for tx in cash:
             tx_refs = _security_refs(repository, tx.get('security') or tx.get('security_ref'), security_cache)
             if not event_refs.intersection(tx_refs):
                 continue
-            tx_depot = account_key(tx.get('performance_depot_key') or tx.get('depot_account') or tx.get('account', ''))
-            if event_depot and tx_depot and event_depot != tx_depot:
+            reference_text = ' '.join(str(tx.get(key) or '') for key in
+                                      ('transaction_reference', 'bank_reference', 'document_reference',
+                                       'purpose', 'booking_text'))
+            exact_reference = bool(event.get('reference_no') and
+                                   event['reference_no'] in reference_text)
+            tx_depot = account_identity(tx.get('performance_depot_key') or tx.get('depot_account') or tx.get('account', ''))
+            event_cash = account_identity(event.get('cash_account', ''))
+            tx_cash = account_identity(tx.get('account', ''))
+            # Standalone income PDFs can carry only the settlement account.
+            # Accept that representation solely with the exact bank reference;
+            # the ordinary depot match remains the default.
+            cash_reference_match = bool(exact_reference and event_cash and event_cash == tx_cash)
+            if event_depot and tx_depot and event_depot != tx_depot and not cash_reference_match:
                 continue
             distance = min(_days(event.get('date'), tx.get('date')),
                            _days(event.get('date'), tx.get('value_date')))
@@ -107,18 +117,41 @@ def match_tax_events(repository, events=None, transactions=None):
             tx_tax = _amount(tx.get('taxes'))
             if tx_tax is not None and paid and abs(tx_tax - paid) > Decimal('.01'):
                 continue
-            reference_text = ' '.join(str(tx.get(key) or '') for key in
-                                      ('transaction_reference', 'bank_reference', 'document_reference',
-                                       'purpose', 'booking_text'))
-            score = (10 if event.get('reference_no') and event['reference_no'] in reference_text else 0)
+            score = 10 if exact_reference else 0
             score += 4 if gross_match else 3
             score += 2 if distance == 0 else 1
             scored.append((score, tx))
         if scored:
-            best = max(score for score, _tx in scored)
-            winners = [tx for score, tx in scored if score == best]
-            if len(winners) == 1:
-                candidates[event['external_id']] = winners[0]
+            candidates[event['external_id']] = scored
+    return candidates
+
+
+def tax_event_cash_candidates(repository, events=None, transactions=None):
+    """Return every strongly evidenced cash representation per tax event.
+
+    Multiple documents can describe the same payment.  They all have to be
+    suppressed from the tax-basis sum even though only one may be selected as
+    the canonical event link.
+    """
+    return {event_id: [tx for _score, tx in scored]
+            for event_id, scored in _scored_candidates(repository, events, transactions).items()}
+
+
+def match_tax_events(repository, events=None, transactions=None):
+    """Return unique event-id -> economic dividend/distribution booking matches.
+
+    A candidate must agree on security, depot (or exact cash-account bank
+    reference), a close date and a documented gross or net amount. Ties and
+    reused cash bookings remain deliberately unmatched instead of creating an
+    unsafe canonical association.
+    """
+    scored_candidates = _scored_candidates(repository, events, transactions)
+    candidates = {}
+    for event_id, scored in scored_candidates.items():
+        best = max(score for score, _tx in scored)
+        winners = [tx for score, tx in scored if score == best]
+        if len(winners) == 1:
+            candidates[event_id] = winners[0]
     used = {}
     for event_id, tx in candidates.items():
         identity = tx.get('external_id') or id(tx)

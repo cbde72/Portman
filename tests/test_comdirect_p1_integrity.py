@@ -184,6 +184,36 @@ def test_tax_matching_uses_imported_wkn_isin_bridge_on_clean_database(tmp_path):
         repo.close()
 
 
+def test_standalone_income_pdf_and_finance_report_are_one_taxable_distribution(tmp_path):
+    repo = repository(tmp_path / 'duplicate-income-documents.sqlite')
+    try:
+        report = BankTransaction(
+            CASH, 'statement-distribution', '2026-09-15', Kind.DIVIDEND,
+            '7.43', 'EUR', security='DE000A0H0744', gross_income='9.10', taxes='1.67',
+            performance_depot_key=account_key(DEPOT), bank_reference='TAX-REFERENCE')
+        standalone = BankTransaction(
+            CASH, 'standalone-income-pdf', '2026-09-19', Kind.DIVIDEND,
+            '7.43', 'EUR', security='DE000A0H0744', gross_income='9.10', taxes='1.67',
+            bank_reference='TAX-REFERENCE')
+        event = TaxEvent(
+            'tax-distribution', DEPOT, 'investment_ausschuettung_inland',
+            '2026-09-15', security_ref='DE000A0H0744', gross_income='9.10',
+            partial_exemption_amount='2.73', taxable_income='6.37', paid_taxes='1.67',
+            reference_no='TAX-REFERENCE', cash_account=CASH)
+        repo.commit_batches([ImportBatch(
+            'documents', 'documents', transactions=[report, standalone],
+            tax_events=[event], securities=[SecurityInfo(
+                'DE000A0H0744', identifier_type='isin', isin='DE000A0H0744',
+                wkn='A0H074', name='ETF')])])
+
+        values = automatic_tax_values(repo, 2026)
+        assert sum((row['capital_income'] for row in values.values()), Decimal()) == Decimal('6.37')
+        assert values[account_key(DEPOT)]['capital_income'] == Decimal('6.37')
+        assert values[account_key(CASH)]['capital_income'] == Decimal('0')
+    finally:
+        repo.close()
+
+
 @pytest.mark.parametrize('order', ('finance-first', 'notices-first'))
 def test_guided_gui_apply_persists_trade_details_in_both_orders(tmp_path, order):
     """Exercise both storage paths used by the two V09 import previews."""

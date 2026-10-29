@@ -91,7 +91,7 @@ Zusätzlicher Fusionsfall: 3 Altaktien mit Gesamteinstand 120 EUR werden im Verh
 - Gezielte FIFO-/Bestands-/V09-Suite: **87 bestanden**.
 - Vollständige Pytest-Suite: **1.265 bestanden, 19 übersprungen**, 394,56 s.
 - Reale PDF-Validierung: 23/23 MiFID-Kosten-PDFs strukturiert und cash-neutral erkannt; der 126-PDF-Clean-Reimport erreichte in beiden Importreihenfolgen fehlerfreie Parser-, Zuordnungs-, Duplikat- und SQLite-Prüfungen.
-- Bekannter, nicht durch diesen Branch verursachter Realtest-Sollwertfehler: Der aktuelle PDF-Korpus liefert beim Steueraggregat `other_result` 940,77 EUR, während `tests/test_clean_reimport_acceptance_real.py` noch 523,07 EUR erwartet. Beide Parametrisierungen scheitern ausschließlich an diesem Steuer-Sollwert. Eine fachfremde Anpassung wurde bewusst nicht vorgenommen.
+- Der zunächst beobachtete Realtest-Unterschied 940,77/523,07 EUR wurde anschließend als Doppelzählung eigenständiger Ertragsgutschrift-PDFs aufgeklärt und auf demselben Branch korrigiert. Details stehen in `test_reports/portman_v09_tax_difference_41770.md`.
 
 ## Verbleibende fachliche Einschränkungen
 

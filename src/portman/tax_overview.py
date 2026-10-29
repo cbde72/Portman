@@ -86,7 +86,7 @@ def automatic_tax_values(repository, year):
                 if target_key in records:
                     event['account'] = records[target_key]['name']
                 events.append(event)
-    from .tax_matching import match_tax_events
+    from .tax_matching import match_tax_events, tax_event_cash_candidates
     event_cash = match_tax_events(repository, events, transactions) if events and hasattr(repository, 'db') else {}
     def tx_ref(tx):
         try:
@@ -94,6 +94,10 @@ def automatic_tax_values(repository, year):
         except KeyError:
             return tx.get('external_id') or id(tx)
     matched_refs = {tx_ref(tx) for tx in event_cash.values()}
+    if events and hasattr(repository, 'db'):
+        matched_refs.update(tx_ref(tx) for matches in
+                            tax_event_cash_candidates(repository, events, transactions).values()
+                            for tx in matches)
     event_aux_ids = {event.get('related_transaction_id') for event in events
                      if event.get('related_transaction_id')}
     for tx in transactions:
