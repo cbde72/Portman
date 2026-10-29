@@ -2,6 +2,7 @@
 import json
 import re
 from collections import defaultdict
+from datetime import date
 from decimal import Decimal
 
 from .accounts import account_key
@@ -227,14 +228,109 @@ def dividend_match(a, b):
     return security in re.sub(r'\s+', '', text) and any(word in text for word in ('DIVIDEND', 'AUSSCHÜTTUNG', 'ERTRAGSGUTSCHRIFT'))
 
 
-def consolidate_dividends(transactions, protected=()):
+def consolidate_dividends(store, transactions, protected=()):
     """Only unique, evidenced matches; all original source records remain stored."""
+    from .booking_duplicates import reference, security_identifiers
     rows = [dict(t, kind=kind_of(t)) for t in transactions]
     for tx in rows:
         if tx['kind'] == 'DIVIDEND' and tx.get('booking_text', '') in ('comdirect Dividendengutschrift', 'comdirect Ertragsgutschrift'):
             tx['income_basis'] = 'gross'
     def is_protected(tx):
         return json.dumps([tx['import_id'], tx['depot'], tx['external_id']], ensure_ascii=False, separators=(',', ':')) in protected
+
+    # A comdirect settlement notice states the gross distribution, while the
+    # Finanzreport contains the actual net cash credit (often on the following
+    # banking day).  They are two documents for one economic event.  Resolve
+    # only a unique pair with the same account, currency and security evidence;
+    # keep the Finanzreport amount and enrich it with the notice details.
+    notice_indexes = [index for index, tx in enumerate(rows)
+                      if tx['kind'] == 'DIVIDEND'
+                      and tx.get('booking_text') in (
+                          'comdirect Dividendengutschrift', 'comdirect Ertragsgutschrift')
+                      and not is_protected(tx)]
+    # A protected Finanzreport row remains the primary record and keeps its
+    # stable reference (for example an existing tax link).  It is therefore
+    # safe to attach an unprotected notice as evidence without rewriting the
+    # protected booking itself.
+    statement_indexes = [index for index, tx in enumerate(rows)
+                         if tx['kind'] == 'BANK_BOOKING']
+    inferred_statements = {}
+    inference_context = {}
+    for index in statement_indexes:
+        inferred = infer_security_booking(store, rows[index], inference_context)
+        if inferred and inferred.get('kind') == 'DIVIDEND':
+            inferred_statements[index] = {**rows[index], **inferred}
+
+    security_aliases = {}
+    for snapshot in store.snapshots():
+        for position in json.loads(snapshot['payload']).get('positions', []):
+            identifiers = {str(value).upper() for value in (
+                position.get('key'), position.get('isin'),
+                'WKN:' + position['wkn'] if position.get('wkn') else '') if value}
+            canonical = str(position.get('isin') or position.get('key') or '').upper()
+            for identifier in identifiers:
+                security_aliases[identifier] = canonical or identifier
+    for record in store.model_records(kind='securities'):
+        security = record['payload']
+        identifiers = {str(value).upper() for value in (
+            security.get('key'), security.get('isin'),
+            'WKN:' + security['wkn'] if security.get('wkn') else '') if value}
+        canonical = str(security.get('isin') or security.get('key') or '').upper()
+        for identifier in identifiers:
+            security_aliases[identifier] = canonical or identifier
+
+    def canonical_security_ids(tx):
+        return {security_aliases.get(identifier.upper(), identifier.upper())
+                for identifier in security_identifiers(tx)}
+
+    def notice_match(notice, statement):
+        if (notice['account'] != statement['account']
+                or notice.get('currency') != statement.get('currency')
+                or notice.get('import_id') == statement.get('import_id')):
+            return False
+        notice_day = date.fromisoformat(notice.get('value_date') or notice['date'])
+        statement_days = [date.fromisoformat(value) for value in
+                          (statement.get('date'), statement.get('value_date')) if value]
+        if not statement_days or min(abs((day - notice_day).days) for day in statement_days) > 3:
+            return False
+        notice_ids = canonical_security_ids(notice)
+        statement_ids = canonical_security_ids(statement)
+        if not notice_ids or not (notice_ids & statement_ids):
+            return False
+        notice_amount = abs(Decimal(notice['amount']))
+        statement_net = abs(Decimal(statement['amount']))
+        statement_gross = statement.get('gross_income') or statement.get('gross_amount')
+        return (notice_amount == statement_net
+                or (statement_gross not in (None, '')
+                    and notice_amount == abs(Decimal(statement_gross))))
+
+    notice_candidates = {index: [candidate for candidate, statement in inferred_statements.items()
+                                 if notice_match(rows[index], statement)]
+                         for index in notice_indexes}
+    statement_candidates = defaultdict(list)
+    for notice_index, candidates in notice_candidates.items():
+        for statement_index in candidates:
+            statement_candidates[statement_index].append(notice_index)
+    premerged, used = {}, set()
+    for notice_index, candidates in notice_candidates.items():
+        if len(candidates) != 1 or len(statement_candidates[candidates[0]]) != 1:
+            continue
+        statement_index = candidates[0]
+        notice, statement = rows[notice_index], inferred_statements[statement_index]
+        merged = dict(statement)
+        merged['booking_sources'] = (list(statement.get('booking_sources', [dict(rows[statement_index])]))
+                                     + list(notice.get('booking_sources', [dict(notice)])))
+        for field in ('quantity', 'per_share_amount', 'per_share_currency', 'gross_income',
+                      'gross_currency', 'withholding_tax', 'withholding_country',
+                      'withholding_tax_rate', 'tax_rate', 'document_reference'):
+            if merged.get(field) in (None, '') and notice.get(field) not in (None, ''):
+                merged[field] = notice[field]
+        premerged[statement_index] = merged
+        used.update((notice_index, statement_index))
+
+    remaining = [tx for index, tx in enumerate(rows) if index not in used]
+    rows = remaining + list(premerged.values())
+
     def match_key(tx):
         return tx['account'], tx['currency'], Decimal(tx['amount']), tx.get('value_date') or tx['date']
     groups = defaultdict(list)
@@ -326,6 +422,28 @@ def performance_transactions(store, transactions, account=None):
             matches = False
         if matches:
             linked_fee_rows.add(link['fee_ref'])
+    # A tax notice normally accompanies a Finanzreport row whose amount is
+    # already net.  If the report is not available but a uniquely referenced
+    # gross settlement notice is present, retain the cash-neutral tax helper
+    # in the economic view so gross credit minus documented tax still yields
+    # the proven net receipt.  Source rows and cash ledgers remain unchanged.
+    gross_notice_tax_refs = set()
+    by_external_id = {tx.get('external_id'): tx for tx in transactions if tx.get('external_id')}
+    for record in store.model_records(kind='tax_events'):
+        event = record['payload']
+        paid = Decimal(str(event.get('paid_taxes') or 0))
+        reference_no = str(event.get('reference_no') or '')
+        tax = by_external_id.get(event.get('related_transaction_id'))
+        if not tax or tax.get('kind') != 'TAX' or not paid or not reference_no:
+            continue
+        candidates = [tx for tx in transactions if tx.get('kind') == 'DIVIDEND'
+                      and reference_no in {str(tx.get(field) or '') for field in
+                                           ('bank_reference', 'document_reference',
+                                            'transaction_reference')}
+                      and abs(Decimal(str(tx.get('amount') or 0))) == abs(Decimal(str(
+                          event.get('gross_income') or 0)))]
+        if len(candidates) == 1:
+            gross_notice_tax_refs.add(transaction_reference(tax))
     owners = None
     for original in transactions:
         ref = transaction_reference(original)
@@ -333,7 +451,8 @@ def performance_transactions(store, transactions, account=None):
             continue
         if (original.get('kind') in ('TAX', 'FEE')
                 and not original.get('affects_cash', True)
-                and ref not in reconciled_notice_refs):
+                and ref not in reconciled_notice_refs
+                and ref not in gross_notice_tax_refs):
             continue
         cash_allocation = cash_allocations.get(ref, Decimal())
         if cash_allocation:

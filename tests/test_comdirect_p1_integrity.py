@@ -184,6 +184,31 @@ def test_tax_matching_uses_imported_wkn_isin_bridge_on_clean_database(tmp_path):
         repo.close()
 
 
+def test_tax_event_matches_gross_settlement_notice_on_documented_cash_account(tmp_path):
+    repo = repository(tmp_path / 'cash-account-tax-match.sqlite')
+    try:
+        repo.commit_batches([ImportBatch(
+            'settlement.pdf', 'settlement', transactions=[BankTransaction(
+                CASH, 'gross-settlement', '2026-10-19', Kind.DIVIDEND, '20.25', 'EUR',
+                security='DE000A0D8Q49', gross_amount='20.25', income_basis='gross',
+                bank_reference='SETTLEMENT-REF')])])
+        repo.commit_batches([ImportBatch(
+            'tax.pdf', 'tax', tax_events=[TaxEvent(
+                'tax-event', DEPOT, 'investment_ausschuettung_inland', '2026-10-15',
+                tax_year='2026', security_ref='DE000A0D8Q49', gross_income='20.25',
+                partial_exemption_amount='6.07', taxable_income='14.18', paid_taxes='3.74',
+                capital_gains_tax='3.55', solidarity_surcharge='0.19', church_tax='0.00',
+                cash_account=CASH)])])
+
+        matches = match_tax_events(repo)
+        assert matches['tax-event']['external_id'] == 'gross-settlement'
+        values = automatic_tax_values(repo, 2026)
+        assert values[account_key(DEPOT)]['capital_income'] == Decimal('14.18')
+        assert sum(row['capital_income'] for row in values.values()) == Decimal('14.18')
+    finally:
+        repo.close()
+
+
 @pytest.mark.parametrize('order', ('finance-first', 'notices-first'))
 def test_guided_gui_apply_persists_trade_details_in_both_orders(tmp_path, order):
     """Exercise both storage paths used by the two V09 import previews."""
