@@ -232,12 +232,7 @@ def realized_profit(repo,start,end,account=None):
         if quantity and credit:
             advance_tax[(account_key(event['account']),security_key(event.get('security_ref','')))].append(
                 {'date':event.get('date',''),'quantity':quantity,'credit':credit})
-    action_days={}
-    for a in repo.actions('0001-01-01',end):
-        keys=[(a['depot'],a['security'])]
-        if a['kind'] in ('MERGER','TRANSFER'):
-            keys.append((a['target_depot'] or a['depot'],a['target'] or a['security']))
-        for key in keys: action_days[key]=min(action_days.get(key,a['day']),a['day'])
+    actions=repo.actions('0001-01-01',end)
     trades=[t for t in repo.transactions(account) if t['date']<=end and t['kind'] in ('BUY','SELL','TRANSFER_IN','TRANSFER_OUT')]
     daily=defaultdict(int)
     for t in trades: daily[(t['depot'],t.get('security',''),t['currency'],t['date'])]+=1
@@ -262,16 +257,49 @@ def realized_profit(repo,start,end,account=None):
             advance_tax_credit=credit,
             taxable_realized=(realized-credit if realized is not None and credit is not None else None),
             status='FIFO · Buchungsbeträge, Gebührenkonvention des Belegs' if known else 'Unbekannt · Stückzahl, Kennung, Anfangsbestand, Abdeckung, Tagesreihenfolge oder Kapitalmaßnahme prüfen',source=t['source']))
-    for t in trades:
+    events=[(t['date'],1000000+i,'trade',t) for i,t in enumerate(trades)]
+    events += [(a['day'],a['sequence'],'action',a) for a in actions]
+    for _, _, event_kind, t in sorted(events,key=lambda e:(e[0],e[1])):
+        if event_kind == 'action':
+            matching=[key for key in lots if key[:2] == (t['depot'],t['security'])]
+            if t['kind']=='SPLIT':
+                ratio=Decimal(t['ratio'])
+                for key in matching:
+                    for lot in lots[key]:
+                        lot[0] *= ratio
+                        lot[1] /= ratio
+                if not matching:
+                    uncertain.add((t['depot'],t['security'],'EUR'))
+                continue
+            target_depot=t['target_depot'] or t['depot']; target_security=t['target'] or t['security']
+            if not matching:
+                uncertain.add((target_depot,target_security,'EUR'))
+                continue
+            ratio=Decimal(t['ratio'])
+            for key in matching:
+                source_uncertain=key in uncertain
+                remaining=sum((lot[0] for lot in lots[key]),ZERO) if t['kind']=='MERGER' else Decimal(t['units'])
+                moved=[]
+                while remaining and lots[key]:
+                    lot=lots[key][0]; used=min(remaining,lot[0])
+                    moved.append([used*ratio,lot[1]/ratio,lot[2]]); remaining-=used; lot[0]-=used
+                    if not lot[0]: lots[key].pop(0)
+                target=(target_depot,target_security,key[2])
+                lots[target].extend(moved)
+                lots[target].sort(key=lambda lot: lot[2])
+                if remaining or source_uncertain:
+                    uncertain.add(target)
+                if remaining:
+                    uncertain.add(key)
+            continue
         key=(t['depot'],t.get('security',''),t['currency']); q=Decimal(t['quantity']) if t.get('quantity') is not None else None
-        action_day=action_days.get((key[0],key[1]))
-        if not q or not key[1] or (action_day and action_day<=t['date']) or daily[(*key,t['date'])]>1: uncertain.add(key)
+        if not q or not key[1] or daily[(*key,t['date'])]>1: uncertain.add(key)
         if t['kind'].startswith('TRANSFER'): uncertain.add(key); continue
         if not q:
             if t['kind']=='SELL' and start<t['date']<=end: append_sale(t,None,False)
             continue
         q=abs(q)
-        if t['kind']=='BUY': lots[key].append([q,abs(Decimal(t['amount']))/q]); continue
+        if t['kind']=='BUY': lots[key].append([q,abs(Decimal(t['amount']))/q,t['date']]); continue
         remaining=q; cost=ZERO
         while remaining and lots[key]:
             lot=lots[key][0]; used=min(remaining,lot[0]); cost+=used*lot[1]; remaining-=used; lot[0]-=used

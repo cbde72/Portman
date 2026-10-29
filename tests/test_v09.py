@@ -630,7 +630,7 @@ def test_sale_before_report_period_consumes_advance_tax_credit(repo):
     assert row['advance_tax_credit'] == Decimal('30')
 
 
-def test_later_corporate_action_does_not_hide_earlier_realized_profit(repo):
+def test_later_documented_split_preserves_fifo_cost_per_lot(repo):
     from portfolio_v5.models import Transaction
     from portman.analysis_v09 import realized_profit
     repo.commit_batches([ImportBatch('trades','trades',transactions=[
@@ -640,7 +640,7 @@ def test_later_corporate_action_does_not_hide_earlier_realized_profit(repo):
     repo.confirm_coverage('A','0001-01-01','2026-03-01')
     repo.add_action('2026-02-01','A','TEST','SPLIT','Späterer Split',ratio='2')
     rows=realized_profit(repo,'2026-01-01','2026-03-01')
-    assert rows[0]['realized']==50 and rows[1]['realized'] is None
+    assert rows[0]['realized']==50 and rows[1]['realized']==100
 
 
 @pytest.mark.parametrize('ids',[('a-buy','z-sell'),('z-buy','a-sell')])
