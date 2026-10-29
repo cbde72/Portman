@@ -118,7 +118,7 @@ Der Testreferenzwert 523,07 EUR wurde nicht verändert.
 ## Testergebnisse
 
 - Gezielte Steuer-/Matching-Suite: **23 bestanden**.
-- Realimport `finance-first` und `notices-first`, jeweils einschließlich identischem Zweitimport: **2 bestanden**, 350,36 s.
-- Vollständige Pytest-Suite: **1.266 bestanden, 19 übersprungen**, 420,50 s.
+- Realimport `finance-first` und `notices-first`, jeweils einschließlich identischem Zweitimport nach Integration von PR #42: **2 bestanden**, 422,65 s.
+- Vollständige Pytest-Suite nach Integration von PR #42: **1.269 bestanden, 19 übersprungen**, 427,68 s.
 
 Produktive Datenbank und Original-PDFs wurden nicht verändert. Sämtliche Schreibvorgänge erfolgten auf temporären SQLite-Datenbanken.

@@ -89,7 +89,7 @@ Zusätzlicher Fusionsfall: 3 Altaktien mit Gesamteinstand 120 EUR werden im Verh
 ### Testläufe
 
 - Gezielte FIFO-/Bestands-/V09-Suite: **87 bestanden**.
-- Vollständige Pytest-Suite: **1.265 bestanden, 19 übersprungen**, 394,56 s.
+- Vollständige Pytest-Suite nach Integration von PR #42: **1.269 bestanden, 19 übersprungen**, 427,68 s.
 - Reale PDF-Validierung: 23/23 MiFID-Kosten-PDFs strukturiert und cash-neutral erkannt; der 126-PDF-Clean-Reimport erreichte in beiden Importreihenfolgen fehlerfreie Parser-, Zuordnungs-, Duplikat- und SQLite-Prüfungen.
 - Der zunächst beobachtete Realtest-Unterschied 940,77/523,07 EUR wurde anschließend als Doppelzählung eigenständiger Ertragsgutschrift-PDFs aufgeklärt und auf demselben Branch korrigiert. Details stehen in `test_reports/portman_v09_tax_difference_41770.md`.
 

@@ -64,12 +64,13 @@ def _scored_candidates(repository, events=None, transactions=None):
     events = list(events if events is not None else repository.tax_events())
     transactions = list(transactions if transactions is not None else repository.transactions())
     cash = [tx for tx in transactions if tx.get('kind') in ('DIVIDEND', 'DISTRIBUTION')]
-    security_cache = {}
-    account_aliases = {account_key(row['name']): row['account_key']
-                       for row in repository.account_records()}
+    account_aliases = {row['account_key']: row['account_key'] for row in repository.account_records()}
+    account_aliases.update({account_key(row['name']): row['account_key']
+                            for row in repository.account_records()})
     def account_identity(value):
-        key = account_key(value)
+        key = account_key(value or '')
         return account_aliases.get(key, key)
+    security_cache = {}
     candidates = {}
     for event in events:
         if event.get('type') not in ('investment_ausschuettung_inland',
@@ -95,14 +96,12 @@ def _scored_candidates(repository, events=None, transactions=None):
                                        'purpose', 'booking_text'))
             exact_reference = bool(event.get('reference_no') and
                                    event['reference_no'] in reference_text)
-            tx_depot = account_identity(tx.get('performance_depot_key') or tx.get('depot_account') or tx.get('account', ''))
-            event_cash = account_identity(event.get('cash_account', ''))
-            tx_cash = account_identity(tx.get('account', ''))
-            # Standalone income PDFs can carry only the settlement account.
-            # Accept that representation solely with the exact bank reference;
-            # the ordinary depot match remains the default.
-            cash_reference_match = bool(exact_reference and event_cash and event_cash == tx_cash)
-            if event_depot and tx_depot and event_depot != tx_depot and not cash_reference_match:
+            tx_depot = account_identity(
+                tx.get('performance_depot_key') or tx.get('depot_account') or tx.get('account', ''))
+            cash_account_match = (not tx.get('performance_depot_key') and not tx.get('depot_account')
+                                  and account_identity(tx.get('account', '')) == account_identity(
+                                      event.get('cash_account', '')))
+            if event_depot and tx_depot and event_depot != tx_depot and not cash_account_match:
                 continue
             distance = min(_days(event.get('date'), tx.get('date')),
                            _days(event.get('date'), tx.get('value_date')))
