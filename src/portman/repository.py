@@ -73,7 +73,10 @@ class PortfolioRepository:
         self.market.asset_listing_callback = self.assets.remember_feed
 
     def holdings(self, as_of='9999-12-31', account=None):
-        rows = self.store.holdings(as_of, account)
+        # Replay the complete depot graph before applying an account filter:
+        # an incoming own-depot transfer needs the source lots even when only
+        # the destination account is requested.
+        rows = self.store.holdings(as_of)
         corrections = {(r['snapshot_id'], r['security_key']): dict(r) for r in self.db.execute(
             'SELECT * FROM cost_corrections ORDER BY id')}
         for p in rows:
@@ -84,7 +87,7 @@ class PortfolioRepository:
         from .wallet_valuation import apply_daily_values
         from .security_movements import security_movements
         movements = security_movements(self.transactions(), rows)
-        snapshots = self.store.snapshots(account)
+        snapshots = self.store.snapshots()
         corrected_ids = {snapshot_id for snapshot_id, _ in corrections}
         for snapshot in snapshots:
             if snapshot['id'] not in corrected_ids:
@@ -100,14 +103,17 @@ class PortfolioRepository:
             accounts = {account_key(s['depot']): s['account'] for s in snapshots}
             accounts.update({account_key(t['depot']): t['account'] for t in movements})
             for action in self.actions('0001-01-01', as_of):
-                if action['kind'] == 'SPLIT' and account_key(action['depot']) in accounts:
-                    movements.append(dict(date=action['day'], kind='SPLIT', depot=action['depot'],
-                        account=accounts[account_key(action['depot'])], security=action['security'],
-                        quantity=action['ratio'], amount='0', currency='', source=action['source'],
-                        external_id='split-' + str(action['id']), sequence=action['sequence']))
-        if account:
-            movements = [tx for tx in movements if account_key(tx['account']) == account_key(account)]
-        return apply_daily_values(self.db, advance_holdings(rows, snapshots, movements, as_of))
+                source_account = accounts.get(account_key(action['depot']))
+                if source_account:
+                    movements.append(dict(date=action['day'], kind=action['kind'], depot=action['depot'],
+                        account=source_account, security=action['security'], quantity=action['ratio'],
+                        amount='0', currency='', source=action['source'], target=action['target'],
+                        target_depot=action['target_depot'],
+                        target_account=accounts.get(account_key(action['target_depot'])) if action['target_depot'] else source_account,
+                        units=action['units'],
+                        external_id='action-' + str(action['id']), sequence=action['sequence']))
+        result = apply_daily_values(self.db, advance_holdings(rows, snapshots, movements, as_of))
+        return [p for p in result if not account or account_key(p['account']) == account_key(account)]
 
     def correct_cost(self, snapshot_id, key, cost, source):
         cost = Decimal(str(cost)); source = source.strip()
