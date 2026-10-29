@@ -70,6 +70,12 @@ def match_tax_events(repository, events=None, transactions=None):
     events = list(events if events is not None else repository.tax_events())
     transactions = list(transactions if transactions is not None else repository.transactions())
     cash = [tx for tx in transactions if tx.get('kind') in ('DIVIDEND', 'DISTRIBUTION')]
+    account_aliases = {row['account_key']: row['account_key'] for row in repository.account_records()}
+    account_aliases.update({account_key(row['name']): row['account_key']
+                            for row in repository.account_records()})
+    def account_identity(value):
+        key = account_key(value or '')
+        return account_aliases.get(key, key)
     security_cache = {}
     candidates = {}
     for event in events:
@@ -85,14 +91,18 @@ def match_tax_events(repository, events=None, transactions=None):
             gross = taxable + (partial or Decimal()) if taxable is not None else None
         paid = _amount(event.get('paid_taxes')) or Decimal()
         net = gross - paid if gross is not None else None
-        event_depot = account_key(event.get('account', ''))
+        event_depot = account_identity(event.get('account', ''))
         scored = []
         for tx in cash:
             tx_refs = _security_refs(repository, tx.get('security') or tx.get('security_ref'), security_cache)
             if not event_refs.intersection(tx_refs):
                 continue
-            tx_depot = account_key(tx.get('performance_depot_key') or tx.get('depot_account') or tx.get('account', ''))
-            if event_depot and tx_depot and event_depot != tx_depot:
+            tx_depot = account_identity(
+                tx.get('performance_depot_key') or tx.get('depot_account') or tx.get('account', ''))
+            cash_account_match = (not tx.get('performance_depot_key') and not tx.get('depot_account')
+                                  and account_identity(tx.get('account', '')) == account_identity(
+                                      event.get('cash_account', '')))
+            if event_depot and tx_depot and event_depot != tx_depot and not cash_account_match:
                 continue
             distance = min(_days(event.get('date'), tx.get('date')),
                            _days(event.get('date'), tx.get('value_date')))

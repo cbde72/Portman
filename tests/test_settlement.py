@@ -6,7 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from portfolio_v5.models import BankDocument, BankTransaction, ImportBatch, Position, Snapshot
+from portfolio_v5.models import BankDocument, BankTransaction, ImportBatch, Position, Snapshot, TaxEvent
 from portfolio_v5.performance import security_performance
 from portfolio_v5.settlement import performance_transactions, portfolio_cash_kind
 from portman.repository_v09 import RepositoryV09, reference
@@ -327,6 +327,50 @@ Gesamtbetrag zu Ihren Gunsten EUR 300,00
                 self.store.undo_import(b['id'])
                 self.assertEqual(len(self.repo.transactions()), 1)
                 self.store.undo_import(a['id'])
+
+    def test_comdirect_gross_notice_and_later_net_statement_count_once(self):
+        self.put(snapshots=[Snapshot('Depot', '2025-12', '2025-12-01', 'Test', [
+            Position(ISIN, 'Apple', isin=ISIN, wkn='865985', quantity='10', value='10000')])])
+        notice = self.dividend(
+            external_id='pdf-income-notice', date='2025-12-30', value_date='2025-12-30',
+            amount='400', gross_income=None, taxes=None,
+            booking_text='comdirect Ertragsgutschrift',
+            purpose='comdirect Ertragsgutschrift: Apple (US0378331005, WKN 865985) 10 Stk.')
+        statement = self.statement(
+            external_id='finance-net', date='2025-12-31', value_date='2025-12-31', amount='300',
+            purpose=('Kupon ERTRAEGNISGUTSCHRIFT VOM 30.12.25 DEPOTBESTAND: 10 '
+                     'Apple WKN 865985 USD 40,00 Abr.Betrag Brutto 400,00 EUR '
+                     'Steuerabzug 100,00- EUR'))
+
+        self.put([notice])
+        self.put([statement])
+
+        rows = self.repo.transactions()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]['kind'], rows[0]['amount'], rows[0]['gross_income'], rows[0]['taxes']),
+                         ('DIVIDEND', '300', '400.00', '100.00'))
+        self.assertEqual(len(rows[0]['booking_sources']), 2)
+        self.assertEqual(self.performance()['profit'], Decimal('300'))
+
+    def test_gross_notice_without_statement_keeps_documented_tax_in_performance(self):
+        reference = 'TAX-AND-SETTLEMENT'
+        self.put([self.dividend(
+            external_id='gross-only', amount='20.25', gross_income='20.25', taxes=None,
+            bank_reference=reference, document_reference=reference,
+            performance_depot_key='depot'),
+            BankTransaction('Cash', 'tax-helper', '2025-12-31', 'TAX', '-3.74', 'EUR',
+                            security=ISIN, taxes='3.74', affects_cash=False,
+                            transaction_reference=reference, performance_depot_key='depot')])
+        self.store.import_batch(ImportBatch('tax-event', 'tax-event', tax_events=[TaxEvent(
+            'tax-event', 'Depot', 'investment_ausschuettung_inland', '2025-12-31',
+            security_ref=ISIN, gross_income='20.25', taxable_income='14.18',
+            partial_exemption_amount='6.07', paid_taxes='3.74', reference_no=reference,
+            related_transaction_id='tax-helper', cash_account='Cash')]))
+
+        flows = performance_transactions(self.store, self.repo.transactions(), 'Depot')
+        self.assertEqual([(tx['kind'], tx['amount']) for tx in flows],
+                         [('DIVIDEND', '20.25'), ('TAX', '-3.74')])
+        self.assertEqual(sum(Decimal(tx['amount']) for tx in flows), Decimal('16.51'))
 
     def test_generic_or_conflicting_payments_are_not_merged(self):
         self.put([self.dividend(bank_reference='REF-ONE')])

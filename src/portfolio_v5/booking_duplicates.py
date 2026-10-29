@@ -129,4 +129,4 @@ def consolidate_bookings(store, transactions):
             kept.extend(additions)
         result.extend(kept)
     from .settlement import consolidate_dividends
-    return consolidate_dividends(result, protected)
+    return consolidate_dividends(store, result, protected)
