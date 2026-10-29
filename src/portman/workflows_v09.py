@@ -120,6 +120,7 @@ class OperationsDialog(QDialog):
             ("links", "Bestätigte Gebührenbelege", [("Verknüpfung zurücknehmen", self.revoke_fee)]),
             ("recurring", "Regelmäßige Zahlungen", [("Vorschlag bestätigen", self.confirm_recurring)]),
             ("actions", "Kapitalmaßnahmen", [("Maßnahme korrigieren", self.correct_action), ("Maßnahme zurücknehmen", self.revoke_action)]),
+            ("security_transfers", "Wertpapierüberträge", [("Zuordnung zurücknehmen", self.revoke_security_transfer)]),
             ("transfers", "Umbuchungen", [("Verknüpfung zurücknehmen", self.revoke_transfer)]),
             ("rules", "Bestätigte Regelmäßigkeit", [("Regel entfernen", self.remove_rule)]),
             ("portfolio_rules", "Wertpapier-Zuordnungsregeln", [("Zuordnungsregel entfernen", self.remove_portfolio_rule)]),
@@ -137,7 +138,19 @@ class OperationsDialog(QDialog):
                 button.clicked.connect(lambda checked=False, f=callback: self.perform(f))
                 bar.addWidget(button)
             self.tabs.addTab(panel, title)
+        self.panels["actions"].view.doubleClicked.connect(lambda _index:self.open_source("actions"))
+        self.panels["security_transfers"].view.doubleClicked.connect(lambda _index:self.open_source("security_transfers"))
         self.refresh()
+
+    def open_source(self,key):
+        from pathlib import Path
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        row=self.selected(key)
+        candidates=([row.get('source','')] if key=='actions' else
+                    [row['out_transaction'].get('source',''),row['in_transaction'].get('source','')])
+        path=next((Path(value) for value in candidates if value and Path(value).is_file()),None)
+        if path: QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve())))
 
     def set_data(self, key, headers, rows, payloads):
         table = self.panels[key]
@@ -198,13 +211,18 @@ class OperationsDialog(QDialog):
             [[r["account"], r["description"], r["amount"], r["currency"], r["interval_days"], len(r["refs"])] for r in candidates],
             candidates,
         )
-        actions = self.repo.actions("0001-01-01", "9999-12-31")
+        actions = [r for r in self.repo.actions("0001-01-01", "9999-12-31") if isinstance(r['id'],int)]
         self.set_data(
             "actions",
-            ["Datum", "Depot", "Wertpapier", "Art", "Verhältnis", "Stück", "Quelle"],
-            [[r[k] for k in ("day", "depot", "security", "kind", "ratio", "units", "source")] for r in actions],
+            ["Datum", "Depot", "Wertpapier", "Art", "Verhältnis", "Stück", "Kostenanteil", "Kostenminderung", "Quelle"],
+            [[r.get(k) for k in ("day", "depot", "security", "kind", "ratio", "units", "cost_ratio", "cost_amount", "source")] for r in actions],
             actions,
         )
+        security_pairs=self.repo.security_transfer_pairs()
+        self.set_data("security_transfers",
+            ["Bestätigt","Quell-Depot","Zieldepot","Wertpapier","Stück","Ausgang","Eingang","Begründung"],
+            [[r['created_at'],r['out_transaction']['depot'],r['in_transaction']['depot'],r['out_transaction'].get('security'),
+              r['out_transaction'].get('quantity'),r['out_transaction']['date'],r['in_transaction']['date'],r['note']] for r in security_pairs],security_pairs)
         valid_pairs = {r["id"] for r in self.repo.transfer_pairs()}
         pairs = self.repo.transfer_pairs(include_invalid=True)
         self.set_data(
@@ -282,6 +300,10 @@ class OperationsDialog(QDialog):
         reason = self.reason()
         if reason:
             self.repo.revoke_transfer(r["id"], reason)
+
+    def revoke_security_transfer(self):
+        r=self.selected("security_transfers"); reason=self.reason()
+        if reason: self.repo.revoke_security_transfer(r['id'],reason)
 
     def remove_rule(self):
         r = self.selected("rules")

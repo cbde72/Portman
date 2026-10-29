@@ -452,6 +452,7 @@ class ActionsDialog(QDialog):
         self.resize(1050, 700)
         layout = QVBoxLayout(self)
         tabs = QTabWidget()
+        self.tabs = tabs
         layout.addWidget(tabs)
         self.candidates = transfer_candidates(repo)
         table = QTableWidget()
@@ -485,6 +486,53 @@ class ActionsDialog(QDialog):
 
         confirm.clicked.connect(pair)
         tabs.addTab(panel, "Interne Umbuchungen")
+        # Security transfers are deliberately separate from cash transfers:
+        # confirming them only moves documented FIFO lots.
+        security_panel = QWidget(); security_box = QVBoxLayout(security_panel)
+        security_box.addWidget(QLabel("Vorschläge sind unverbindlich. Erst die Bestätigung verbindet Aus- und Einlieferung ohne Kauf, Verkauf oder Cashflow."))
+        self.security_candidates = repo.security_transfer_candidates()
+        candidate_rows=[]; candidate_payloads=[]
+        for candidate in self.security_candidates:
+            out_tx=candidate['out']; matches=candidate['matches'] or [None]
+            buys=[t for t in repo.transactions() if t['kind']=='BUY' and t.get('security')==out_tx.get('security')
+                  and t.get('depot')==out_tx.get('depot') and t['date']<=out_tx['date']]
+            lots='; '.join(f"{t['date']}: {t.get('quantity') or '?'} Stk / {abs(Decimal(t['amount']))} {t['currency']}" for t in buys) or 'unbekannt'
+            for in_tx in matches:
+                candidate_rows.append(["Eindeutig" if candidate['unambiguous'] else "Prüfen",
+                    out_tx['date'],out_tx['depot'],out_tx.get('security',''),out_tx.get('quantity'),
+                    in_tx['date'] if in_tx else '',in_tx['depot'] if in_tx else '',lots])
+                candidate_payloads.append((out_tx,in_tx))
+        self.security_table=QTableWidget()
+        populate(self.security_table,["Status","Ausgang","Quell-Depot","ISIN/Kennung","Stück","Eingang","Zieldepot","Anschaffungslose"],candidate_rows)
+        def open_transfer_source(row,_column):
+            if row<0 or row>=len(candidate_payloads): return
+            out_tx,in_tx=candidate_payloads[row]; path=Path((in_tx or out_tx).get('source',''))
+            if path.is_file(): QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.resolve())))
+        self.security_table.cellDoubleClicked.connect(open_transfer_source)
+        security_box.addWidget(self.security_table)
+        all_txs=repo.transactions(); outs=[t for t in all_txs if t['kind']=='TRANSFER_OUT']; ins=[t for t in all_txs if t['kind']=='TRANSFER_IN']
+        manual=QHBoxLayout(); self.transfer_out=QComboBox(); self.transfer_in=QComboBox()
+        for combo,rows in ((self.transfer_out,outs),(self.transfer_in,ins)):
+            for tx in rows: combo.addItem(f"{tx['date']} · {tx['depot']} · {tx.get('security')} · {tx.get('quantity')}",reference(tx))
+            manual.addWidget(combo)
+        self.transfer_note=QLineEdit(); self.transfer_note.setPlaceholderText("Belegquelle / Begründung")
+        manual.addWidget(self.transfer_note); security_box.addLayout(manual)
+        security_buttons=QHBoxLayout(); suggest=QPushButton("Vorschlag übernehmen"); confirm_security=QPushButton("Zuordnung bestätigen")
+        security_buttons.addWidget(suggest); security_buttons.addWidget(confirm_security); security_box.addLayout(security_buttons)
+        def select_suggestion():
+            row=self.security_table.currentRow()
+            if row<0 or not candidate_payloads[row][1]: return
+            out_tx,in_tx=candidate_payloads[row]
+            self.transfer_out.setCurrentIndex(self.transfer_out.findData(reference(out_tx)))
+            self.transfer_in.setCurrentIndex(self.transfer_in.findData(reference(in_tx)))
+        def confirm_security_pair():
+            try:
+                repo.confirm_security_transfer(self.transfer_out.currentData(),self.transfer_in.currentData(),self.transfer_note.text())
+                self.accept()
+            except Exception as error: QMessageBox.warning(self,"Wertpapierübertrag",str(error))
+        suggest.clicked.connect(select_suggestion); confirm_security.clicked.connect(confirm_security_pair)
+        self.confirm_security_button=confirm_security
+        tabs.addTab(security_panel,"Wertpapierüberträge")
         panel = QWidget()
         form = QFormLayout(panel)
         editors = {}
@@ -492,15 +540,22 @@ class ActionsDialog(QDialog):
             ("day", "Datum TT.MM.JJJJ", date.today().isoformat()),
             ("depot", "Quell-Depot", ""),
             ("security", "Wertpapierkennung", ""),
-            ("kind", "SPLIT / MERGER / TRANSFER", "SPLIT"),
+            ("kind", "Art", "SPLIT"),
             ("target", "Zielkennung (Fusion)", ""),
             ("target_depot", "Zieldepot (Übertrag)", ""),
             ("ratio", "Verhältnis neue / alte Stück", "1"),
             ("units", "Stück (Übertrag)", ""),
             ("sequence", "Reihenfolge (<1000000 vor Tagesbuchungen)", "0"),
+            ("cost_ratio", "Belegter Kostenanteil Ziel (0 bis 1)", ""),
+            ("cost_amount", "Belegte Kostenminderung", ""),
+            ("cost_currency", "Währung Kostenminderung", "EUR"),
             ("source", "Belegquelle", ""),
         ]:
-            editors[key] = (DateLineEdit if key == "day" else QLineEdit)(str(action.get(key) or default) if action else default)
+            if key=='kind':
+                editor=QComboBox(); editor.addItems(['SPLIT','MERGER','TRANSFER','SPINOFF','RIGHTS','CAPITAL_REPAYMENT'])
+                editor.setCurrentText(str(action.get(key) or default) if action else default)
+                editors[key]=editor
+            else: editors[key] = (DateLineEdit if key == "day" else QLineEdit)(str(action.get(key) or default) if action else default)
             form.addRow(label, editors[key])
         save = QPushButton("Kapitalmaßnahme erfassen")
         form.addRow(save)
@@ -508,8 +563,10 @@ class ActionsDialog(QDialog):
 
         def save_action():
             try:
-                data = {k: e.text() for k, e in editors.items()}
+                data = {k: (e.currentText() if isinstance(e,QComboBox) else e.text()) for k, e in editors.items()}
                 data["units"] = data["units"] or None
+                data["cost_ratio"] = data["cost_ratio"] or None
+                data["cost_amount"] = data["cost_amount"] or None
                 if existing_action:
                     repo.correct_action(existing_action["id"], **data)
                 else:
@@ -520,6 +577,7 @@ class ActionsDialog(QDialog):
                 QMessageBox.warning(self, "Kapitalmaßnahme", str(error))
 
         save.clicked.connect(save_action)
+        self.action_editors=editors; self.save_action_button=save
         tabs.addTab(panel, "Kapitalmaßnahme")
         if existing_action:
             tabs.setCurrentIndex(1)
