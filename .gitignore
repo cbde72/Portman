@@ -85,6 +85,23 @@ desktop.ini
 !.vscode/extensions.json
 !.vscode/tasks.json
 
+# --- Scratch-/Arbeitsverzeichnis (Audit-Laeufe, Debug-Daten) ---
+tmp/
+
+# --- Grosse generierte Audit-Dumps --------------------------
+test_reports/pdf_parser_audit/run_001/
+test_reports/pdf_parser_audit/v3_full_utf8/
+test_reports/pdf_parser_audit/v3_full_utf8_rerun_*/
+test_reports/**/progress.json
+
+# --- Testpakete / Beispiel-PDFs in tools/ -------------------
+tools/*.zip
+tools/*.pdf
+
+# --- Persoenliche Kontodaten in Reports (Repo ist oeffentlich!) ---
+test_reports/comdirect_importtest_*.csv
+test_reports/pdf_parser_audit/*_recheck*/
+
 # --- Sonstiges ----------------------------------------------
 *.bak
 *.orig
