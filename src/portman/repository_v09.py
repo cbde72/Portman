@@ -1080,6 +1080,35 @@ class RepositoryV09(RepositoryV07):
         if first in used or second in used or not note.strip(): raise ValueError('Bereits zugeordnet oder Begründung fehlt.')
         with self.db: self.db.execute('INSERT INTO transfer_pairs(first_ref,second_ref,note) VALUES(?,?,?)', (first, second, note.strip()))
 
+    def security_transfer_pairs(self):
+        active = {reference(t): t for t in self.transactions()}
+        result = []
+        for row in self.db.execute('SELECT * FROM security_transfer_pairs ORDER BY id'):
+            out_tx, in_tx = active.get(row['out_ref']), active.get(row['in_ref'])
+            if out_tx and in_tx:
+                result.append(dict(row) | {'out_transaction': out_tx, 'in_transaction': in_tx})
+        return result
+
+    def confirm_security_transfer(self, out_ref, in_ref, note):
+        """Confirm two imported security movements; no cash booking is created."""
+        active = {reference(t): t for t in self.transactions()}
+        out_tx, in_tx = active.get(out_ref), active.get(in_ref)
+        if not out_tx or not in_tx or out_tx['kind'] != 'TRANSFER_OUT' or in_tx['kind'] != 'TRANSFER_IN':
+            raise ValueError('Auslieferung und Einlieferung auswählen.')
+        if account_key(out_tx['depot']) == account_key(in_tx['depot']):
+            raise ValueError('Quell- und Zieldepot müssen verschieden sein.')
+        if (not out_tx.get('security') or out_tx.get('security') != in_tx.get('security') or
+                out_tx.get('quantity') is None or in_tx.get('quantity') is None or
+                abs(Decimal(out_tx['quantity'])) != abs(Decimal(in_tx['quantity']))):
+            raise ValueError('Kennung und Stückzahl der Übertragsseiten müssen übereinstimmen.')
+        if abs((date.fromisoformat(out_tx['date']) - date.fromisoformat(in_tx['date'])).days) > 7:
+            raise ValueError('Übertragsseiten liegen mehr als sieben Tage auseinander.')
+        if not note.strip():
+            raise ValueError('Belegquelle oder Begründung fehlt.')
+        with self.db:
+            self.db.execute('INSERT INTO security_transfer_pairs(out_ref,in_ref,note) VALUES(?,?,?)',
+                            (out_ref, in_ref, note.strip()))
+
     def add_action(self, day, depot, security, kind, source, target='', target_depot='', ratio='1', units=None, sequence=0):
         date.fromisoformat(day)
         if kind not in ('SPLIT', 'MERGER', 'TRANSFER') or not source.strip() or not depot or not security: raise ValueError('Art, Depot, Wertpapier und Belegquelle angeben.')
@@ -1096,7 +1125,16 @@ class RepositoryV09(RepositoryV07):
                 (day,depot,security,kind,target,target_depot,str(factor),str(units) if units is not None else None,int(sequence),source.strip()))
 
     def actions(self, start, end):
-        return [dict(r) for r in self.db.execute('SELECT * FROM corporate_actions WHERE active=1 AND day>? AND day<=? ORDER BY day,sequence,id', (start,end))]
+        rows = [dict(r) for r in self.db.execute('SELECT * FROM corporate_actions WHERE active=1 AND day>? AND day<=? ORDER BY day,sequence,id', (start,end))]
+        for pair in self.security_transfer_pairs():
+            out_tx, in_tx = pair['out_transaction'], pair['in_transaction']
+            day = max(out_tx['date'], in_tx['date'])
+            if start < day <= end:
+                rows.append(dict(id='security-transfer-' + str(pair['id']), day=day,
+                    depot=out_tx['depot'], security=out_tx['security'], kind='TRANSFER', target='',
+                    target_depot=in_tx['depot'], ratio='1', units=str(abs(Decimal(out_tx['quantity']))),
+                    sequence=0, source=pair['note']))
+        return sorted(rows, key=lambda row: (row['day'], row['sequence'], str(row['id'])))
 
     def save_fx(self, day, currency, rate, source):
         date.fromisoformat(day); rate = Decimal(str(rate)); currency = currency.strip().upper()
@@ -1108,3 +1146,11 @@ class RepositoryV09(RepositoryV07):
         if currency == 'EUR': return Decimal(1)
         row = self.db.execute('SELECT day,rate FROM historical_fx WHERE currency=? AND day<=? ORDER BY day DESC LIMIT 1', (currency,day)).fetchone()
         return Decimal(row['rate']) if row and (date.fromisoformat(day) - date.fromisoformat(row['day'])).days <= 7 else None
+
+    def documented_rate(self, currency, day):
+        """Return only an exact-day, sourced EUR rate suitable for cost basis."""
+        if currency == 'EUR': return Decimal(1)
+        row = self.db.execute(
+            'SELECT rate FROM historical_fx WHERE currency=? AND day=? AND trim(source)<>\'\'',
+            (currency, day)).fetchone()
+        return Decimal(row['rate']) if row else None
