@@ -94,10 +94,19 @@ def _ensure_booking_reconciliation(db):
             UNIQUE(depot_ref,cash_ref))''')
         db.execute('CREATE INDEX IF NOT EXISTS reconciliation_depot_ref ON transaction_reconciliations(depot_ref)')
         db.execute('CREATE INDEX IF NOT EXISTS reconciliation_cash_ref ON transaction_reconciliations(cash_ref)')
+        db.execute('''CREATE TABLE IF NOT EXISTS security_transfer_pairs(
+            id INTEGER PRIMARY KEY,
+            out_ref TEXT UNIQUE NOT NULL,
+            in_ref TEXT UNIQUE NOT NULL,
+            note TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
         if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='v09_revision'").fetchone():
             for operation in ('INSERT', 'UPDATE', 'DELETE'):
                 db.execute(f'''CREATE TRIGGER IF NOT EXISTS revision09_transaction_reconciliations_{operation}
                     AFTER {operation} ON transaction_reconciliations BEGIN
+                    UPDATE v09_revision SET value=value+1 WHERE id=1; END''')
+                db.execute(f'''CREATE TRIGGER IF NOT EXISTS revision09_security_transfer_pairs_{operation}
+                    AFTER {operation} ON security_transfer_pairs BEGIN
                     UPDATE v09_revision SET value=value+1 WHERE id=1; END''')
 
 
@@ -421,7 +430,7 @@ def content_diff(current,candidate,settings_folder=None,candidate_folder=None,li
                       'snapshots','snapshot_exclusions','balances','transactions','bank_documents','import_model_records','coverage',
                       'manual_balances','security_classifications','cost_corrections','transaction_classifications',
                       'transaction_edits','transaction_exclusions','transaction_duplicate_reviews',
-                      'corporate_actions','historical_fx','transfer_pairs','fee_links','transaction_supersessions',
+                      'corporate_actions','historical_fx','transfer_pairs','security_transfer_pairs','fee_links','transaction_supersessions',
                       'recurring_rules','saved_views','csv_profiles','account_tax_years'):
             if not a.execute('SELECT 1 FROM sqlite_master WHERE name=?',(table,)).fetchone() or not b.execute('SELECT 1 FROM sqlite_master WHERE name=?',(table,)).fetchone(): continue
             columns=[r[1] for r in a.execute(f'PRAGMA table_info({table})')]

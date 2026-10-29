@@ -1,6 +1,6 @@
 """Evidence-aware comparable coverage, unit replay and contribution reports."""
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from html import escape
 from pathlib import Path
@@ -234,8 +234,34 @@ def realized_profit(repo,start,end,account=None):
                 {'date':event.get('date',''),'quantity':quantity,'credit':credit})
     actions=repo.actions('0001-01-01',end)
     trades=[t for t in repo.transactions(account) if t['date']<=end and t['kind'] in ('BUY','SELL','TRANSFER_IN','TRANSFER_OUT')]
-    daily=defaultdict(int)
-    for t in trades: daily[(t['depot'],t.get('security',''),t['currency'],t['date'])]+=1
+    paired_transfer_refs={pair[key] for pair in repo.security_transfer_pairs() for key in ('out_ref','in_ref')}
+    trades=[t for t in trades if reference(t) not in paired_transfer_refs]
+    daily=defaultdict(list)
+    for t in trades: daily[(t['depot'],t.get('security',''),t['currency'],t['date'])].append(t)
+    def execution_order(t):
+        stamp=t.get('executed_at') or ''
+        try:
+            parsed=datetime.fromisoformat(stamp.replace('Z','+00:00'))
+            if parsed.utcoffset() is None: raise ValueError
+            return (0, parsed.timestamp())
+        except (TypeError, ValueError):
+            return (1, '')
+    ambiguous_days=set()
+    for key, items in daily.items():
+        orders=[execution_order(t) for t in items]
+        if len(items)>1 and (any(order[0] for order in orders) or len(set(orders)) != len(orders)):
+            ambiguous_days.add(key)
+    def eur_value(t):
+        amount=abs(Decimal(t['amount']))
+        currency=t['currency'].upper()
+        if currency == 'EUR': return amount
+        from_currency=(t.get('fx_from_currency') or '').upper()
+        to_currency=(t.get('fx_to_currency') or '').upper()
+        rate=t.get('fx_rate')
+        if rate is not None and from_currency == currency and to_currency == 'EUR':
+            return amount*Decimal(rate)
+        documented=repo.documented_rate(currency,t['date'])
+        return amount*documented if documented is not None else None
     def tax_credit(t,quantity):
         if not quantity:
             return None
@@ -249,17 +275,24 @@ def realized_profit(repo,start,end,account=None):
             pool['credit']-=pool['credit']*used/pool['quantity']
             pool['quantity']-=used
         return total
-    def append_sale(t,cost,known,quantity=None):
+    def append_sale(t,cost,known,quantity=None,cost_eur=None,eur_known=False):
         credit=tax_credit(t,quantity)
         realized=abs(Decimal(t['amount']))-cost if known else None
+        proceeds_eur=eur_value(t)
+        realized_eur=proceeds_eur-cost_eur if eur_known and proceeds_eur is not None else None
+        if realized_eur is not None: fx_status='belegt'
+        elif proceeds_eur is None: fx_status='unbekannter EUR-Kurs'
+        else: fx_status='unbekannte EUR-Kostenbasis'
         rows.append(dict(date=t['date'],account=t['account'],security=t.get('security',''),currency=t['currency'],
             proceeds=abs(Decimal(t['amount'])),cost=cost if known else None,realized=realized,
+            report_currency='EUR',proceeds_eur=proceeds_eur,cost_eur=cost_eur if eur_known else None,
+            realized_eur=realized_eur,fx_status=fx_status,
             advance_tax_credit=credit,
             taxable_realized=(realized-credit if realized is not None and credit is not None else None),
             status='FIFO · Buchungsbeträge, Gebührenkonvention des Belegs' if known else 'Unbekannt · Stückzahl, Kennung, Anfangsbestand, Abdeckung, Tagesreihenfolge oder Kapitalmaßnahme prüfen',source=t['source']))
-    events=[(t['date'],1000000+i,'trade',t) for i,t in enumerate(trades)]
-    events += [(a['day'],a['sequence'],'action',a) for a in actions]
-    for _, _, event_kind, t in sorted(events,key=lambda e:(e[0],e[1])):
+    events=[(t['date'],1000000,execution_order(t),'trade',t) for t in trades]
+    events += [(a['day'],a['sequence'],(0,''),'action',a) for a in actions]
+    for _, _, _, event_kind, t in sorted(events,key=lambda e:(e[0],e[1],e[2])):
         if event_kind == 'action':
             matching=[key for key in lots if key[:2] == (t['depot'],t['security'])]
             if t['kind']=='SPLIT':
@@ -268,6 +301,7 @@ def realized_profit(repo,start,end,account=None):
                     for lot in lots[key]:
                         lot[0] *= ratio
                         lot[1] /= ratio
+                        if lot[3] is not None: lot[3] /= ratio
                 if not matching:
                     uncertain.add((t['depot'],t['security'],'EUR'))
                 continue
@@ -282,7 +316,7 @@ def realized_profit(repo,start,end,account=None):
                 moved=[]
                 while remaining and lots[key]:
                     lot=lots[key][0]; used=min(remaining,lot[0])
-                    moved.append([used*ratio,lot[1]/ratio,lot[2]]); remaining-=used; lot[0]-=used
+                    moved.append([used*ratio,lot[1]/ratio,lot[2],lot[3]/ratio if lot[3] is not None else None]); remaining-=used; lot[0]-=used
                     if not lot[0]: lots[key].pop(0)
                 target=(target_depot,target_security,key[2])
                 lots[target].extend(moved)
@@ -293,16 +327,21 @@ def realized_profit(repo,start,end,account=None):
                     uncertain.add(key)
             continue
         key=(t['depot'],t.get('security',''),t['currency']); q=Decimal(t['quantity']) if t.get('quantity') is not None else None
-        if not q or not key[1] or daily[(*key,t['date'])]>1: uncertain.add(key)
+        if not q or not key[1] or (*key,t['date']) in ambiguous_days: uncertain.add(key)
         if t['kind'].startswith('TRANSFER'): uncertain.add(key); continue
         if not q:
             if t['kind']=='SELL' and start<t['date']<=end: append_sale(t,None,False)
             continue
         q=abs(q)
-        if t['kind']=='BUY': lots[key].append([q,abs(Decimal(t['amount']))/q,t['date']]); continue
-        remaining=q; cost=ZERO
+        if t['kind']=='BUY':
+            value_eur=eur_value(t)
+            lots[key].append([q,abs(Decimal(t['amount']))/q,t['date'],value_eur/q if value_eur is not None else None]); continue
+        remaining=q; cost=ZERO; cost_eur=ZERO; eur_known=True
         while remaining and lots[key]:
-            lot=lots[key][0]; used=min(remaining,lot[0]); cost+=used*lot[1]; remaining-=used; lot[0]-=used
+            lot=lots[key][0]; used=min(remaining,lot[0]); cost+=used*lot[1]
+            if lot[3] is None: eur_known=False
+            else: cost_eur+=used*lot[3]
+            remaining-=used; lot[0]-=used
             if not lot[0]: lots[key].pop(0)
         if start<t['date']<=end:
             known=not remaining and key not in uncertain and repo.has_coverage(t['account'],'0001-01-01',end)
@@ -311,7 +350,7 @@ def realized_profit(repo,start,end,account=None):
                 snaps=[s for s in repo.snapshots(t['account']) if s['depot']==key[0] and s['complete'] and s.get('as_of') and s['effective_date']<=t['date']]
                 empty=[s for s in snaps if not json.loads(s['payload'])['positions']]
                 known=any(repo.has_coverage(t['account'],s['effective_date'],end) and not any(x['date']<=s['effective_date'] and x['depot']==key[0] and x.get('security')==key[1] for x in repo.transactions(t['account'])) for s in empty)
-            append_sale(t,cost,known,q)
+            append_sale(t,cost,known,q,cost_eur,known and eur_known)
         else:
             # Earlier sales have already consumed their proportional tax credit,
             # even when the selected report period starts later.

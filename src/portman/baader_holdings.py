@@ -1,4 +1,5 @@
 from collections import defaultdict
+from datetime import datetime
 from decimal import Decimal
 import json
 
@@ -11,6 +12,16 @@ def purchase_value(transaction):
     return value
 
 
+def execution_order(transaction):
+    """Order only by a documented timestamp; missing times remain equal."""
+    try:
+        stamp = datetime.fromisoformat((transaction.get('executed_at') or '').replace('Z', '+00:00'))
+        if stamp.utcoffset() is None: raise ValueError
+        return (0, stamp.timestamp())
+    except (TypeError, ValueError):
+        return (1, '')
+
+
 def advance_holdings(rows, snapshots, transactions, as_of):
     baselines = {}
     for snapshot in snapshots:
@@ -21,7 +32,7 @@ def advance_holdings(rows, snapshots, transactions, as_of):
     split_groups = defaultdict(set)
     for key in positions:
         split_groups[key[:2]].add(key)
-    for tx in sorted(transactions, key=lambda t: (t['date'], t.get('sequence', 1000000), t['external_id'])):
+    for tx in sorted(transactions, key=lambda t: (t['date'], t.get('sequence', 1000000), execution_order(t))):
         if tx['kind'] not in ('BUY', 'SELL', 'SPLIT', 'MERGER', 'TRANSFER') or tx['date'] > as_of:
             continue
         if tx['kind'] == 'SPLIT':
@@ -122,12 +133,21 @@ def advance_holdings(rows, snapshots, transactions, as_of):
 def apply_costs(positions, snapshots, transactions, as_of):
     trades = [t for t in transactions if t['kind'] in ('BUY', 'SELL', 'SPLIT', 'MERGER', 'TRANSFER') and t['date'] <= as_of]
     depots = {account_key(p['depot']) for p in positions}
-    events = [(t['date'], t.get('sequence', 1000000), t) for t in trades]
+    day_groups = defaultdict(list)
+    for t in trades:
+        if t['kind'] in ('BUY', 'SELL'):
+            day_groups[(account_key(t['depot']), t['security'], t['currency'], t['date'])].append(t)
+    ambiguous = set()
+    for key, items in day_groups.items():
+        orders = [execution_order(item) for item in items]
+        if len(items) > 1 and (any(order[0] for order in orders) or len(set(orders)) != len(orders)):
+            ambiguous.add(key)
+    events = [(t['date'], t.get('sequence', 1000000), execution_order(t), t) for t in trades]
     observations = {(account_key(s['depot']), s['effective_date']): s for s in snapshots
                     if s['complete'] and s['account'] and s['effective_date'] <= as_of and account_key(s['depot']) in depots}
-    events += [(s['effective_date'], 2000000000, s) for s in observations.values()]
+    events += [(s['effective_date'], 2000000000, (0, ''), s) for s in observations.values()]
     lots = {}
-    for day, kind, event in sorted(events, key=lambda e: (e[0], e[1])):
+    for day, kind, _order, event in sorted(events, key=lambda e: (e[0], e[1], e[2])):
         depot = account_key(event['depot'])
         if 'payload' in event:
             observed = {p['key']: p for p in json.loads(event['payload'])['positions']}
@@ -181,7 +201,8 @@ def apply_costs(positions, snapshots, transactions, as_of):
         quantity = Decimal(event['quantity'])
         book = lots.setdefault(key, [])
         if event['kind'] == 'BUY':
-            book.append([quantity, purchase_value(event) / quantity, event['date']])
+            unit = None if (depot, event['security'], event['currency'], event['date']) in ambiguous else purchase_value(event) / quantity
+            book.append([quantity, unit, event['date']])
         else:
             while quantity and book:
                 used = min(quantity, book[0][0])
