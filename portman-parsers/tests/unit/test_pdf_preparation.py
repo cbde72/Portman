@@ -36,6 +36,14 @@ def test_repeated_glyph_token_is_removed_but_identifiers_are_not():
     assert "U U U" in text
 
 
+def test_long_at_glyph_run_is_removed_without_global_at_replacement():
+    text, diagnostics = _normalize("Hinweis @@@@ @@@@@@@@@@@@@@@@@@@ Wert @x")
+    assert "@@@@@@@@@@@@@@@@@@@" not in text
+    assert "@@@@" in text
+    assert "@x" in text
+    assert "REPEATED_AT_GLYPH_RUN_REMOVED_WITH_CONTEXT" in diagnostics
+
+
 def test_prepare_pdf_keeps_original_and_page_blocks():
     prepared = prepare_pdf(
         "fixture.pdf", ["Zeile 1\r\n0,733 EUR\r\n"], "a" * 64)

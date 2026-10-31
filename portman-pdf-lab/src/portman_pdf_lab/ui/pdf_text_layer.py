@@ -28,13 +28,32 @@ class PdfTextLayer(QTextEdit):
         super().__init__(parent); self.setReadOnly(True); self.setAcceptRichText(False)
         self.setPlaceholderText("PDF-Textlayer")
         self.setContextMenuPolicy(Qt.CustomContextMenu); self.customContextMenuRequested.connect(self._menu)
-        self.pages: dict[int, str] = {}; self.page_number = 1; self.markings: dict[int, list[TextSelection]] = {}
+        self.pages: dict[int, str] = {}; self.page_variants: dict[int, dict[str, str]] = {}
+        self.view_mode = "Bereinigt"; self.page_number = 1; self.markings: dict[int, list[TextSelection]] = {}
         self.field_markings: list[PdfMarking] = []
         self._hovered_key = None
         self.setMouseTracking(True)
 
     def set_pages(self, pages: dict[int, str]):
+        self.page_variants = {number: {"Bereinigt": text, "Layout": text, "Original": text}
+                              for number, text in pages.items()}
         self.pages = pages; self.markings.clear(); self.field_markings.clear(); self.show_page(1)
+
+    def set_page_variants(self, variants: dict[int, dict[str, str]]):
+        """Set clean/layout/original text without changing PDF selection APIs."""
+        self.page_variants = {int(number): dict(values) for number, values in variants.items()}
+        self.pages = {number: values.get(self.view_mode, values.get("Bereinigt", ""))
+                      for number, values in self.page_variants.items()}
+        self.markings.clear(); self.field_markings.clear(); self.show_page(self.page_number)
+
+    def set_view_mode(self, mode: str):
+        if mode not in {"Bereinigt", "Layout", "Original"}:
+            mode = "Bereinigt"
+        self.view_mode = mode
+        if self.page_variants:
+            self.pages = {number: values.get(mode, values.get("Bereinigt", ""))
+                          for number, values in self.page_variants.items()}
+        self.show_page(self.page_number)
 
     def show_page(self, page_number: int):
         self.page_number = page_number

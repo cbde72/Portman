@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from portman_pdf_lab.field_catalog import FieldCatalog, FieldDefinition
+from portman_pdf_lab.field_descriptions import resolve_description
 from portman_pdf_lab.storage import ReferenceRepository
 from portman_pdf_lab.training import TrainingContext
 from portman_pdf_lab.ui.result_view import (
@@ -374,7 +375,9 @@ def training_context_for_row(
 
 def field_help_html(row: FieldAnalysisRow) -> str:
     definition = row.definition
-    description = definition.description if definition else row.name
+    description = resolve_description(row.path, None).description
+    if definition and definition.description:
+        description = definition.description
     data_type = definition.data_type if definition else "TEXT"
     expected = (definition.pdf_source if definition and definition.pdf_source else
                 "Gedruckte Angabe im PDF; ohne Evidence oder Bestätigung gilt ein Wert nicht als nachweislich vorhanden.")
@@ -529,6 +532,7 @@ class FieldAnalysisWidget(QWidget):
     trainingRequested = Signal(object)
     fieldActivated = Signal(object)
     helpRequested = Signal(object)
+    standardValuesRequested = Signal()
     testRuleRequested = Signal()
     approveRuleRequested = Signal()
     activateRuleRequested = Signal()
@@ -556,12 +560,14 @@ class FieldAnalysisWidget(QWidget):
         self.stats = QLabel("Erkannt 0 · Fehlend 0 · Prüfen 0 · N/A 0")
         self.quality_hint = QLabel("Textqualität: —")
         self.quality_hint.setToolTip("Qualität der gemeinsamen PDF-Textaufbereitung")
+        self.standard_values = QPushButton("Alle gefundenen Werte")
+        self.standard_values.setToolTip("Nur tatsächlich ausgegebene Werte des STANDARD-Parsers anzeigen")
         self.show_all = QCheckBox("Alle Felder anzeigen"); self.show_all.setVisible(False)
         self.test_rule = QPushButton("Regel prüfen"); self.test_rule.setVisible(False)
         self.approve_rule = QPushButton("Regel freigeben"); self.approve_rule.setVisible(False)
         self.activate_rule = QPushButton("Profil aktivieren"); self.activate_rule.setVisible(False)
         bar.addWidget(self.mode); bar.addWidget(self.filter); bar.addWidget(self.stats)
-        bar.addStretch(); bar.addWidget(self.quality_hint)
+        bar.addStretch(); bar.addWidget(self.quality_hint); bar.addWidget(self.standard_values)
         for widget in (self.show_all, self.test_rule, self.approve_rule, self.activate_rule): bar.addWidget(widget)
         self.stack = QStackedWidget()
         self.table = FieldAnalysisTable()
@@ -576,6 +582,7 @@ class FieldAnalysisWidget(QWidget):
         self.show_all.toggled.connect(self._apply_filter)
         self.test_rule.clicked.connect(self.testRuleRequested); self.approve_rule.clicked.connect(self.approveRuleRequested)
         self.activate_rule.clicked.connect(self.activateRuleRequested)
+        self.standard_values.clicked.connect(self.standardValuesRequested)
 
     def set_quick_mode(self, enabled: bool):
         self.quick_mode = enabled; self.mode.setVisible(not enabled); self.filter.setVisible(not enabled)

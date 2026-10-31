@@ -21,6 +21,7 @@ from portman_pdf_lab.storage import ReferenceRepository
 from portman_pdf_lab.ui.training_widget import TrainingWidget
 from portman_pdf_lab.ui.field_analysis import FieldAnalysisWidget, FieldHelpDialog
 from portman_pdf_lab.ui.result_view import StructuredResultView
+from portman_pdf_lab.ui.standard_values import StandardValuesDialog, build_standard_value_rows
 from portman_pdf_lab.ui.pdf_text_layer import PdfTextLayer
 from portman_pdf_lab.ui.field_mapping import CatalogHelpDialog, EditorFactory, FieldMappingDialog
 from portman_pdf_lab.field_catalog import CatalogStore
@@ -94,6 +95,8 @@ class MainWindow(QMainWindow):
         self._selected_field_path = ""
         self._navigating = False
         self._pending_pdf_selection = None
+        self._standard_values_dialog = None
+        self._text_variants: dict[int, dict[str, str]] = {}
         self._build_ui()
         self._restore_layout()
 
@@ -149,8 +152,15 @@ class MainWindow(QMainWindow):
         self.evidence_excerpt.setPlaceholderText("Textfundstelle")
         self.pdf_text_layer = PdfTextLayer(); self.pdf_text_layer.actionRequested.connect(self._pdf_text_action)
         self.pdf_text_layer.markingActivated.connect(self._markings_activated)
+        text_panel = QWidget(); text_layout = QVBoxLayout(text_panel); text_layout.setContentsMargins(0, 0, 0, 0)
+        text_toolbar = QHBoxLayout(); text_toolbar.addWidget(QLabel("Textansicht:"))
+        self.text_view_mode = QComboBox(); self.text_view_mode.addItems(("Bereinigt", "Layout", "Original"))
+        self.text_view_mode.setToolTip("Bereinigt, räumliches Layout oder unveränderter Extraktoroutput")
+        text_toolbar.addWidget(self.text_view_mode); text_toolbar.addStretch()
+        text_layout.addLayout(text_toolbar); text_layout.addWidget(self.pdf_text_layer)
+        self.text_view_mode.currentTextChanged.connect(self._text_view_changed)
         self.pdf_splitter = QSplitter(Qt.Vertical); self.pdf_splitter.setObjectName("pdf-splitter")
-        self.pdf_splitter.addWidget(self.pdf_view); self.pdf_splitter.addWidget(self.pdf_text_layer); self.pdf_splitter.addWidget(self.evidence_excerpt)
+        self.pdf_splitter.addWidget(self.pdf_view); self.pdf_splitter.addWidget(text_panel); self.pdf_splitter.addWidget(self.evidence_excerpt)
         self.pdf_splitter.setStretchFactor(0, 5); self.pdf_splitter.setStretchFactor(1, 2); self.pdf_splitter.setStretchFactor(2, 1)
         middle_layout.addWidget(self.pdf_splitter)
 
@@ -164,6 +174,7 @@ class MainWindow(QMainWindow):
         self.field_analysis.trainingRequested.connect(self._start_field_training)
         self.field_analysis.fieldActivated.connect(self._field_analysis_activated)
         self.field_analysis.helpRequested.connect(self._show_field_analysis_help)
+        self.field_analysis.standardValuesRequested.connect(self._show_standard_values)
         self.field_analysis.testRuleRequested.connect(self._quick_test_rule)
         self.field_analysis.approveRuleRequested.connect(self._quick_approve_rule)
         self.field_analysis.activateRuleRequested.connect(self._quick_activate_rule)
@@ -213,6 +224,8 @@ class MainWindow(QMainWindow):
             if state: view.table.horizontalHeader().restoreState(state)
         mode = self.settings.value("ui/mode", "Schnell", type=str)
         self.ui_mode.setCurrentText(mode if mode in {"Schnell", "Experte"} else "Schnell")
+        text_mode = self.settings.value("pdf/text-view", "Bereinigt", type=str)
+        self.text_view_mode.setCurrentText(text_mode if text_mode in {"Bereinigt", "Layout", "Original"} else "Bereinigt")
         self._apply_ui_mode(self.ui_mode.currentText())
 
     def _apply_ui_mode(self, mode):
@@ -233,6 +246,7 @@ class MainWindow(QMainWindow):
         self.field_analysis.save_settings(self.settings)
         self.settings.setValue("pdf/markings-enabled", self.markings_enabled.isChecked())
         self.settings.setValue("pdf/markings-scope", self.marking_scope.currentText())
+        self.settings.setValue("pdf/text-view", self.text_view_mode.currentText())
         for name, view in self.result_views.items():
             self.settings.setValue(f"headers/{name}", view.table.horizontalHeader().saveState())
         self.settings.sync(); super().closeEvent(event)
@@ -317,14 +331,37 @@ class MainWindow(QMainWindow):
 
     def load_pdf(self, path: Path):
         document = extract_pdf(path)
-        self.page_texts = {page.number: page.text for page in document.pages}
+        self._text_variants = {}
+        try:
+            preparation = json.loads(document.metadata.get("text_preparation_json", ""))
+        except (TypeError, ValueError):
+            preparation = {}
+        for item in preparation.get("pages", ()) if isinstance(preparation, dict) else ():
+            if not isinstance(item, dict):
+                continue
+            number = int(item.get("page_number") or 0)
+            if number < 1:
+                continue
+            blocks = item.get("blocks") or ()
+            layout = str(item.get("layout_text") or "")
+            if not layout:
+                layout = "\n".join(str(block.get("text") or "") for block in blocks if isinstance(block, dict))
+            self._text_variants[number] = {
+                "Bereinigt": str(item.get("normalized_text") or ""),
+                "Layout": layout or str(item.get("normalized_text") or ""),
+                "Original": str(item.get("original_text") or ""),
+            }
+        if not self._text_variants:
+            self._text_variants = {page.number: {"Bereinigt": page.text, "Layout": page.text, "Original": page.text}
+                                   for page in document.pages}
+        self.page_texts = {number: values.get("Bereinigt", "") for number, values in self._text_variants.items()}
         self._pdf_text_cache.clear()
         self._marking_specs = []
         self._current_markings = []
         self._layer_markings = []
         self._selected_field_path = ""
         self._pending_pdf_selection = None
-        self.pdf_text_layer.set_pages(self.page_texts)
+        self.pdf_text_layer.set_page_variants(self._text_variants)
         if self.pdf_document:
             reader = PdfReader(str(path)); self.pdf_view.setPageRotations({index + 1: int(page.get("/Rotate", 0) or 0)
                                                                            for index, page in enumerate(reader.pages)})
@@ -335,6 +372,14 @@ class MainWindow(QMainWindow):
             self.pdf_view.setPlainText("\n\n".join(page.text for page in document.pages))
             self.page_label.setText(f"{len(document.pages)} Seite(n)")
             self.pdf_text_layer.set_field_markings([])
+
+    def _text_view_changed(self, mode: str):
+        self.pdf_text_layer.set_view_mode(mode)
+        # Clean/layout text shares the prepared text-layer coordinates. The
+        # untouched extractor output does not, so its offsets must not receive
+        # automatic parser markers.
+        self.pdf_text_layer.set_field_markings([] if mode == "Original" else self._layer_markings)
+
 
     # -- evidence-driven PDF markings -------------------------------------
 
@@ -558,6 +603,41 @@ class MainWindow(QMainWindow):
     def _show_field_analysis_help(self, row):
         if row is not None:
             FieldHelpDialog(row, self).exec()
+
+    def _show_standard_values(self):
+        """Show only values from the stored base STANDARD result.
+
+        An EXTENDED/COMPARE report still contains the unchanged base result in
+        ``result``.  No rule decisions, annotations or catalog-only rows enter
+        this view.
+        """
+        report = self._current_report()
+        if not isinstance(report.get("result"), dict):
+            if not self.current_pdf:
+                QMessageBox.information(self, "Alle gefundenen Werte",
+                                         "Bitte zuerst ein Dokument auswählen.")
+                return
+            answer = QMessageBox.question(
+                self, "STANDARD-Lauf erforderlich",
+                "Für dieses Dokument liegt noch kein STANDARD-Ergebnis vor. Jetzt STANDARD ausführen?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if answer == QMessageBox.Yes:
+                self.analyse(self.current_pdf, "STANDARD")
+            return
+        rows = build_standard_value_rows(report, self._catalog())
+        dialog = StandardValuesDialog(rows, report, self)
+        dialog.fieldActivated.connect(self._standard_value_activated)
+        self._standard_values_dialog = dialog
+        dialog.show(); dialog.raise_(); dialog.activateWindow()
+
+    def _standard_value_activated(self, row):
+        display = getattr(row, "display_row", None)
+        if display is None:
+            return
+        self._selected_field_path = display.path
+        self._field_activated(display)
+        self.field_analysis.select_field_path(display.path)
+        self.tabs.setCurrentWidget(self.field_analysis)
 
     def refresh_field_analysis(self):
         if not hasattr(self, "field_analysis"):

@@ -19,6 +19,7 @@ from typing import Any, Iterable
 PREPARATION_VERSION = "7.3.0"
 _REPLACEMENT = "\ufffd"
 _ARTIFACT_TOKEN = re.compile(r"\b[A-Z]{1,4}\d{4,10}\b")
+_AT_RUN = re.compile(r"@{8,}")
 _NUMBER = re.compile(r"[-+]?\d+(?:[,.]\d+)?")
 
 
@@ -64,6 +65,7 @@ class PagePreparation:
     blocks: tuple[TextBlock, ...] = ()
     mapping: str = "NONE"
     fallback_used: bool = False
+    layout_text: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -99,6 +101,8 @@ def _diagnose(text: str) -> tuple[str, ...]:
         diagnostics.append("UNICODE_REPLACEMENT_CHARACTER")
     if "SP010000" in text:
         diagnostics.append("REPEATED_SUSPICIOUS_TOKEN_SP010000")
+    if _AT_RUN.search(text):
+        diagnostics.append("REPEATED_AT_GLYPH_RUN")
     artifact_tokens = _ARTIFACT_TOKEN.findall(text)
     repeated = {token for token in artifact_tokens if artifact_tokens.count(token) >= 2}
     if repeated:
@@ -146,6 +150,9 @@ def _normalize(text: str) -> tuple[str, tuple[str, ...]]:
         for token in repeated:
             normalized = re.sub(rf"(?<!\w){re.escape(token)}(?!\w)", " ", normalized)
         diagnostics.append("REPEATED_TOKEN_REMOVED_WITH_CONTEXT")
+    if _AT_RUN.search(normalized):
+        normalized = _AT_RUN.sub(" ", normalized)
+        diagnostics.append("REPEATED_AT_GLYPH_RUN_REMOVED_WITH_CONTEXT")
     normalized = re.sub(r"[ \t]+", " ", normalized)
     normalized = re.sub(r" *\n *", "\n", normalized)
     return normalized, tuple(dict.fromkeys(diagnostics))
@@ -156,6 +163,35 @@ def _blocks(text: str, diagnostics: tuple[str, ...]) -> tuple[TextBlock, ...]:
     for match in re.finditer(r"[^\n]+", text):
         result.append(TextBlock(match.start(), match.end(), match.group(0), quality=_quality(match.group(0), diagnostics), diagnostics=diagnostics))
     return tuple(result)
+
+
+def _layout_from_spans(blocks: tuple[TextBlock, ...]) -> str:
+    """Reconstruct simple rows/columns from PDFium character boxes."""
+    chars = [span for block in blocks for span in block.spans if span.quad and span.text not in "\r\n"]
+    if not chars:
+        return ""
+    rows: list[list[TextSpan]] = []
+    for span in sorted(chars, key=lambda item: -sum(point[1] for point in item.quad) / 4):
+        y = sum(point[1] for point in span.quad) / 4
+        row = next((candidate for candidate in rows
+                    if abs(y - sum(point[1] for item in candidate for point in item.quad) / (4 * len(candidate))) <= 3), None)
+        if row is None:
+            rows.append([span])
+        else:
+            row.append(span)
+    lines: list[str] = []
+    for row in rows:
+        row.sort(key=lambda item: sum(point[0] for point in item.quad) / 4)
+        line = ""
+        previous_right = None
+        for span in row:
+            left = min(point[0] for point in span.quad)
+            if previous_right is not None and left - previous_right > 8:
+                line += " "
+            line += span.text
+            previous_right = max(point[0] for point in span.quad)
+        lines.append(line.rstrip())
+    return "\n".join(lines)
 
 
 def _pdfium_page(path: Path, page_number: int) -> tuple[str, tuple[TextBlock, ...], str] | None:
@@ -214,7 +250,8 @@ def prepare_pdf(path: str | Path, pages: Iterable[str], source_hash: str,
                     diagnostics.append(f"PAGE_{number}_FALLBACK_PDFIUM")
                 else:
                     diagnostics.append(f"PAGE_{number}_FALLBACK_NOT_BETTER")
+        layout_text = _layout_from_spans(blocks) or "\n".join(block.text for block in blocks) or normalized
         prepared.append(PagePreparation(number, original, normalized, extractor_id,
                                          extractor_version, quality, page_diagnostics,
-                                         blocks, mapping, fallback))
+                                         blocks, mapping, fallback, layout_text))
     return PreparedPdf(source_hash, tuple(prepared), diagnostics=tuple(diagnostics))

@@ -165,8 +165,8 @@ Ergänzt wurden Tests für:
 Aktuelle Suite-Ergebnisse:
 
 ```text
-portman-parsers: 123 passed
-portman-pdf-lab: 108 passed
+portman-parsers: 124 passed
+portman-pdf-lab: 113 passed
 ```
 
 Das angegebene Originaldokument
@@ -186,6 +186,25 @@ bevorzugte Variante.
 - Bei mehrdeutigen Textabgleichen wird keine grüne Koordinate erzeugt.
 - Die Aufbereitung verbessert Eingangstext und Evidence-Metadaten, ersetzt aber
   keine fachliche Parserregel und keine Golden-/Regressionfreigabe.
+
+## PDF-Textansichten
+
+Unterhalb der PDF-Ansicht stehen drei QSettings-persistente Ansichten zur
+Verfügung:
+
+- **Bereinigt**: aufbereiteter Text als Standardansicht.
+- **Layout**: vorbereitete Block-/Zeilenanordnung; bei vorhandenen PDFium-
+  Spannen wird deren Reihenfolge verwendet.
+- **Original**: unveränderter Extraktoroutput inklusive Artefakten.
+
+Die Originalansicht erhält keine automatischen Textlayer-Marker, weil deren
+Offsets nicht sicher mit dem bereinigten Text übereinstimmen. PDF-Auswahl,
+Kopieren, Kontextmenü, Zoom, Pan und direkte Feldzuordnung bleiben erhalten.
+
+Lange reine `@`-Glyphenfolgen werden nur als diagnostiziertes, bekanntes
+Artefaktsegment behandelt. Kurze oder gemischte `@`-Zeichen bleiben erhalten.
+Das Transformationsprotokoll enthält Diagnose und Entfernung; der Originaltext
+bleibt im Aufbereitungsdetail erhalten.
 
 Keine Änderungen an Portman V09/V10 wurden vorgenommen. Es wurden keine
 Commits, Pushes oder Merges ausgeführt.

@@ -40,7 +40,10 @@ TRADE_FIELDS = (
     FieldDefinition("security.name", "events[0].trades[0].security_name", "Wertpapiername", "Bezeichnung des Wertpapiers", requirement="REQUIRED", order=30),
     FieldDefinition("trade.quantity", "events[0].trades[0].quantity", "Stückzahl", "Gehandelte Stückzahl ohne Rundung", "DECIMAL", editor="DECIMAL", requirement="REQUIRED", normalizers=("DECIMAL_DE", "DECIMAL_EN"), order=40),
     FieldDefinition("trade.date", "events[0].trades[0].trade_date", "Geschäftsdatum", "Gedrucktes Geschäftsdatum", "DATE", requirement="REQUIRED", editor="DATE", normalizers=("DATE_DE", "DATE_ISO"), order=45),
+    FieldDefinition("trade.value_date", "events[0].trades[0].value_date", "Valuta", "Datum der Wertstellung des Wertpapiergeschäfts", "DATE", requirement="OPTIONAL", editor="DATE", order=47),
     FieldDefinition("trade.price", "events[0].trades[0].price", "Kurs", "Gedruckter Transaktionskurs", "DECIMAL", editor="AMOUNT", requirement="CONDITIONAL", condition={"op":"PRESENT","path":"events[0].trades[0].price_currency"}, normalizers=("DECIMAL_DE", "DECIMAL_EN"), order=50),
+    FieldDefinition("trade.gross_amount", "events[0].trades[0].gross_amount", "Bruttobetrag", "Bruttobetrag des Wertpapiergeschäfts vor Abzügen", "DECIMAL", editor="AMOUNT", requirement="OPTIONAL", order=52),
+    FieldDefinition("trade.settlement_amount", "events[0].trades[0].settlement_amount", "Netto-/Settlementbetrag", "Tatsächlicher Settlementbetrag nach den ausgewiesenen Zu- und Abzügen", "DECIMAL", editor="AMOUNT", requirement="OPTIONAL", order=53),
     FieldDefinition("trade.market_value", "events[0].trades[0].market_value", "Kurswert", "Gedruckter Kurswert; nie willkürlich berechnen", "DECIMAL", editor="AMOUNT", requirement="CONDITIONAL", condition={"op":"PRESENT","path":"events[0].trades[0].market_value"}, normalizers=("DECIMAL_DE", "DECIMAL_EN"), order=55),
     FieldDefinition("trade.amount", "events[0].cash_movements[0].amount", "Settlement", "Tatsächlicher oder erwarteter Geldbetrag gemäß Status", "DECIMAL", editor="AMOUNT", requirement="REQUIRED", normalizers=("DECIMAL_DE", "DECIMAL_EN"), order=60),
     FieldDefinition("trade.currency", "events[0].cash_movements[0].currency", "Settlement-Währung", "Ausgewiesene Währung", requirement="REQUIRED", order=65),
@@ -53,9 +56,20 @@ TECHNICAL_FIELDS = (
     FieldDefinition("technical.evidence", "evidence", "Evidence", "PDF-Fundstellen der Erkennung", "MULTILINE", requirement="TECHNICAL", editor="MULTILINE", evidence_required=False, order=910),
 )
 
+
+def normalize_field_path(path: str) -> str:
+    """Canonical lookup form for indexed DTO paths and FieldValue wrappers."""
+    normalized = re.sub(r"\[\d+\]", "[]", str(path or ""))
+    return normalized[:-len(".value")] if normalized.endswith(".value") else normalized
+
 ACCOUNT_FIELDS = (
     FieldDefinition("account.id", "accounts[0].account_id", "Konto", "Kontokennung", requirement="REQUIRED", order=10),
-    FieldDefinition("account.iban", "accounts[0].iban.value", "IBAN", "Internationale Kontokennung", "IBAN", requirement="OPTIONAL", validation=r"^[A-Z]{2}[0-9A-Z]{13,32}$", editor="IBAN", order=20),
+    FieldDefinition("account.bank_name", "accounts[0].bank_name.value", "Bankname", "Name der Bank, bei der das Konto geführt wird", requirement="OPTIONAL", order=15),
+    FieldDefinition("account.iban", "accounts[0].iban.value", "IBAN", "Internationale Bankkontonummer des Kontos", "IBAN", requirement="OPTIONAL", validation=r"^[A-Z]{2}[0-9A-Z]{13,32}$", editor="IBAN", order=20),
+    FieldDefinition("account.name", "accounts[0].account_name.value", "Kontoname", "Bezeichnung des Kontos", requirement="OPTIONAL", order=22),
+    FieldDefinition("account.number", "accounts[0].account_number.value", "Kontonummer", "Kontonummer des Kontos", requirement="OPTIONAL", order=24),
+    FieldDefinition("account.bic", "accounts[0].bic.value", "BIC", "Internationale Kennung des kontoführenden Instituts", requirement="OPTIONAL", order=26),
+    FieldDefinition("account.currency", "accounts[0].currency.value", "Kontowährung", "Währung des Kontos", requirement="OPTIONAL", order=28),
     FieldDefinition("booking.date", "events[0].event_date", "Buchungsdatum", "Datum der Kontobuchung", "DATE", requirement="REQUIRED", editor="DATE", order=30),
     FieldDefinition("booking.amount", "events[0].cash_movements[0].amount", "Betrag", "Gebuchter Betrag", "DECIMAL", requirement="REQUIRED", editor="AMOUNT", order=40),
     FieldDefinition("booking.currency", "events[0].cash_movements[0].currency", "Währung", "Buchungswährung", requirement="REQUIRED", order=50),
@@ -91,6 +105,8 @@ DIVIDEND_FIELDS = (
     FieldDefinition("payment.currency", "events[0].cash_movements[0].currency", "Währung", "Zahlungswährung", requirement="REQUIRED", order=40),
     FieldDefinition("payment.status", "events[0].cash_movements[0].status", "Cashflowstatus", "ACTUAL oder EXPECTED", requirement="REQUIRED", order=50),
     FieldDefinition("payment.taxes", "events[0].tax_events", "Steuern", "Nur ausgewiesene Steuerinformationen", "LIST", requirement="OPTIONAL", order=60),
+    FieldDefinition("tax.amount", "events[0].tax_events[0].components[0].amount", "Steuerbetrag", "Ausgewiesener Betrag einer Steuerkomponente", "DECIMAL", requirement="OPTIONAL", editor="AMOUNT", order=61),
+    FieldDefinition("fee.amount", "events[0].fee_events[0].amount", "Gebührenbetrag", "Ausgewiesener Betrag einer Gebührenposition", "DECIMAL", requirement="OPTIONAL", editor="AMOUNT", order=62),
 )
 
 DEFAULT_FIELDS = TECHNICAL_FIELDS
@@ -119,6 +135,14 @@ class FieldCatalog:
 
     def field(self, path_or_id: str) -> FieldDefinition | None:
         return next((item for item in self.fields if item.path == path_or_id or item.field_id == path_or_id), None)
+
+    def field_for_description(self, path: str) -> FieldDefinition | None:
+        direct = self.field(path)
+        if direct is not None:
+            return direct
+        normalized = normalize_field_path(path)
+        return next((item for item in self.visible_fields()
+                     if normalize_field_path(item.path) == normalized), None)
 
     def visible_fields(self):
         return tuple(sorted((item for item in self.fields if item.visible), key=lambda item: item.order))
