@@ -58,10 +58,10 @@ def marking_window(tmp_path, settings=None):
     return window, path, report
 
 
-def test_gui_smoke_has_three_panes_and_required_tabs():
+def test_gui_smoke_has_resizable_panes_and_required_tabs():
     application = app(); window = MainWindow()
     assert isinstance(window.centralWidget(), QSplitter)
-    assert window.centralWidget().count() == 3
+    assert window.centralWidget().count() == 4
     assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == list(window.TAB_NAMES)
     window.close(); application.processEvents()
 

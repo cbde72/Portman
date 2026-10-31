@@ -94,7 +94,8 @@ class MappingResult:
 
 class FieldMappingDialog(QDialog):
     def __init__(self, catalog: FieldCatalog, catalog_store: CatalogStore, context: dict,
-                 selected_text: str, page_number: int, coordinates=None, define_new=False, parent=None):
+                 selected_text: str, page_number: int, coordinates=None, define_new=False, parent=None,
+                 preselect="", quick=False):
         super().__init__(parent); self.catalog = catalog; self.catalog_store = catalog_store; self.context = context
         self.selected_text, self.page_number, self.coordinates = selected_text, page_number, coordinates
         self.mapping_result = None; self.setWindowTitle("PDF-Text einem Feld zuordnen"); self.resize(720, 620)
@@ -105,7 +106,7 @@ class FieldMappingDialog(QDialog):
                              ("Regelmodus", context.get("rule_mode", "STANDARD"))):
             field = QLineEdit(str(value)); field.setReadOnly(True); form.addRow(label, field)
         self.field_choice = QComboBox()
-        for field in catalog.visible_fields(): self.field_choice.addItem(f"{field.label} — {field.path}", field.field_id)
+        for field in catalog.visible_fields(): self.field_choice.addItem(field.label if quick else f"{field.label} — {field.path}", field.field_id)
         self.field_choice.currentIndexChanged.connect(self._field_changed); form.addRow("Zielfeld", self.field_choice)
         self.new_field = QCheckBox("Neues optionales Erweiterungsfeld")
         self.new_field.setChecked(define_new); self.new_field.toggled.connect(self._new_toggled); form.addRow(self.new_field)
@@ -119,10 +120,25 @@ class FieldMappingDialog(QDialog):
         layout.addLayout(form); buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._accept); buttons.rejected.connect(self.reject); layout.addWidget(buttons)
         self.help_shortcut = QShortcut(QKeySequence.HelpContents, self); self.help_shortcut.activated.connect(self.show_help)
-        self._new_toggled(define_new); self._field_changed()
+        self._new_toggled(define_new); self._preselect(preselect); self._field_changed()
+        if quick:
+            self.field_choice.setEnabled(False); self.new_field.hide(); self.new_id.hide(); self.new_label.hide()
 
     def current_definition(self):
         return self.catalog.field(self.field_choice.currentData())
+
+    def _preselect(self, value: str) -> bool:
+        """Select the field handed over by the field analysis or training tab."""
+        value = str(value or "").strip()
+        if not value:
+            return False
+        for index in range(self.field_choice.count()):
+            field_id = self.field_choice.itemData(index)
+            definition = self.catalog.field(field_id)
+            if field_id == value or (definition is not None and definition.path == value):
+                self.field_choice.setCurrentIndex(index)
+                return True
+        return False
 
     def _clear_editor(self):
         while self.editor_layout.count():

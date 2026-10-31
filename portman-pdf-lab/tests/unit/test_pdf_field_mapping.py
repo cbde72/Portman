@@ -11,6 +11,8 @@ from portman_pdf_lab.training import SafeRuleEngine
 from portman_pdf_lab.ui.field_mapping import EditorFactory, FieldMappingDialog, catalog_help_html
 from portman_pdf_lab.ui.pdf_text_layer import PdfTextLayer
 from portman_pdf_lab.ui.result_view import DisplayRow, RecognitionStatus, ResultTable
+from portman_pdf_lab.ui.field_analysis import build_field_analysis_rows
+from portman_parsers.registry.allowlist import APPROVED_PLUGINS
 
 
 def app():
@@ -89,3 +91,27 @@ def test_label_value_rule_generalizes_to_two_values():
 def test_result_table_colors_entire_row():
     table = ResultTable(); table.set_rows([DisplayRow("x", "X", None, status=RecognitionStatus.MISSING)])
     assert all(table.item(0, column).background().color().alpha() > 0 for column in range(table.columnCount()))
+
+
+def test_every_implemented_handler_has_a_specific_nontechnical_catalog(tmp_path):
+    store = CatalogStore(tmp_path)
+    for plugin in APPROVED_PLUGINS:
+        for handler in plugin.handlers:
+            if not handler.implemented:
+                continue
+            catalog = store.catalog(plugin.group.casefold().replace(" / ", "-"), plugin.plugin_id, handler.document_type, "*")
+            assert any(field.requirement != "TECHNICAL" for field in catalog.fields), (plugin.plugin_id, handler.handler_id)
+
+
+def test_trade_dependencies_and_account_document_do_not_create_security_errors(tmp_path):
+    store = CatalogStore(tmp_path)
+    catalog = store.catalog("comdirect", "user.comdirect-ertraege", "comdirect Wertpapierkauf", "*")
+    result = {"events":[{"trades":[{"isin":"DE0008474511","evidence_ids":["ev"]}]}],
+              "evidence":[{"evidence_id":"ev","page_number":1,"excerpt":"ISIN DE0008474511"}]}
+    rows = {row.field_id: row for row in build_field_analysis_rows({"result":result}, catalog)}
+    assert rows["security.isin"].status == RecognitionStatus.RECOGNIZED
+    assert rows["security.wkn"].status == RecognitionStatus.NOT_APPLICABLE
+    assert rows["trade.venue"].status == RecognitionStatus.NOT_APPLICABLE
+    assert rows["trade.quantity"].status == RecognitionStatus.MISSING
+    account = store.catalog("bank of scotland", "user.bank-of-scotland-kontoauszug", "Bank of Scotland Kontoauszug", "*")
+    assert not any(field.field_id.startswith(("security.", "trade.")) for field in account.fields)

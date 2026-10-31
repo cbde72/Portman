@@ -63,7 +63,9 @@ class TrainingService:
         candidate = self.repository.rule_candidate(version["candidate_id"])
         document = self.repository.document(candidate["document_id"])
         latest_run = self.repository.runs_for_document(candidate["document_id"])[-1] if self.repository.runs_for_document(candidate["document_id"]) else None
-        profile = RuleProfile(f"{candidate['parser_id']}.{candidate['handler_id']}.user", document["bank"] or "comdirect",
+        profile_id = f"{candidate['parser_id']}.{candidate['handler_id']}.user"
+        persisted = self.profile_store.directory / f"{profile_id}.v{version['profile_version']}.yaml"
+        profile = self.profile_store.load(persisted) if persisted.exists() else RuleProfile(profile_id, document["bank"] or "comdirect",
                               candidate["parser_id"], document["document_type"] or candidate["handler_id"], candidate["handler_id"],
                               "annotated", version["profile_version"], latest_run["parser_version"] if latest_run else "unknown",
                               tuple(version["rules"]), approved_by=version["created_by"]).sealed()

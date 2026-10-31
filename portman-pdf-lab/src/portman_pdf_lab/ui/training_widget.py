@@ -1,5 +1,8 @@
 """Compact four-area local parser-training UI."""
 
+from __future__ import annotations
+
+from dataclasses import replace
 import json
 from pathlib import Path
 
@@ -12,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from portman_pdf_lab.storage import ReferenceRepository
-from portman_pdf_lab.training import AnnotationKind, Decision, TrainingService
+from portman_pdf_lab.training import AnnotationKind, Decision, TrainingContext, TrainingService
 from portman_pdf_lab.ui.result_view import (
     DisplayRow, RecognitionStatus, _is_missing, enrich_rows, flatten_result, scalar_text,
 )
@@ -27,6 +30,29 @@ def _flatten(value, prefix=""):
             yield from _flatten(item, f"{prefix}[{index}]")
     else:
         yield prefix, value
+
+
+def _selection_value(text: str) -> str:
+    """Normalize a direct PDF selection into a candidate field value.
+
+    Users often select the whole printed line (``Handelsplatz: XETRA``).  The
+    value after a short label is the actual field content; line breaks and the
+    label itself are kept in the annotation's original PDF text, not in the
+    normalized reference value.
+    """
+    clean = str(text or "").replace("\u2029", "\n").replace("\r\n", "\n").strip()
+    if clean and "\n" not in clean and ":" in clean:
+        label, _, value = clean.partition(":")
+        if 0 < len(label.strip()) <= 48 and value.strip():
+            return value.strip()
+    return clean
+
+
+def _annotation_kind(data_type: str, fallback="TEXT") -> str:
+    return {"DECIMAL": "AMOUNT", "AMOUNT": "AMOUNT", "DATE": "DATE",
+            "ISIN": "SECURITY_ID", "WKN": "SECURITY_ID", "QUANTITY": "QUANTITY",
+            "PRICE": "PRICE", "MARKET_VALUE": "MARKET_VALUE", "MULTILINE": "MULTILINE"}.get(
+                str(data_type or "").upper(), fallback)
 
 
 class CopyableTable(QTableWidget):
@@ -60,6 +86,9 @@ class CopyableTable(QTableWidget):
 
 class TrainingWidget(QWidget):
     fieldActivated = Signal(object)
+    trainingChanged = Signal(object)
+    selectionCaptured = Signal(object)
+    returnRequested = Signal()
 
     def __init__(self, repository_path, parent=None):
         super().__init__(parent)
@@ -70,7 +99,10 @@ class TrainingWidget(QWidget):
         self.candidate_id = None
         self.version_id = None
         self.settings = None
+        self.context: TrainingContext | None = None
+        self.pending_selection = None
         self._binding = False
+        self._applying_context = False
         self._display_rows: list[DisplayRow] = []
         self._build()
 
@@ -117,22 +149,30 @@ class TrainingWidget(QWidget):
 
         controls = QGroupBox("D. Trainingssteuerung")
         form = QFormLayout(controls)
+        self.context_label = QLabel("Kein Feld aus der Feldanalyse ausgewählt")
+        self.context_label.setWordWrap(True)
         self.field_path = QLineEdit(); self.reference_value = QLineEdit()
         self.parser = QComboBox(); self.parser.addItems(("user.comdirect-ertraege", "portfolio-performance.comdirect"))
         self.mode = QComboBox(); self.mode.addItems(("STANDARD", "EXTENDED", "COMPARE"))
         self.kind = QComboBox(); self.kind.addItems([item.value for item in AnnotationKind])
         self.result = QTextEdit(); self.result.setReadOnly(True); self.result.setMaximumHeight(150)
+        form.addRow("Kontext", self.context_label)
         form.addRow("Parser", self.parser); form.addRow("Regelmodus", self.mode)
         form.addRow("Feldpfad", self.field_path); form.addRow("Referenzwert", self.reference_value); form.addRow("Annotation", self.kind)
         actions = QGridLayout()
-        for index, (label, method) in enumerate((("Feld bestätigen", self.confirm_field), ("Feld korrigieren", self.correct_field),
-                              ("Als unbekannt", self.unknown_field), ("PDF-Text zuordnen", self.map_text),
-                              ("Referenzfall speichern", self.save_golden), ("Regelvorschlag", self.suggest_rule),
-                              ("Vorschlag testen", self.test_rule), ("Vorschlag freigeben", self.approve_rule),
-                              ("Vorschlag verwerfen", self.reject_rule), ("Vorherige Version", self.rollback),
-                              ("Profil aktivieren", self.activate_profile), ("Profil deaktivieren", self.deactivate_profile),
-                              ("Profil exportieren", self.export_profile), ("Profil importieren", self.import_profile),
-                              ("Qualität", self.show_quality))):
+        for index, (label, method) in enumerate((
+                ("Feld bestätigen", self.confirm_field), ("Feld korrigieren", self.correct_field),
+                ("Fehlendes Feld ergänzen", self.add_missing), ("Als unbekannt", self.unknown_field),
+                ("PDF-Text zuordnen", self.map_text),
+                ("Auswahl übernehmen", self.assign_selection), ("Fehlen bestätigen", self.confirm_absence),
+                ("Nicht anwendbar", self.not_applicable), ("Annotation bearbeiten", self.edit_annotation),
+                ("Annotation löschen", self.delete_annotation), ("Referenzfall speichern", self.save_golden),
+                ("Regelvorschlag", self.suggest_rule), ("Vorschlag testen", self.test_rule),
+                ("Vorschlag freigeben", self.approve_rule), ("Vorschlag verwerfen", self.reject_rule),
+                ("Vorherige Version", self.rollback), ("Profil aktivieren", self.activate_profile),
+                ("Profil deaktivieren", self.deactivate_profile), ("Profil exportieren", self.export_profile),
+                ("Profil importieren", self.import_profile), ("Qualität", self.show_quality),
+                ("Zur Feldanalyse", self.return_to_analysis))):
             button = QPushButton(label); button.clicked.connect(method); actions.addWidget(button, index // 3, index % 3)
         form.addRow(actions); form.addRow("Test/Vergleich", self.result)
 
@@ -168,6 +208,10 @@ class TrainingWidget(QWidget):
     def bind_report(self, report, document_path=None, catalog=None):
         self._binding = True
         try:
+            if not self._applying_context:
+                # A new document invalidates any handoff from the previous one.
+                self.context = None
+                self.pending_selection = None
             self.fields.setSortingEnabled(False)
             previous_path = self.field_path.text()
             self.report = report; self.document_path = document_path
@@ -236,6 +280,168 @@ class TrainingWidget(QWidget):
         if previous_path:
             self.select_field_path(previous_path)
 
+    def apply_training_context(self, context: TrainingContext | None, catalog=None, document_path=None):
+        """Select a field analysis row inside the existing training workflow.
+
+        Bank, parser, handler, document type, field path, current value,
+        evidence and the annotation/candidate state all arrive in one immutable
+        context.  No second training database or parallel rule engine is used.
+        """
+        if context is None:
+            return
+        self._applying_context = True
+        try:
+            self.context = context
+            report = getattr(context, "report", None) or self.report
+            if report:
+                self.bind_report(report, document_path or self.document_path or context.document_id, catalog)
+            if context.parser_id:
+                index = self.parser.findText(context.parser_id)
+                if index < 0:
+                    self.parser.addItem(context.parser_id)
+                    index = self.parser.count() - 1
+                self.parser.setCurrentIndex(index)
+            if context.rule_mode in {self.mode.itemText(i) for i in range(self.mode.count())}:
+                self.mode.setCurrentText(context.rule_mode)
+            self.field_path.setText(context.field_path)
+            self.kind.setCurrentText(_annotation_kind(context.data_type, self.kind.currentText()))
+            evidence = context.evidence if isinstance(context.evidence, dict) else {}
+            original = context.original_text or str(evidence.get("excerpt") or "")
+            self.source_text.setPlainText(original)
+            page = int(context.page_number or 0)
+            self.page_label.setText(
+                f"Seite {page} – Trainingskontext aus Feldanalyse" if page
+                else "Seite 1 – Trainingskontext aus Feldanalyse")
+            self.annotation_id = context.annotation_id
+            self.candidate_id = context.candidate_id
+            self.context_label.setText(
+                f"{context.field_name or context.field_path} · "
+                f"{context.requirement or 'Pflichtstatus unbekannt'} · {context.training_status}")
+            # Select first because _select_field() derives its own default from
+            # the training table; the explicit reference/annotation from the
+            # field analysis must win afterwards.
+            self.select_field_path(context.field_path)
+            self.field_path.setText(context.field_path)
+            value = context.reference_value
+            if _is_missing(value):
+                value = context.current_value
+            self.reference_value.setText("" if _is_missing(value) else scalar_text(value))
+            self.result.setPlainText(
+                f"Feldanalyse-Kontext: {context.field_path} "
+                f"(Parser {context.parser_id or '—'}, Seite {page or '—'})")
+        finally:
+            self._applying_context = False
+
+    def apply_pdf_selection(self, selection):
+        """Keep a direct PDF selection ready for the preselected field."""
+        if selection is None:
+            return
+        self.pending_selection = selection
+        text = str(getattr(selection, "text", "") or "")
+        page = int(getattr(selection, "page_number", 0) or 0)
+        self.source_text.setPlainText(text)
+        if page:
+            self.page_label.setText(f"Seite {page} – PDF-Auswahl für {self.field_path.text() or 'Feld'}")
+        if self.context is not None:
+            self.context = self.context.with_selection(selection)
+        # A direct selection is the strongest source for the reference value:
+        # the user confirms it with one click, so a stale parser value must not
+        # silently survive in the editable field.
+        if text:
+            self.reference_value.setText(_selection_value(text))
+        self.result.setPlainText(
+            f"PDF-Auswahl übernommen: Seite {page or '—'}, {len(text)} Zeichen. "
+            "Mit „Auswahl übernehmen“ direkt dem Feld zuordnen.")
+        self.selectionCaptured.emit(selection)
+
+    def _announce(self, kind: str):
+        payload = {"kind": kind, "field_path": self.field_path.text(),
+                   "annotation_id": self.annotation_id, "candidate_id": self.candidate_id,
+                   "version_id": self.version_id, "context": self.context}
+        self.trainingChanged.emit(payload)
+
+    def _current_values(self):
+        run = self.repository().run(self.report["run_id"])
+        context = self.context
+        parser_id = context.parser_id if context and context.parser_id else run["plugin_id"]
+        handler_id = context.handler_id if context and context.handler_id else run["handler_id"]
+        return run, parser_id, handler_id
+
+    def _reference_input(self):
+        raw = self.reference_value.text()
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return raw
+
+    def _store(self, decision: Decision):
+        if not self.report or not self.report.get("run_id"):
+            raise ValueError("first analyze and store a PDF")
+        run, parser_id, handler_id = self._current_values()
+        context = self.context
+        reference_value = self._reference_input()
+        kind = _annotation_kind(context.data_type if context else "", self.kind.currentText())
+        page = int(context.page_number or 0) if context else 0
+        original_text = (context.original_text if context and context.original_text else self._selection())
+        coordinates = context.coordinates if context else None
+        if decision in {Decision.MISSING, Decision.NOT_APPLICABLE}:
+            kind = "MISSING" if decision == Decision.MISSING else "NOT_APPLICABLE"
+            reference_value = None
+            original_text = original_text if decision == Decision.MISSING else ""
+        review = "APPROVED" if decision in {Decision.CONFIRMED, Decision.CORRECTED} else "IN_REVIEW"
+        if self.annotation_id:
+            self.repository().update_annotation(self.annotation_id, reference_value, decision.value,
+                                                review, "GUI user", "GUI training update")
+            message = f"Annotation {self.annotation_id} aktualisiert"
+        else:
+            self.annotation_id = self.repository().create_annotation(
+                run["document_id"], parser_id, handler_id, max(1, page), original_text,
+                self.field_path.text(), reference_value, kind, decision.value, review,
+                "GUI user", coordinates)
+            message = f"Annotation {self.annotation_id} gespeichert"
+        self.result.setPlainText(message)
+        self._announce("annotation")
+
+    def assign_selection(self):
+        def action():
+            if self.pending_selection is None:
+                raise ValueError("Bitte zuerst Text im PDF markieren")
+            if not self.field_path.text().strip():
+                raise ValueError("Bitte zuerst ein Zielfeld auswählen")
+            self._store(Decision.CONFIRMED)
+        self._guard(action)
+
+    def confirm_absence(self):
+        self._guard(lambda: self._store(Decision.MISSING))
+
+    def not_applicable(self):
+        self._guard(lambda: self._store(Decision.NOT_APPLICABLE))
+
+    def edit_annotation(self):
+        def action():
+            if not self.annotation_id:
+                raise ValueError("Keine Annotation ausgewählt")
+            self.repository().update_annotation(self.annotation_id, self._reference_input(),
+                                                Decision.CORRECTED.value, "APPROVED", "GUI user",
+                                                "Edited in training")
+            self.result.setPlainText(f"Annotation {self.annotation_id} bearbeitet")
+            self._announce("annotation")
+        self._guard(action)
+
+    def delete_annotation(self):
+        def action():
+            if not self.annotation_id:
+                raise ValueError("Keine Annotation ausgewählt")
+            self.repository().deactivate_annotation(self.annotation_id, "GUI user", "Deleted in training")
+            annotation_id = self.annotation_id
+            self.annotation_id = None
+            self.result.setPlainText(f"Annotation {annotation_id} gelöscht")
+            self._announce("annotation")
+        self._guard(action)
+
+    def return_to_analysis(self):
+        self.returnRequested.emit()
+
     def _apply_field_filter(self):
         wanted = {"Nur erkannte": RecognitionStatus.RECOGNIZED.value, "Nur fehlende": RecognitionStatus.MISSING.value,
                   "Nur zu prüfende": RecognitionStatus.REVIEW.value}.get(self.field_filter.currentText())
@@ -277,7 +483,37 @@ class TrainingWidget(QWidget):
             else:
                 selected = standard
         self.reference_value.setText(selected)
-        if display is not None:
+        if not self._applying_context:
+            self.annotation_id = None
+            self.candidate_id = None
+            if self.context is not None and display is not None:
+                evidence = display.evidence if isinstance(display.evidence, dict) else {}
+                try:
+                    page = int(display.page or evidence.get("page_number") or 0)
+                except (TypeError, ValueError, OverflowError):
+                    page = 0
+                # The document/parser part of the handoff stays valid, but all
+                # field-specific data must follow the newly selected row.
+                self.context = replace(
+                    self.context,
+                    field_path=display.path,
+                    field_id=display.path,
+                    field_name=display.name,
+                    requirement=display.requirement or self.context.requirement,
+                    data_type=display.data_type,
+                    current_value=display.value,
+                    reference_value=None,
+                    evidence=display.evidence,
+                    page_number=page,
+                    original_text=str(evidence.get("excerpt") or ""),
+                    selected_text="",
+                    coordinates=None,
+                    annotation_id=None,
+                    candidate_id=None,
+                    candidate_status="",
+                    training_status="Untrainiert",
+                )
+        if display is not None and not self._applying_context:
             self.fieldActivated.emit(display)
 
     def _field_item_changed(self, item):
@@ -308,16 +544,15 @@ class TrainingWidget(QWidget):
         cursor = self.source_text.textCursor(); selected = cursor.selectedText().replace("\u2029", "\n")
         return selected or self.source_text.toPlainText()
 
-    def _store(self, decision):
-        if not self.report or not self.report.get("run_id"): raise ValueError("first analyze and store a PDF")
-        run = self.repository().run(self.report["run_id"])
-        value = self.reference_value.text()
-        try: value = json.loads(value)
-        except json.JSONDecodeError: pass
-        self.annotation_id = self.repository().create_annotation(run["document_id"], run["plugin_id"], run["handler_id"],
-            1, self._selection(), self.field_path.text(), value, self.kind.currentText(), decision.value,
-            "APPROVED" if decision in {Decision.CONFIRMED, Decision.CORRECTED} else "IN_REVIEW", "GUI user")
-        self.result.setPlainText(f"Annotation {self.annotation_id} gespeichert")
+    def add_missing(self):
+        """Store a value supplied for a previously missing field."""
+        def action():
+            if not self.field_path.text().strip():
+                raise ValueError("Bitte zuerst ein Zielfeld auswählen")
+            if not self.reference_value.text().strip() and self.pending_selection is None:
+                raise ValueError("Bitte den fehlenden Wert eintragen oder im PDF markieren")
+            self._store(Decision.CORRECTED)
+        self._guard(action)
 
     def confirm_field(self): self._guard(lambda: self._store(Decision.CONFIRMED))
     def correct_field(self): self._guard(lambda: self._store(Decision.CORRECTED))
@@ -332,6 +567,7 @@ class TrainingWidget(QWidget):
                 "annotated", self.report["result"]["plugin_version"], {annotation["field_path"]: annotation["reference_value"]}, "GUI user")
             self.repository().decide_golden(golden, "APPROVED", "GUI user", "Explicit GUI confirmation")
             self.result.setPlainText(f"Golden {golden} fachlich freigegeben")
+            self._announce("golden")
         self._guard(action)
 
     def suggest_rule(self):
@@ -339,32 +575,53 @@ class TrainingWidget(QWidget):
             if not self.annotation_id: raise ValueError("save an annotation first")
             self.candidate_id = TrainingService(self.repository()).suggest_rule(self.annotation_id, "GUI user")
             self.result.setPlainText(f"Regelkandidat: {self.candidate_id}" if self.candidate_id else "Kein sicherer Vorschlag möglich")
+            self._announce("candidate")
         self._guard(action)
 
     def test_rule(self):
-        self._guard(lambda: self.result.setPlainText(json.dumps(TrainingService(self.repository()).test_candidate(self.candidate_id, "GUI user"), ensure_ascii=False, indent=2)))
+        def action():
+            result = TrainingService(self.repository()).test_candidate(self.candidate_id, "GUI user")
+            self.result.setPlainText(json.dumps(result, ensure_ascii=False, indent=2))
+            self._announce("rule_test")
+        self._guard(action)
 
     def approve_rule(self):
         def action():
             self.version_id = TrainingService(self.repository()).approve(self.candidate_id, "GUI user", "Explicit approval")
             self.result.setPlainText(f"Regelprofil-Version {self.version_id} freigegeben")
+            self._announce("approved")
         self._guard(action)
 
     def reject_rule(self):
-        self._guard(lambda: TrainingService(self.repository()).reject(self.candidate_id, "GUI user", "Rejected in GUI"))
+        def action():
+            TrainingService(self.repository()).reject(self.candidate_id, "GUI user", "Rejected in GUI")
+            self.result.setPlainText(f"Regelkandidat {self.candidate_id} verworfen")
+            self._announce("rejected")
+        self._guard(action)
 
     def rollback(self):
-        self._guard(lambda: self.result.setPlainText(f"Wiederhergestellt als Version {self.repository().rollback_rule_version(self.version_id, 'GUI user', 'GUI rollback')}"))
+        def action():
+            self.result.setPlainText(f"Wiederhergestellt als Version {self.repository().rollback_rule_version(self.version_id, 'GUI user', 'GUI rollback')}")
+            self._announce("rollback")
+        self._guard(action)
 
     def show_quality(self):
         parser_id = self.report.get("result", {}).get("plugin_id", "") if self.report else ""
         self.result.setPlainText(json.dumps(self.repository().training_metrics(parser_id), ensure_ascii=False, indent=2))
 
     def activate_profile(self):
-        self._guard(lambda: self.result.setPlainText(f"Aktiv: {TrainingService(self.repository()).activate(self.version_id).profile_id}"))
+        def action():
+            profile_id = TrainingService(self.repository()).activate(self.version_id).profile_id
+            self.result.setPlainText(f"Aktiv: {profile_id}")
+            self._announce("activated")
+        self._guard(action)
 
     def deactivate_profile(self):
-        self._guard(lambda: TrainingService(self.repository()).deactivate(self.version_id))
+        def action():
+            TrainingService(self.repository()).deactivate(self.version_id)
+            self.result.setPlainText(f"Profil für Version {self.version_id} deaktiviert")
+            self._announce("deactivated")
+        self._guard(action)
 
     def export_profile(self):
         def action():

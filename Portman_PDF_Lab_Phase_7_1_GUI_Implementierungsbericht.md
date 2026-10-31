@@ -240,6 +240,55 @@ Interaktion:
 - Markierungen sind transparente Überlagerungen. Das Original-PDF wird weder
   verändert noch neu geschrieben.
 
+### Bugfix: `'tuple' object has no attribute 'x'`
+
+**Ursache:** `_screen_polygon()` erwartete für jeden Eckpunkt ein Objekt mit
+`x()`/`y()`-Methoden. Tatsächlich erreichten die Funktion drei Formate:
+
+- `QPdfSelection.bounds()` liefert `QPointF`-Polygone,
+- aufgelöste Markierungen speichern Quads als Tupel von `(x, y)`-Tupeln,
+- persistierte Annotationen liefern verschachtelte `[[x, y], ...]`-Listen.
+
+Beim Zeichnen gespeicherter Annotationskoordinaten und beim Aufruf über
+`markings_at()` aus `mouseMoveEvent()` wurden die Listenpunkte unverändert an
+`point.x()` übergeben. Daraus entstand
+`AttributeError: 'tuple' object has no attribute 'x'`. Eine einzige fehlerhafte
+Annotation konnte damit die PDF-Anzeige beziehungsweise jede Mausbewegung
+abbrechen.
+
+**Korrektur:**
+
+- Zentrale Funktion `_as_point()` normalisiert `QPointF`, `QPoint`, Tupel,
+  zweielementige Listen und `{"x": ..., "y": ...}`-Mappings zu `QPointF`.
+- Nur endliche Zahlen werden akzeptiert; `None`, boolesche Werte, falsche
+  Längen, nicht numerische Strings sowie `NaN`/`Inf` werden kontrolliert
+  zurückgewiesen.
+- `_screen_polygon()` validiert das gesamte Polygon. Ungültige oder
+  unvollständige Quads liefern ein leeres `QPolygonF`, werden mit Seite,
+  Feldpfad und Quad-Index protokolliert und weder gezeichnet noch für die
+  Treffererkennung verwendet.
+- `_pdf_point()` verwendet dieselbe Normalisierung für Mauspositionen.
+- Gespeicherte Annotationen werden beim Hinzufügen über `_coordinate_quads()`
+  normalisiert. Unbekannte Koordinatensysteme und strukturell ungültige
+  Annotationen werden protokolliert und übersprungen; Legacy-Rechtecke
+  `[x, y, width, height]` werden weiterhin in ein Polygon umgewandelt.
+- Zeichnen und Treffererkennung verwenden gemeinsam `_marking_polygons()`.
+  Damit ist die Transformation für Maus und Darstellung identisch.
+- Bildschirmpolygone werden je Markierung zwischengespeichert. Der Cache wird
+  bei Dokument-, Seiten-, Zoom- und Markierungswechsel sowie bei Resize
+  invalidiert. Scrollen verändert keine Canvas-Koordinaten und benötigt keine
+  Neuberechnung.
+- `focusMarking()` berechnet den Scroll-Zielpunkt aus demselben validierten
+  Polygon statt aus ungeprüften Rohpunkten.
+
+**Zoom, Rotation und DPI:** `QPdfDocument.pagePointSize()` liefert bereits die
+gedrehte Anzeigegröße; `QPdfSelection.bounds()` und gespeicherte Quads liegen im
+selben Anzeigekoordinatensystem. Zoom, Seitenrotation, Seitengröße und
+DPI-Skalierung reduzieren sich daher auf die Skalierung vom PDF-Punktraum auf
+die aktuelle Pixmap. Ein Rotationstest mit `/Rotate 90` bestätigt, dass
+Auswahlrechtecke innerhalb der gedrehten Seite liegen und per Maus getroffen
+werden.
+
 ### Performance und Robustheit
 
 - Seitentexte werden je Dokument zwischengespeichert; Markierungsänderungen und
@@ -282,6 +331,180 @@ erforderlich, optional sowie technisch/Qualität. Katalogfelder ergänzen die
 anwendbare Werte grau dargestellt. Die komplette Tabellenzeile erhält die
 Statusfarbe und behält zusätzlich den Statustext.
 
+## Parser-Feldanalyse und direkter Trainingsübergang
+
+### Ziel und Einordnung
+
+Der neue Tab `Feldanalyse` steht unmittelbar vor `Parsertraining` und bildet
+den vollständigen Katalog eines Parserlaufs ab. Er beantwortet drei getrennte
+Fragen:
+
+1. Welche Felder verlangt der Katalog (Pflicht, bedingt, optional, technisch)?
+2. Was hat der Parser tatsächlich extrahiert und womit ist es belegt?
+3. Welcher Trainingsstand existiert bereits für dieses Feld?
+
+Die Feldanalyse erzeugt keine Werte und keine wirtschaftlichen Buchungen. Sie
+liest ausschließlich den vorhandenen Parserlauf, den Katalog sowie die
+bestehenden Annotation-, Kandidaten- und Aktivierungstabellen.
+
+### Spalten und Zeilenquelle
+
+Die Tabelle zeigt `Feldgruppe`, `Feldname`, `Feldpfad`, `Pflichtstatus`,
+`Gefundener Wert`, `Erkennungsstatus`, `PDF-Seite`, `Evidence`, `Parserregel`,
+`Trainingsstatus` und `Aktion`.
+
+Primäre Zeilenquelle sind die sichtbaren Felder des versionierten Katalogs.
+Dadurch erscheinen auch reine Katalogfelder, die im Parserergebnis gar nicht
+vorkommen. Fehlt ein Katalog, wird auf die flach dargestellten Ergebnisfelder
+zurückgefallen. Dadurch bleibt ein ungewöhnlicher oder alter Lauf inspizierbar,
+ohne dass Zeilen erfunden werden.
+
+Die Zuordnung verwendet ausschließlich den stabilen Feldpfad. Sortierung,
+Filterung, Tabwechsel und erneutes Binden ändern keine Zeilenidentität; die
+Aktion wird nie über einen Tabellenzeilenindex gespeichert.
+
+### Status- und Farbmodell
+
+| Erkennungsstatus | Bedeutung | Farbe |
+| --- | --- | --- |
+| `ERKANNT` | Parserwert vorhanden und durch Evidence belegt | grün |
+| `NICHT ERKANNT` | Pflicht- oder bedingtes Pflichtfeld ohne gültigen Wert | rot |
+| `PRÜFEN` | Konflikt, ungültiger Wert oder mehrdeutige Evidence | gelb |
+| `NICHT ANWENDBAR` | optionales Feld ohne Wert oder fachlich nicht anwendbar | grau |
+
+Zusätzliche Statustexte unterscheiden ausdrücklich:
+
+- `Fehlt / nicht extrahiert` – der Parser hat keinen Wert geliefert; es gibt
+  keinen Nachweis, dass die Angabe im PDF fehlt.
+- `Nicht extrahiert (optional)` – optionales Feld ohne Parserwert; kein Fehler.
+- `Nachweislich nicht im PDF vorhanden` – nur wenn eine aktive Annotation die
+  Abwesenheit ausdrücklich bestätigt.
+- `Prüfen (STANDARD/EXTENDED-Konflikt)` – die Regelmodi liefern verschiedene
+  Werte.
+
+Eine bestätigte Referenz, ein Regelkandidat oder ein freigegebenes, aber noch
+nicht aktives Profil färbt eine Zeile niemals grün. Der Trainingsstatus ist
+eine separate Spalte:
+
+- `Untrainiert`
+- `Annotation`
+- `Abwesenheit bestätigt`
+- `Kandidat`, `Kandidat getestet`, `Kandidat verworfen`, `Kandidat ersetzt`
+- `Freigegeben`
+- `Freigegeben · Profil aktiv`
+
+Nur ein erneuter Parserlauf mit tatsächlich extrahiertem Wert und Evidence darf
+`ERKANNT` erzeugen. Bei aktiviertem EXTENDED-Profil gilt dasselbe: erst der
+Lauf, nicht die Aktivierung, verändert den Erkennungsstatus.
+
+### Trainingskontext
+
+Die Übergabe erfolgt über das unveränderliche `TrainingContext`-Objekt in
+`training/context.py`. Es enthält unter anderem:
+
+- Dokument-ID und Dokument-Hash,
+- Bank, Parser-ID, Handler-ID, Dokumenttyp und Regelmodus,
+- Feld-ID, Feldpfad, Feldname, Datentyp und Pflichtstatus,
+- aktuellen Parserwert, Referenz- oder Annotationswert,
+- Evidence, PDF-Seite und Originaltext,
+- Katalogversion und aktive Regelprofilversion,
+- Annotations-ID, Kandidaten-ID und Kandidatenstatus,
+- Trainingsstatus.
+
+`FieldAnalysisWidget.training_context()` erzeugt dieses Objekt direkt aus der
+stabilen Zeile. `TrainingWidget.apply_training_context()` bindet damit den
+vorhandenen Trainingsbildschirm: Dokument ist ausgewählt, Parser und Modus sind
+vorbelegt, das Zielfeld ist markiert, der aktuelle Wert und die Evidence sind
+sichtbar, und eine bestehende Annotation bleibt ausgewählt. Es existiert keine
+zweite Trainingslogik und keine zweite Datenbank.
+
+### Direkte PDF-Auswahl
+
+Die PDF-Ansicht unterstützt unverändert:
+
+- linke Maustaste: Text auswählen,
+- Mausrad: Zoomen am Mauszeiger,
+- mittlere Maustaste: Verschieben,
+- `Leertaste` + linke Maustaste: Verschieben,
+- rechte Maustaste: Kontextmenü.
+
+Eine Auswahl liefert Text, Seite, Start-/Endindex und zuverlässige PDF-Quads.
+`TrainingWidget.apply_pdf_selection()` übernimmt sie in den vorbelegten
+Trainingskontext. Aus `Handelsplatz: XETRA` wird der normalisierte
+Referenzwert `XETRA`; der vollständige Originaltext bleibt getrennt erhalten.
+Der Nutzer bestätigt anschließend mit `Auswahl übernehmen`. Ist das Feld
+`attributes.user_fields.trade.venue`, wird genau dieses optionale Feld
+trainiert; eine automatische Aktivierung oder Buchung findet nicht statt.
+
+Der Zuordnungsdialog `FieldMappingDialog` akzeptiert nun eine Vorauswahl über
+Feld-ID oder Feldpfad. Damit öffnet das PDF-Kontextmenü direkt das Feld, das
+zuvor in der Feldanalyse oder im Training ausgewählt wurde.
+
+### Referenz- und Annotationsaktionen
+
+Das vorhandene Parsertraining wurde um folgende Aktionen erweitert:
+
+- Feld bestätigen,
+- Feld korrigieren,
+- als unbekannt markieren,
+- PDF-Text zuordnen,
+- PDF-Auswahl übernehmen,
+- Fehlen bestätigen,
+- nicht anwendbar markieren,
+- Annotation bearbeiten,
+- Annotation löschen,
+- zurück zur Feldanalyse.
+
+Beim Speichern werden Originaltext und normalisierter Referenzwert getrennt
+gespeichert. Seitenzahl, Dokument-ID, Dokument-Hash, Parser, Handler,
+Feldpfad, Entscheidung und Koordinaten werden mitgeführt. Eine vorhandene
+Annotation wird aktualisiert statt dupliziert. Löschen deaktiviert die
+Annotation, sodass die Historie erhalten bleibt.
+
+### Regelkandidaten und Aktivierung
+
+Der Weg bleibt unverändert:
+
+```text
+Annotation → Regelkandidat → Golden Test → Regression → Freigabe → Aktivierung
+```
+
+Freigabe und Aktivierung sind weiterhin getrennte Schritte. Kandidaten werden
+mit eindeutiger ID, Parser-/Dokumenttypbindung und Verweis auf die
+ursprünglichen Annotationen gespeichert. Sie bleiben inaktiv, bis sie
+ausdrücklich freigegeben und das Profil ausdrücklich aktiviert wird.
+
+Der Vorschlag für `Handelsplatz: XETRA` ist eine begrenzte Label-/Wert-Regel
+und enthält den Literalwert `XETRA` nicht. Derselbe Kandidat erkennt daher auch
+`Handelsplatz: Tradegate` und `Handelsplatz: Frankfurt`. STANDARD bleibt
+unverändert; EXTENDED verwendet nur freigegebene und aktivierte Profile;
+COMPARE zeigt Unterschiede und Konflikte transparent.
+
+### Aktualisierung und Navigation
+
+Die Feldanalyse wird nach Annotation, Referenzzuordnung, Kandidatenerstellung,
+Test, Freigabe, Ablehnung, Rollback, Aktivierung, Deaktivierung sowie nach
+Moduswechsel erneut aus den vorhandenen Tabellen aufgebaut. Es wird kein
+Parserergebnis künstlich verändert.
+
+Die Navigation ist bidirektional und identitätsstabil:
+
+- Feldanalyse → `Feld trainieren` → Parsertraining mit Kontext,
+- Parsertraining → `Zur Feldanalyse` → dieselbe Zeile,
+- grüne PDF-Markierung → dieselbe Feldanalyse-Zeile,
+- Trainingszeile → zugehörige Feldanalyse-Zeile.
+
+Sortierung, Filter und Tabwechsel unterbrechen diesen Weg nicht, weil alle
+Übergaben über Feldpfad und Kontextobjekt statt über sichtbare Zeilennummern
+laufen.
+
+### Robustheit
+
+Die neuen Tabellen und Kontextpfade behandeln `None`, `MissingValue`, leere
+Zellen, fehlende `QTableWidgetItem`, unbekannte Evidence-Strukturen,
+nicht-numerische Seitenangaben und ungewöhnliche Ergebnisformen ohne Absturz.
+Ungültige oder fehlende Koordinaten werden ignoriert statt geschätzt.
+
 ## Tests und Sichtprüfung
 
 Ergänzte Tests prüfen:
@@ -298,13 +521,36 @@ Ergänzte Tests prüfen:
 - gedruckte Zahlen-/Datumsäquivalente und normalisierte Leerzeichen,
 - Pflicht-/Optionalregeln, Annotationskoordinaten und Herkunftsnachweis,
 - STANDARD/EXTENDED/COMPARE inklusive Konflikt-Gelb statt Grün,
-- Sichtbarkeitsschalter, Feldbereich, Persistenz und Klicknavigation.
+- Sichtbarkeitsschalter, Feldbereich, Persistenz und Klicknavigation,
+- `QPointF`, `QPoint`, Tupel und zweielementige Listen als Koordinaten,
+- vierpunktige Quads, leere, falsch typisierte und nicht endliche Quads,
+- fehlerhafte gespeicherte Annotationen ohne Absturz der Anzeige,
+- Mausbewegung und Tooltip über grünen Markierungen,
+- Klick auf eine grüne Fundstelle inklusive Feldaktivierung,
+- Textauswahl nach Zoom und Resize,
+- Treffererkennung und Darstellung auf `/Rotate 90`-Seiten,
+- seitengebundene Markierungen auf mehreren PDF-Seiten,
+- unveränderte STANDARD-/EXTENDED-/COMPARE-Status- und Herkunftslogik,
+- Katalogabdeckung, Katalog-ohne-Parserwert und leere/ungültige Berichte,
+- Trennung von Erkennungsstatus und Trainingsstatus bei Annotationen,
+  Kandidaten und aktiven Profilen,
+- vollständigen `TrainingContext` inklusive Dokument-Hash, Parser, Handler,
+  Evidence, Seite, Katalog- und Profilversion,
+- labelbasierte Handelsplatz-Regel ohne hart codiertes `XETRA`,
+- Tabellenfilter, Sortierung und Übergabe an das Parsertraining,
+- direkte PDF-Auswahl inklusive Normalisierung, Seite und Koordinaten,
+- Vorauswahl des Zielfelds im `FieldMappingDialog`,
+- Feldanalyse-Tabposition, Tabwechsel, Rücknavigation und grüne
+  PDF-Markierung als Gegenrichtung,
+- Mausrad-Zoom am Zeiger sowie Mittelbutton- und Leertaste-Pan ohne
+  versehentliche Textauswahl,
+- Aktualisierung der Feldanalyse nach Annotation und Regelaktion.
 
 Vollständige Regression der betroffenen Pakete:
 
 ```text
-portman-pdf-lab: 72 passed in 7.28s
-portman-parsers: 119 passed in 1.51s
+portman-pdf-lab: 100 passed in 8.62s
+portman-parsers: 119 passed in 1.58s
 ```
 
 Offscreen-Sichtprüfung:
@@ -338,6 +584,21 @@ Windows-GUI.
   Sehr ungewöhnliche PDF-Transformationen oder beschädigte Textschichten können
   dazu führen, dass eine Markierung ausbleibt; es wird dann kein Ersatzrechteck
   erfunden.
+- Persistierte Annotationen mit unbekanntem Koordinatensystem oder ungültigen
+  Punkten werden protokolliert und ignoriert. Sie werden weder geschätzt noch
+  stillschweigend in ein anderes Koordinatensystem umgerechnet.
+- Die Feldanalyse beschreibt den zuletzt gespeicherten Parserlauf. Sie startet
+  keinen Lauf und verändert kein Ergebnis. Ein grüner Status nach Regel- oder
+  Profiländerung setzt daher immer einen erneuten Lauf voraus.
+- Die Evidence stammt aus dem Parserergebnis. Liefert der Parser für ein Feld
+  keinen feldspezifischen Auszug, zeigt die Feldanalyse den vorhandenen
+  Evidence-Auszug; sie erfindet keinen passenderen Text und keine Bounding-Box.
+- Die direkte PDF-Auswahl benötigt eine Textschicht. Bei reinen Scans bleibt
+  die Auswahl leer; es wird weiterhin kein OCR und keine geschätzte
+  Koordinate ergänzt.
+- Eine Abwesenheit gilt nur nach ausdrücklicher Bestätigung als nachgewiesen.
+  Ohne Annotation bleibt ein fehlender Wert `nicht extrahiert`, auch wenn er
+  wahrscheinlich im PDF nicht vorkommt.
 
 ## Start
 

@@ -350,6 +350,26 @@ class ReferenceRepository:
             ids = [row[0] for row in db.execute("SELECT annotation_id FROM annotations WHERE document_id=? AND active=1 ORDER BY annotation_id", (document_id,))]
         return tuple(self.annotation(item) for item in ids)
 
+    def rule_candidates_for_document(self, document_id: str) -> tuple[dict, ...]:
+        """Candidates are training artefacts; they never alter parser output."""
+        with self._connect() as db:
+            ids = [row[0] for row in db.execute(
+                "SELECT candidate_id FROM rule_candidates WHERE document_id=? ORDER BY candidate_id",
+                (document_id,))]
+        return tuple(self.rule_candidate(item) for item in ids)
+
+    def profile_activations_for(self, parser_id: str, handler_id: str,
+                                document_type: str | None = None) -> tuple[dict, ...]:
+        """Activation history for one parser/handler/document type."""
+        query = ("SELECT * FROM profile_activations WHERE parser_id=? AND handler_id=?")
+        arguments: list[object] = [parser_id, handler_id]
+        if document_type:
+            query += " AND document_type=?"
+            arguments.append(document_type)
+        query += " ORDER BY activation_id"
+        with self._connect() as db:
+            return tuple(dict(row) for row in db.execute(query, arguments))
+
     def create_golden(self, document_id: str, bank: str, handler_id: str, layout_variant: str,
                       parser_version: str, expectations: dict, created_by: str, status="DRAFT",
                       supersedes_id=None) -> int:

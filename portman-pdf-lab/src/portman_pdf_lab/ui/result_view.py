@@ -12,8 +12,8 @@ from typing import Any, Iterable
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QAction, QColor, QKeySequence
 from PySide6.QtWidgets import (
-    QApplication, QAbstractItemView, QComboBox, QHBoxLayout, QHeaderView, QLabel,
-    QMenu, QStackedWidget, QTableWidget, QTableWidgetItem, QTextEdit, QToolButton,
+    QApplication, QAbstractItemView, QCheckBox, QComboBox, QHBoxLayout, QHeaderView, QLabel,
+    QMenu, QPushButton, QStackedWidget, QTableWidget, QTableWidgetItem, QTextEdit, QToolButton,
     QVBoxLayout, QWidget,
 )
 
@@ -261,21 +261,44 @@ def enrich_rows(rows: list[DisplayRow], catalog, value: Any = None) -> list[Disp
 
 
 class StructuredResultView(QWidget):
+    trainRequested = Signal(str)
+    testRuleRequested = Signal()
+    approveRuleRequested = Signal()
+    activateRuleRequested = Signal()
     FILTERS = ("Alle Felder", "Nur erkannte", "Nur fehlende", "Nur zu prüfende")
 
     def __init__(self, parent=None):
-        super().__init__(parent); self.rows: list[DisplayRow] = []; self.raw: Any = None
+        super().__init__(parent); self.rows: list[DisplayRow] = []; self.raw: Any = None; self.quick_mode = False
         layout = QVBoxLayout(self); bar = QHBoxLayout()
         self.mode = QComboBox(); self.mode.addItems(("Tabelle", "JSON"))
         self.filter = QComboBox(); self.filter.addItems(self.FILTERS)
         self.stats = QLabel("Erkannt 0 · Fehlend 0 · Prüfen 0 · N/A 0")
+        self.show_all = QCheckBox("Alle Felder anzeigen")
+        self.train_button = QPushButton("Feld trainieren"); self.test_button = QPushButton("Regel prüfen")
+        self.approve_button = QPushButton("Regel freigeben"); self.activate_button = QPushButton("Profil aktivieren")
         bar.addWidget(self.mode); bar.addWidget(self.filter); bar.addWidget(self.stats); bar.addStretch()
+        for widget in (self.show_all, self.train_button, self.test_button, self.approve_button, self.activate_button):
+            widget.setVisible(False); bar.addWidget(widget)
         self.stack = QStackedWidget(); self.table = ResultTable(); self.json = QTextEdit(); self.json.setReadOnly(True)
         self.json.setLineWrapMode(QTextEdit.NoWrap)
         self.stack.addWidget(self.table); self.stack.addWidget(self.json)
         layout.addLayout(bar); layout.addWidget(self.stack)
         self.mode.currentIndexChanged.connect(self.stack.setCurrentIndex)
         self.filter.currentTextChanged.connect(self._apply_filter)
+        self.show_all.toggled.connect(self._apply_filter)
+        self.train_button.clicked.connect(self._request_training)
+        self.test_button.clicked.connect(self.testRuleRequested)
+        self.approve_button.clicked.connect(self.approveRuleRequested)
+        self.activate_button.clicked.connect(self.activateRuleRequested)
+
+    def set_quick_mode(self, enabled):
+        self.quick_mode = enabled; self.mode.setVisible(not enabled); self.filter.setVisible(not enabled)
+        for widget in (self.show_all, self.train_button, self.test_button, self.approve_button, self.activate_button): widget.setVisible(enabled)
+        self._apply_filter()
+
+    def _request_training(self):
+        row = self.table.currentRow()
+        if row >= 0 and self.table.item(row, 0): self.trainRequested.emit(self.table.item(row, 0).text())
 
     def set_data(self, value: Any, evidence_by_id: dict[str, dict] | None = None, catalog=None):
         self.raw = value; rows = flatten_result(value, evidence_by_id)
@@ -298,4 +321,8 @@ class StructuredResultView(QWidget):
         for row in range(self.table.rowCount()):
             item = self.table.item(row, 4)
             status = item.data(Qt.UserRole + 1) if item else None
-            self.table.setRowHidden(row, wanted is not None and status != wanted.value)
+            hidden = wanted is not None and status != wanted.value
+            requirement = self.table.item(row, 3).text() if self.table.item(row, 3) else ""
+            if self.quick_mode and not self.show_all.isChecked():
+                hidden = hidden or requirement == "TECHNICAL" or status == RecognitionStatus.NOT_APPLICABLE.value
+            self.table.setRowHidden(row, hidden)

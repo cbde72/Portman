@@ -24,9 +24,10 @@ python -c "import sys; print(sys.executable)"
 python -c "import portman_parsers, portman_pdf_lab; print(portman_parsers.__file__); print(portman_pdf_lab.__file__)"
 ```
 
-The package intentionally constrains PySide6 to the tested 6.8/6.9 series.
-On the current Windows/Python environment PySide6 6.9.2 loads successfully;
-6.11.3 fails while loading `QtWidgets` before PDF Lab code is executed.
+The package constrains PySide6 to the tested range `>=6.9.2,<6.11.2`.
+PySide6 6.11.1 supports the current Python 3.14 environment and its Qt PDF
+selection API; 6.11.3 remains excluded because it failed to load `QtWidgets`
+in the isolated Windows acceptance environment.
 
 ## Commands
 
@@ -76,6 +77,26 @@ menu maps selections to catalog-defined fields, creates review annotations or
 explicit references, and can define optional `attributes.user_fields` entries.
 Versioned YAML field catalogs drive field types, validation, editors and F1
 help. A missing PDF text layer is reported explicitly; OCR is not simulated.
+
+The main toolbar switches between **Schnell** (the persisted default for a new
+installation) and **Experte**. Quick mode presents only the catalog-driven
+field analysis and guided PDF training actions. Expert mode restores all tabs,
+technical paths, Evidence, comparisons, Golden tests, rule/profile lifecycle,
+import/export and rollback. Switching modes never starts a parser run and both
+modes use the same SQLite repository, YAML catalogs and approved profiles.
+
+Quick training stays beside the PDF and field analysis in a collapsible
+splitter panel. Selecting `Feld trainieren` preloads all technical context; the
+user only marks PDF text, confirms or corrects the typed value, then explicitly
+tests, approves and activates the rule in separate steps. `Erneut prüfen` runs
+EXTENDED and compares the original value, effective value and reference without
+leaving quick mode. An annotation or reference alone never turns a parser row
+green.
+
+Direct selection on the rendered PDF page uses Qt PDF coordinates and stores
+real PDF-point quads, page dimensions, rotation, document hash and character
+indices. The synchronized text layer remains available as a fallback for
+difficult PDFs.
 
 1. Übersicht
 2. Konto

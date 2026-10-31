@@ -1,0 +1,220 @@
+"""Quality-aware, evidence-preserving PDF text preparation.
+
+The parser contract still receives plain :class:`PdfPage` text.  This module
+keeps the preparation metadata beside that contract so bank parsers do not
+need to know which extractor was selected.  Optional PDFium support is loaded
+only when a page is considered suspicious; importing the DTO package never
+loads a PDF library.
+"""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
+import re
+import unicodedata
+from pathlib import Path
+from typing import Any, Iterable
+
+
+PREPARATION_VERSION = "7.3.0"
+_REPLACEMENT = "\ufffd"
+_ARTIFACT_TOKEN = re.compile(r"\b[A-Z]{1,4}\d{4,10}\b")
+_NUMBER = re.compile(r"[-+]?\d+(?:[,.]\d+)?")
+
+
+def _safe_artifact_token(token: str) -> bool:
+    """Recognise a glyph token, not an arbitrary identifier.
+
+    Ordinary identifiers such as ISINs and WKNs may legitimately repeat on a
+    page.  Removal is therefore restricted to repeated short prefixes with a
+    long zero run, the characteristic shape of the broken font token, while
+    the broader diagnostic still reports other suspicious repetitions.
+    """
+    return bool(re.fullmatch(r"[A-Z]{1,4}\d{0,3}0{3,}\d{0,4}", token))
+
+
+@dataclass(frozen=True, slots=True)
+class TextSpan:
+    start: int
+    end: int
+    text: str
+    quad: tuple[tuple[float, float], ...] = ()
+    mapping: str = "EXACT"
+
+
+@dataclass(frozen=True, slots=True)
+class TextBlock:
+    start: int
+    end: int
+    text: str
+    spans: tuple[TextSpan, ...] = ()
+    quality: str = "OK"
+    diagnostics: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PagePreparation:
+    page_number: int
+    original_text: str
+    normalized_text: str
+    extractor_id: str
+    extractor_version: str
+    quality: str
+    diagnostics: tuple[str, ...] = ()
+    blocks: tuple[TextBlock, ...] = ()
+    mapping: str = "NONE"
+    fallback_used: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedPdf:
+    source_hash: str
+    pages: tuple[PagePreparation, ...]
+    preparation_version: str = PREPARATION_VERSION
+    diagnostics: tuple[str, ...] = ()
+
+    @property
+    def text(self) -> str:
+        return "\n".join(page.normalized_text for page in self.pages)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source_hash": self.source_hash,
+            "preparation_version": self.preparation_version,
+            "diagnostics": list(self.diagnostics),
+            "pages": [page.to_dict() for page in self.pages],
+        }
+
+
+def _version(module: Any, fallback: str = "unknown") -> str:
+    return str(getattr(module, "__version__", fallback))
+
+
+def _diagnose(text: str) -> tuple[str, ...]:
+    diagnostics: list[str] = []
+    if _REPLACEMENT in text:
+        diagnostics.append("UNICODE_REPLACEMENT_CHARACTER")
+    if "SP010000" in text:
+        diagnostics.append("REPEATED_SUSPICIOUS_TOKEN_SP010000")
+    artifact_tokens = _ARTIFACT_TOKEN.findall(text)
+    repeated = {token for token in artifact_tokens if artifact_tokens.count(token) >= 2}
+    if repeated:
+        diagnostics.append("REPEATED_ALPHANUMERIC_GLYPH_TOKEN")
+    unusual = sum(1 for char in text if not char.isprintable() and char not in "\n\r\t")
+    if unusual:
+        diagnostics.append("UNPRINTABLE_CHARACTER_DENSITY")
+    if text and (len(text) > 2000 and len(set(text)) < 12):
+        diagnostics.append("LOW_CHARACTER_VARIETY")
+    if text and len(_NUMBER.findall(text)) == 0:
+        diagnostics.append("NO_NUMERIC_TOKENS")
+    return tuple(dict.fromkeys(diagnostics))
+
+
+def _quality(text: str, diagnostics: Iterable[str]) -> str:
+    diagnostics = tuple(diagnostics)
+    if not text.strip():
+        return "NO_TEXT"
+    severe = {"UNICODE_REPLACEMENT_CHARACTER", "LOW_CHARACTER_VARIETY"}
+    if severe.intersection(diagnostics):
+        return "UNRELIABLE"
+    if diagnostics:
+        return "SUSPICIOUS"
+    return "OK"
+
+
+def _quality_rank(value: str) -> int:
+    return {"NO_TEXT": 0, "UNRELIABLE": 1, "SUSPICIOUS": 2, "OK": 3}.get(value, 0)
+
+
+def _normalize(text: str) -> tuple[str, tuple[str, ...]]:
+    """Apply only transformations that cannot alter business values."""
+    original = str(text or "")
+    normalized = unicodedata.normalize("NFKC", original)
+    normalized = normalized.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = normalized.replace("\u00a0", " ").replace("\u2007", " ").replace("\u202f", " ")
+    diagnostics = list(_diagnose(normalized))
+
+    # A token is removed only when it is demonstrably repeated.  Other
+    # unusual letters remain untouched; this prevents accidental corruption of
+    # ISINs, WKNs, currencies, signs and decimal values.
+    tokens = _ARTIFACT_TOKEN.findall(normalized)
+    repeated = {token for token in tokens if tokens.count(token) >= 2 and _safe_artifact_token(token)}
+    if repeated:
+        for token in repeated:
+            normalized = re.sub(rf"(?<!\w){re.escape(token)}(?!\w)", " ", normalized)
+        diagnostics.append("REPEATED_TOKEN_REMOVED_WITH_CONTEXT")
+    normalized = re.sub(r"[ \t]+", " ", normalized)
+    normalized = re.sub(r" *\n *", "\n", normalized)
+    return normalized, tuple(dict.fromkeys(diagnostics))
+
+
+def _blocks(text: str, diagnostics: tuple[str, ...]) -> tuple[TextBlock, ...]:
+    result: list[TextBlock] = []
+    for match in re.finditer(r"[^\n]+", text):
+        result.append(TextBlock(match.start(), match.end(), match.group(0), quality=_quality(match.group(0), diagnostics), diagnostics=diagnostics))
+    return tuple(result)
+
+
+def _pdfium_page(path: Path, page_number: int) -> tuple[str, tuple[TextBlock, ...], str] | None:
+    """Best-effort PDFium text and character geometry, never a hard dependency."""
+    try:
+        import pypdfium2 as pdfium  # optional extra: portman-parsers[pdfium]
+        document = pdfium.PdfDocument(str(path))
+        page = document[page_number - 1]
+        textpage = page.get_textpage()
+        text = textpage.get_text_range()
+        spans: list[TextSpan] = []
+        for index, char in enumerate(text):
+            try:
+                left, bottom, right, top = textpage.get_charbox(index)
+                quad = ((float(left), float(bottom)), (float(right), float(bottom)),
+                        (float(right), float(top)), (float(left), float(top)))
+            except (AttributeError, IndexError, TypeError, ValueError):
+                quad = ()
+            spans.append(TextSpan(index, index + 1, char, quad, "EXACT" if quad else "UNMAPPED"))
+        blocks = (TextBlock(0, len(text), text, tuple(spans), "OK", ()),)
+        return text, blocks, _version(pdfium)
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError, IndexError):
+        return None
+
+
+def prepare_pdf(path: str | Path, pages: Iterable[str], source_hash: str,
+                source_path: str | Path | None = None) -> PreparedPdf:
+    """Prepare already extracted pages and selectively use PDFium as fallback."""
+    source = Path(source_path or path)
+    prepared: list[PagePreparation] = []
+    diagnostics: list[str] = []
+    for number, original in enumerate(pages, 1):
+        original = str(original or "")
+        normalized, page_diagnostics = _normalize(original)
+        quality = _quality(normalized, page_diagnostics)
+        extractor_id, extractor_version, fallback, mapping = "pypdf", "unknown", False, "NONE"
+        blocks = _blocks(normalized, page_diagnostics)
+        if quality in {"UNRELIABLE", "SUSPICIOUS"} and source.exists():
+            alternative = _pdfium_page(source, number)
+            if alternative is not None:
+                fallback_text, fallback_blocks, version = alternative
+                fallback_normalized, fallback_diagnostics = _normalize(fallback_text)
+                fallback_quality = _quality(fallback_normalized, fallback_diagnostics)
+                use_fallback = (
+                    bool(fallback_normalized.strip()) and
+                    fallback_quality != "UNRELIABLE" and
+                    (_quality_rank(fallback_quality) > _quality_rank(quality) or
+                     (fallback_quality == quality and
+                      len(fallback_normalized.strip()) >= max(1, int(len(normalized.strip()) * 0.85))))
+                )
+                if use_fallback:
+                    normalized, blocks = fallback_normalized, fallback_blocks
+                    page_diagnostics = tuple(dict.fromkeys((*page_diagnostics, "FALLBACK_SELECTED")))
+                    quality = fallback_quality
+                    extractor_id, extractor_version, fallback, mapping = "pdfium", version, True, "EXACT"
+                    diagnostics.append(f"PAGE_{number}_FALLBACK_PDFIUM")
+                else:
+                    diagnostics.append(f"PAGE_{number}_FALLBACK_NOT_BETTER")
+        prepared.append(PagePreparation(number, original, normalized, extractor_id,
+                                         extractor_version, quality, page_diagnostics,
+                                         blocks, mapping, fallback))
+    return PreparedPdf(source_hash, tuple(prepared), diagnostics=tuple(diagnostics))

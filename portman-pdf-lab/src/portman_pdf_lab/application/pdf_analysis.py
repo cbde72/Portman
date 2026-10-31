@@ -4,6 +4,7 @@ from pathlib import Path
 from time import perf_counter_ns
 import csv
 import hashlib
+import json
 
 from portman_parsers.api import Issue, IssueNature, IssueSeverity, to_json_compatible
 from portman_parsers.extraction import PdfExtractionError, extract_pdf
@@ -22,6 +23,17 @@ def analyse_pdf(path: str | Path, rule_mode: RuleMode | str = RuleMode.STANDARD,
     source = Path(path)
     total_start = perf_counter_ns()
     timings = {}
+    def preparation_report(document):
+        raw = document.metadata.get("text_preparation_json", "")
+        try:
+            details = json.loads(raw) if raw else {}
+        except (TypeError, ValueError):
+            details = {}
+        return {"version": document.metadata.get("text_preparation_version", ""),
+                "extractors": document.metadata.get("text_extractors", ""),
+                "quality": document.metadata.get("text_quality", ""),
+                "pages": details.get("pages", []),
+                "diagnostics": details.get("diagnostics", [])}
     try:
         started = perf_counter_ns(); document = extract_pdf(source); timings["extraction_ns"] = perf_counter_ns() - started
         if any(page.extraction_method == "ocr_required" for page in document.pages):
@@ -30,6 +42,7 @@ def analyse_pdf(path: str | Path, rule_mode: RuleMode | str = RuleMode.STANDARD,
                           nature=IssueNature.MISSING_INFORMATION)
             return {"source": str(source), "document_id": document.document_id,
                     "source_hash": document.source_hash, "issues": to_json_compatible((issue,)),
+                    "text_preparation": preparation_report(document),
                     "timings": {**timings, "total_ns": perf_counter_ns() - total_start}}
         registry = default_registry()
         started = perf_counter_ns(); detection = registry.select(document); timings["detection_ns"] = perf_counter_ns() - started
@@ -39,6 +52,7 @@ def analyse_pdf(path: str | Path, rule_mode: RuleMode | str = RuleMode.STANDARD,
                           "No approved parser recognized this document.")
             return {"source": str(source), "document_id": document.document_id,
                     "source_hash": document.source_hash, "issues": to_json_compatible((issue,)),
+                    "text_preparation": preparation_report(document),
                     "timings": {**timings, "total_ns": perf_counter_ns() - total_start}}
         started = perf_counter_ns(); result = registry.parse(document, detection); timings["parsing_ns"] = perf_counter_ns() - started
         started = perf_counter_ns(); issues = validate_parsed_document(result); timings["validation_ns"] = perf_counter_ns() - started
@@ -51,6 +65,7 @@ def analyse_pdf(path: str | Path, rule_mode: RuleMode | str = RuleMode.STANDARD,
         report = {"source": str(source), "document_id": document.document_id,
                   "source_hash": document.source_hash, "detection": to_json_compatible(detection),
                   "result": result.to_dict(), "issues": to_json_compatible(issues),
+                  "text_preparation": preparation_report(document),
                   "account_view": account_view(result),
                   "depot_account_link_view": depot_account_link_view(result),
                   "fee_cost_view": fee_cost_view(result)}
@@ -105,4 +120,3 @@ def export_batch_csv(report: dict[str, object], path: str | Path) -> Path:
                              "status": "DUPLICATE" if item.get("duplicate_of") else "ERROR" if item.get("error") else "OK",
                              "runtime_ns": item.get("timings", {}).get("total_ns", "")})
     return target
-

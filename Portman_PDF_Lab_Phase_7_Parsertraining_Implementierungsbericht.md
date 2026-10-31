@@ -228,10 +228,10 @@ erzeugte GUI-Reiter. Die verbotenen Module `portfolio_v5`, `pdf_plugins` und
 ISOLATION_OK tabs=10 profiles=YAML standard=exact extended=active compare=ok forbidden_imports=none
 ```
 
-PySide6 6.11.3 ließ sich auf dem aktuellen Windows/Python-System installieren,
-scheiterte jedoch bereits beim Import von `QtWidgets` mit einem DLL-Ladefehler.
-Mit PySide6 6.9.2 lief dieselbe Abnahme erfolgreich. Die Paketabhängigkeit ist
-daher auf die getestete Reihe `PySide6>=6.8,<6.10` begrenzt.
+PySide6 6.11.3 ließ sich in dieser damaligen Umgebung installieren, scheiterte
+jedoch beim Import von `QtWidgets`. Phase 7.2 hat die Isolation zusätzlich mit
+Python 3.14 und PySide6 6.11.1 erfolgreich durchgeführt. Der aktuelle getestete
+Bereich lautet deshalb `PySide6>=6.9.2,<6.11.2`; 6.11.3 bleibt ausgeschlossen.
 
 GUI-Start: `python -m portman_pdf_lab gui`. Die VS-Code-Konfiguration
 `Portman PDF Lab – GUI (F5)` verwendet den aktiv ausgewählten Interpreter.
