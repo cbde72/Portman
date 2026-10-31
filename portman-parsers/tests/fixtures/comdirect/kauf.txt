@@ -1,0 +1,8 @@
+comdirect
+Wertpapierkauf
+Depotnummer: 123456
+Stk. 0,125 Fonds DE0008474511
+Provision EUR 1,50
+Zu Ihren Lasten EUR 126,50
+Valuta 01.07.2026
+DE00 0000 0000 0000 0000 01

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "portman-pdf-lab"
+version = "0.6.0"
+description = "Analysis and review application for portman-parsers"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = ["portman-parsers>=0.6,<0.7", "PySide6>=6.8,<6.12"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+portman-pdf-lab = "portman_pdf_lab.cli:main"
+portman-pdf-lab-gui = "portman_pdf_lab.ui.main_window:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+

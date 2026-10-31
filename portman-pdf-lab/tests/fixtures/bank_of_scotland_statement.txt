@@ -1,0 +1,18 @@
+Bank of Scotland
+Lloyds Bank GmbH
+Tagesgeld
+Kontoinhaber: Erika Mustermann
+Auszugsnummer: 1/2026
+Datum: 31.12.2026
+Kontonummer: 1234567890
+IBAN: DE00 0000 0000 0000 0000 01
+BIC: BOFSDEB1XXX
+Buchungstag Wertstellung Beschreibung Soll Haben
+01.12.2026 01.12.2026 Überweisung 100,00
+31.12.2026 31.12.2026 Zinsen vor Steuern 10,00
+31.12.2026 31.12.2026 Abgeltungssteuer 2,50
+31.12.2026 31.12.2026 Solidaritätszuschlag 0,14
+Gesamtsummen in Euro: 102,64 10,00
+Alter Saldo: 1.000,00
+Neuer Saldo: 907,36
+RECHNUNGSABSCHLUSS
