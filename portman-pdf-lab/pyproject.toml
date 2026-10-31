@@ -9,7 +9,7 @@ description = "Analysis and review application for portman-parsers"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
-dependencies = ["portman-parsers>=0.6,<0.7", "PySide6>=6.8,<6.12"]
+dependencies = ["portman-parsers>=0.6,<0.7", "PySide6>=6.8,<6.10"]
 
 [project.optional-dependencies]
 test = ["pytest>=8"]

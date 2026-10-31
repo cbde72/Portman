@@ -43,3 +43,27 @@ python -m pip install -e ".[test]"
 python -m pytest
 ```
 
+## Optional rule profiles
+
+The parser library exposes an optional profile API without changing the normal
+plugin registry or parser implementations:
+
+```python
+from portman_parsers.rules import ProfileStore, RuleEngine, RuleMode
+
+standard_result = registry.parse(document, detection)
+store = ProfileStore()  # user application-data directory
+profile = store.active(detection.plugin_id, detection.handler_id,
+                       detection.document_type, "annotated",
+                       detection.plugin_version)
+extended = RuleEngine().apply(standard_result, document.text, profile,
+                              RuleMode.EXTENDED)
+```
+
+`STANDARD` needs no profile and returns the original immutable parser result.
+`EXTENDED` produces explicit field decisions alongside that original result;
+it never silently mutates parser DTOs. Profiles are validated YAML with a
+SHA-256 hash, known rule types, known merge strategies and bounded regexes.
+`ProfileStore` supports immutable versions, atomic activation, deactivation,
+export and import without PDF Lab or its SQLite database.
+

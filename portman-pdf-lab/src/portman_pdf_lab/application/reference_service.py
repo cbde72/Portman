@@ -7,8 +7,9 @@ from portman_pdf_lab.storage import ReferenceRepository
 from .pdf_analysis import analyse_pdf
 
 
-def analyse_and_store(path: str | Path, repository: ReferenceRepository) -> tuple[dict, int | None]:
-    report = analyse_pdf(path)
+def analyse_and_store(path: str | Path, repository: ReferenceRepository, rule_mode="STANDARD") -> tuple[dict, int | None]:
+    from portman_parsers.rules import ProfileStore
+    report = analyse_pdf(path, rule_mode, ProfileStore(repository.path.parent / "rule-profiles"))
     if "result" not in report:
         return report, None
     detection = report["detection"]; result = report["result"]

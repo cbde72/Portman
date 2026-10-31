@@ -10,13 +10,15 @@ from portman_parsers.extraction import PdfExtractionError, extract_pdf
 from portman_parsers.registry import default_registry
 from portman_parsers.utilities import stable_id
 from portman_parsers.validation import validate_parsed_document
+from portman_parsers.rules import ProfileStore, RuleEngine, RuleMode
 
 from portman_pdf_lab.analysis.fee_views import fee_cost_view
 from portman_pdf_lab.analysis.master_data_views import account_view, depot_account_link_view
 from portman_pdf_lab.application.comdirect_comparison import compare_comdirect_parsers
 
 
-def analyse_pdf(path: str | Path) -> dict[str, object]:
+def analyse_pdf(path: str | Path, rule_mode: RuleMode | str = RuleMode.STANDARD,
+                profile_store: ProfileStore | None = None) -> dict[str, object]:
     source = Path(path)
     total_start = perf_counter_ns()
     timings = {}
@@ -40,6 +42,11 @@ def analyse_pdf(path: str | Path) -> dict[str, object]:
                     "timings": {**timings, "total_ns": perf_counter_ns() - total_start}}
         started = perf_counter_ns(); result = registry.parse(document, detection); timings["parsing_ns"] = perf_counter_ns() - started
         started = perf_counter_ns(); issues = validate_parsed_document(result); timings["validation_ns"] = perf_counter_ns() - started
+        requested_mode = RuleMode(rule_mode); extended = None
+        if requested_mode != RuleMode.STANDARD:
+            store = profile_store or ProfileStore()
+            profile = store.active(detection.plugin_id, detection.handler_id, detection.document_type, "annotated", detection.plugin_version)
+            extended = RuleEngine().apply(result, document.text, profile, RuleMode.EXTENDED if profile else RuleMode.STANDARD)
         started = perf_counter_ns()
         report = {"source": str(source), "document_id": document.document_id,
                   "source_hash": document.source_hash, "detection": to_json_compatible(detection),
@@ -47,8 +54,18 @@ def analyse_pdf(path: str | Path) -> dict[str, object]:
                   "account_view": account_view(result),
                   "depot_account_link_view": depot_account_link_view(result),
                   "fee_cost_view": fee_cost_view(result)}
+        report["rule_mode_requested"] = requested_mode.value
+        report["rule_mode_effective"] = extended.mode.value if extended else RuleMode.STANDARD.value
+        if extended:
+            report["rule_profile"] = {"profile_id": extended.profile_id, "profile_version": extended.profile_version,
+                                      "profile_hash": extended.profile_hash}
+            report["rule_decisions"] = to_json_compatible(extended.decisions)
+            if requested_mode == RuleMode.COMPARE:
+                report["rule_comparison"] = [{"field": item.field_path, "standard": to_json_compatible(item.standard_value),
+                                               "extended": to_json_compatible(item.effective_value), "rule": to_json_compatible(item.rule_value),
+                                               "conflict": item.conflict, "rule_id": item.rule_id} for item in extended.decisions]
         if detection.plugin_id in {"user.comdirect-ertraege", "comdirect.finanzreport", "portfolio-performance.comdirect"}:
-            report["parser_comparison"] = to_json_compatible(compare_comdirect_parsers(document))
+            report["parser_comparison"] = to_json_compatible(compare_comdirect_parsers(document, profile_store))
         timings["reporting_ns"] = perf_counter_ns() - started
         report["timings"] = {**timings, "total_ns": perf_counter_ns() - total_start}
         return report

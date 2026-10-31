@@ -1,3 +1,4 @@
+
 {
   "version": "0.2.0",
   "configurations": [
@@ -12,6 +13,20 @@
       "env": {
         "PYTHONPATH": "${workspaceFolder}/src"
       }
+    },
+    {
+      "name": "Portman PDF Lab – GUI",
+      "type": "debugpy",
+      "request": "launch",
+      "python": "${workspaceFolder}/.venv/Scripts/python.exe",
+      "module": "portman_pdf_lab",
+      "args": ["gui"],
+      "cwd": "${workspaceFolder}/portman-pdf-lab",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/portman-pdf-lab/src;${workspaceFolder}/portman-parsers/src"
+      },
+      "console": "integratedTerminal",
+      "justMyCode": true
     }
   ]
 }

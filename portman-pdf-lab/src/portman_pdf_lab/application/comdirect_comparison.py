@@ -4,6 +4,7 @@ from time import perf_counter_ns
 
 from portman_parsers.plugins import ComdirectFinanzreportPlugin, ComdirectPlugin, ComdirectPPPlugin
 from portman_parsers.validation import validate_parsed_document
+from portman_parsers.rules import ProfileStore, RuleEngine, RuleMode
 
 
 def _first(sequence):
@@ -38,7 +39,7 @@ def _projection(result):
     }
 
 
-def compare_comdirect_parsers(document):
+def compare_comdirect_parsers(document, profile_store: ProfileStore | None = None):
     """Return copy-friendly rows; agreement is deliberately not a reference score."""
     pp = ComdirectPPPlugin()
     pp_detection = _first(pp.detect(document))
@@ -59,8 +60,23 @@ def compare_comdirect_parsers(document):
 
     left = _projection(variants["portman"]["result"]) if variants["portman"]["result"] else {}
     right = _projection(variants["portfolio_performance_python"]["result"]) if variants["portfolio_performance_python"]["result"] else {}
+    extended_values = {}
+    store = profile_store
+    for name, key in (("portman", "portman_extended"), ("portfolio_performance_python", "portfolio_performance_python_extended")):
+        entry = variants[name]; projected = dict(left if name == "portman" else right); decisions = ()
+        if store and entry["detection"] and entry["result"]:
+            detection = entry["detection"]
+            profile = store.active(detection.plugin_id, detection.handler_id, detection.document_type, "annotated", detection.plugin_version)
+            overlay = RuleEngine().apply(entry["result"], document.text, profile, RuleMode.EXTENDED if profile else RuleMode.STANDARD)
+            decisions = overlay.decisions
+            for decision in decisions:
+                projected[decision.field_path] = decision.effective_value
+        extended_values[key] = projected
+        variants[key] = {"decisions": decisions}
     fields = sorted(left.keys() | right.keys())
-    rows = tuple({"field": field, "portman": left.get(field), "portfolio_performance_python": right.get(field),
+    fields = sorted(set(fields) | set(extended_values["portman_extended"]) | set(extended_values["portfolio_performance_python_extended"]))
+    rows = tuple({"field": field, "portman": left.get(field), "portman_extended": extended_values["portman_extended"].get(field),
+                  "portfolio_performance_python": right.get(field), "portfolio_performance_python_extended": extended_values["portfolio_performance_python_extended"].get(field),
                   "matches": left.get(field) == right.get(field), "is_confirmed_reference": False}
                  for field in fields)
     rows += ({"field": "runtime_ns", "portman": variants["portman"]["runtime_ns"],
@@ -71,4 +87,6 @@ def compare_comdirect_parsers(document):
             "portfolio_performance_detection": variants["portfolio_performance_python"]["detection"],
             "portman_issues": variants["portman"]["issues"],
             "portfolio_performance_issues": variants["portfolio_performance_python"]["issues"],
+            "portman_rule_decisions": variants["portman_extended"]["decisions"],
+            "portfolio_performance_rule_decisions": variants["portfolio_performance_python_extended"]["decisions"],
             "agreement_is_not_reference": True}
