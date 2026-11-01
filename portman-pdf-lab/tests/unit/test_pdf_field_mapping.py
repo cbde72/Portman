@@ -41,7 +41,7 @@ def test_scanned_page_has_explicit_no_textlayer_message():
 def test_catalog_does_not_create_new_user_fields(tmp_path):
     store = CatalogStore(tmp_path / "catalogs")
     catalog = store.catalog("comdirect", "user.comdirect-ertraege", "Kauf", "layout-a")
-    assert catalog.field("trade.venue").requirement == "OPTIONAL"
+    assert catalog.field("trade.venue") is None
     with pytest.raises(ValueError, match="nicht angelegt"):
         store.add_optional_field(catalog, "trade.counterparty", "Gegenpartei")
     restarted = store.catalog("comdirect", "user.comdirect-ertraege", "Kauf", "layout-a")
@@ -64,9 +64,9 @@ def test_mapping_only_existing_fields_even_when_define_new_requested(tmp_path):
     dialog = FieldMappingDialog(catalog, store, context, "XETRA", 2, define_new=True)
     assert not hasattr(dialog, "new_field")
     assert not hasattr(dialog, "new_id")
-    index = next(i for i in range(dialog.field_choice.count()) if dialog.field_choice.itemData(i) == "trade.venue")
+    index = next(i for i in range(dialog.field_choice.count()) if dialog.field_choice.itemData(i) == "trade.quantity")
     dialog.field_choice.setCurrentIndex(index); dialog._accept()
-    assert dialog.mapping_result.field.path == "attributes.user_fields.trade.venue"
+    assert dialog.mapping_result.field.path == "events[0].trades[0].quantity"
     assert dialog.mapping_result.page_number == 2
 
 
@@ -112,7 +112,7 @@ def test_trade_dependencies_and_account_document_do_not_create_security_errors(t
     rows = {row.field_id: row for row in build_field_analysis_rows({"result":result}, catalog)}
     assert rows["security.isin"].status == RecognitionStatus.RECOGNIZED
     assert rows["security.wkn"].status == RecognitionStatus.NOT_APPLICABLE
-    assert rows["trade.venue"].status == RecognitionStatus.NOT_APPLICABLE
+    assert "trade.venue" not in rows
     assert rows["trade.quantity"].status == RecognitionStatus.MISSING
     account = store.catalog("bank of scotland", "user.bank-of-scotland-kontoauszug", "Bank of Scotland Kontoauszug", "*")
     assert not any(field.field_id.startswith(("security.", "trade.")) for field in account.fields)
