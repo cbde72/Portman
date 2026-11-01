@@ -40,6 +40,12 @@ def extract_comdirect_security_identity(text):
   before=block[0][:first.start()].rstrip()
   columns=[part.strip() for part in re.split(r"\s{2,}",before) if part.strip()]
   name=columns[-1] if columns else None
+  second_before=block[1][:second.start()].rstrip()
+  second_parts=[part.strip() for part in re.split(r"\s{2,}",second_before) if part.strip()]
+  # The following row contains the security class/description, not a second security.
+  suffix=second_parts[-1] if second_parts else None
+  if suffix and name:
+   name=f"{name} {suffix}"
   return name,first.group(1).upper(),second.group(1).upper()
  return None,None,None
 
