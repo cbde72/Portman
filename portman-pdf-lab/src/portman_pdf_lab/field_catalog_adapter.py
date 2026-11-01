@@ -81,6 +81,33 @@ _DTO_FIELDS = {
 }
 
 
+# These labels describe the origin of an unmapped semantic catalog entry.
+# Do not turn optional labels into fictitious parser DTO members.
+_RUNTIME_COLLECTIONS = {"document", "parser"}
+_OPTIONAL_EXTENSION_PATHS = {
+    "trade.venue": "attributes.user_fields.trade.venue",
+    "trades[].venue": "attributes.user_fields.trade.venue",
+}
+
+
+def classify_unmapped(path: str, status: str) -> tuple[str, str]:
+    """Separate missing DTO members from document metadata and optional hints."""
+    collection = path.split(".", 1)[0].removesuffix("[]")
+    if path in _OPTIONAL_EXTENSION_PATHS:
+        return "OPTIONAL_EXTENSION", "Existing optional user field, not a STANDARD DTO member"
+    if collection == "document":
+        return "DOCUMENT_METADATA", "Document-level metadata or bank-specific document field, not an audited public DTO member"
+    if collection == "parser":
+        return "RUNTIME_METADATA", "Execution or extraction metadata; not a public ParsedDocument member"
+    if collection in {"securities", "income_events"}:
+        return "UNSUPPORTED_COLLECTION", "The public DTO has no dedicated collection of this name"
+    if status == "no_dto_member":
+        return "UNSUPPORTED_DTO_FIELD", "Explicitly absent from this public DTO; do not invent a mapping"
+    if status == "unknown_dto_member":
+        return "UNSUPPORTED_DTO_FIELD", "Not a declared member of this public DTO"
+    return "UNSUPPORTED_COLLECTION", "No verified root mapping for the semantic collection"
+
+
 def _mapping(path: str) -> tuple[str | None, str]:
     parts = path.split(".")
     collection = parts[0].removesuffix("[]")
@@ -109,12 +136,15 @@ def import_factual_catalog(source: str | Path, destination: str | Path,
     if payload.get("schema_name") != SCHEMA_NAME or str(payload.get("schema_version")) != SCHEMA_VERSION:
         raise ValueError("unsupported factual field catalog schema")
     store = DescriptionCatalog.load(destination)
-    mapped, unknown, deviations = [], [], []
+    mapped, unknown, deviations, classified = [], [], [], []
     for semantic_path, item in (payload.get("fields") or {}).items():
         dto_path, status = _mapping(normalize_field_path(semantic_path))
         record = {"catalog_path": semantic_path, "dto_path": dto_path, "status": status}
         if dto_path is None:
+            category, reason = classify_unmapped(semantic_path, status)
+            record.update({"classification": category, "reason": reason})
             unknown.append(record)
+            classified.append(record)
             continue
         if status == "aliased":
             deviations.append(record)
@@ -125,8 +155,12 @@ def import_factual_catalog(source: str | Path, destination: str | Path,
     audit = {"catalog": str(source), "catalog_version": str(payload.get("catalog_version")),
              "schema_version": str(payload.get("schema_version")), "mapped": mapped,
              "unknown_paths": unknown, "deviating_paths": deviations,
+             "classified_unmapped": classified,
              "summary": {"total": len(payload.get("fields") or {}), "mapped": len(mapped),
-                         "unknown": len(unknown), "deviating": len(deviations)}}
+                         "unknown": len(unknown), "deviating": len(deviations),
+                         "classified_unmapped": len(classified),
+                         "classification_counts": {category: sum(item["classification"] == category for item in classified)
+                                                   for category in sorted({item["classification"] for item in classified})}}}
     if audit_path is None:
         audit_path = source.with_suffix(source.suffix + ".audit.json")
     audit_path = Path(audit_path); audit_path.parent.mkdir(parents=True, exist_ok=True)
