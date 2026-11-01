@@ -38,6 +38,16 @@ def app():
     return QApplication.instance() or QApplication([])
 
 
+def test_dividend_identity_fields_are_independent_and_visible_in_field_analysis(tmp_path):
+    catalog = CatalogStore(tmp_path).catalog("comdirect", "user.comdirect-ertraege", "comdirect Dividendengutschrift", "*")
+    result = {"events": [{"security_name": "Example-ETF Inhaber-Anteile o.N.",
+                           "security_wkn": "A1B2C3", "security_isin": "DE000A1B2C35"}]}
+    rows = {row.path: row for row in build_field_analysis_rows({"result": result}, catalog)}
+    assert rows["events[0].security_name"].value == "Example-ETF Inhaber-Anteile o.N."
+    assert rows["events[0].security_wkn"].value == "A1B2C3"
+    assert rows["events[0].security_isin"].value == "DE000A1B2C35"
+
+
 def stored_document(tmp_path):
     path = create_demo_pdf(tmp_path / "analysis.pdf", TEXT)
     report = analyse_pdf(path, "STANDARD")

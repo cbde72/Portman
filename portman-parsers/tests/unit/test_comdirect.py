@@ -156,3 +156,44 @@ Aktienfonds                       unbekannt
 Inhaber-Anteile                    keine ISIN
 Referenz 716460"""
  assert extract_comdirect_security_identity(text)==(None,None,None)
+
+
+def test_dividend_identity_accepts_spaced_glyphs_and_variable_columns():
+ from portman_parsers.plugins.comdirect import extract_comdirect_security_identity
+ text="""Wertpapier-Bezeichnung   WKN/ISIN
+per 01.02.2025  Example-ETF  A1B2C3
+STK 1,000  I n h a b e r - A n t e i l e o . N .  DE000A1B2C35"""
+ assert extract_comdirect_security_identity(text)==("Example-ETF Inhaber-Anteile o.N.","A1B2C3","DE000A1B2C35")
+
+
+def test_dividend_identity_rejects_invalid_isin_checksum_and_reports_no_value():
+ from portman_parsers.plugins.comdirect import _extract_comdirect_security_identity
+ identity=_extract_comdirect_security_identity("""Wertpapier-Bezeichnung WKN/ISIN
+per 01.02.2025 Generic Fund 123456
+STK 1,000 Accumulating Shares DE000A1B2C34""")
+ assert identity.status=="INVALID" and identity.isin is None
+
+
+def test_dividend_identity_marks_multiple_identifiers_ambiguous():
+ from portman_parsers.plugins.comdirect import _extract_comdirect_security_identity
+ identity=_extract_comdirect_security_identity("""Wertpapier-Bezeichnung WKN/ISIN
+per 01.02.2025 First Fund 123456
+STK 1,000 First Shares DE000A1B2C35""")
+ assert identity.status=="RECOGNIZED"
+ identity=_extract_comdirect_security_identity("""Wertpapier-Bezeichnung WKN/ISIN
+per 01.02.2025 First Fund 123456 654321
+STK 1,000 First Shares DE000A1B2C30""")
+ assert identity.status=="AMBIGUOUS"
+
+
+def test_dividend_does_not_create_security_movement_for_identity_quantity():
+ text="""comdirect
+Dividendengutschrift
+Wertpapier-Bezeichnung WKN/ISIN
+per 01.02.2025 Example Fund 123456
+STK 1,000 Shares DE000A1B2C30
+Zu Ihren Gunsten EUR 1,00
+Abrechnung Dividendengutschrift"""
+ plugin=ComdirectPlugin(); source=PdfDocument("no-security-movement","c"*64,(PdfPage(1,text),))
+ event=plugin.parse(source,plugin.detect(source)[0]).events[0]
+ assert event.kind=="DIVIDEND" and not event.security_movements and not event.trades
