@@ -387,12 +387,17 @@ class FinancialEvent:
     evidence_ids: tuple[str, ...] = ()
     fee_events: tuple[FeeEvent, ...] = ()
     trades: tuple[SecurityTrade, ...] = ()
+    security_name: str | MissingValue = MissingValue.UNKNOWN
+    security_wkn: str | MissingValue = MissingValue.UNKNOWN
+    security_isin: str | MissingValue = MissingValue.UNKNOWN
+    security_identity_evidence_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.event_id or not self.document_id or not self.kind:
             raise ValueError("event identity, document identity and kind are required")
         for name in ("cash_movements", "security_movements", "tax_events", "cost_events", "evidence_ids", "fee_events", "trades"):
             object.__setattr__(self, name, tuple(getattr(self, name)))
+        object.__setattr__(self, "security_identity_evidence_ids", tuple(self.security_identity_evidence_ids))
         children = (*self.cash_movements, *self.security_movements, *self.tax_events, *self.cost_events, *self.trades)
         if any(child.event_id != self.event_id for child in children):
             raise ValueError("all child records must reference their parent event")
