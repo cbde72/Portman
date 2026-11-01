@@ -21,6 +21,8 @@ def build_parser() -> argparse.ArgumentParser:
     batch.add_argument("path")
     batch.add_argument("--output", "-o")
     batch.add_argument("--csv")
+    batch.add_argument("--training-database", "--training-db", dest="training_database",
+                       help="Bestehende Trainingsdatenbank nur lesend für CSV-Zusatzspalten")
     subparsers.add_parser("gui", help="start the independent desktop GUI")
     return parser
 
@@ -34,9 +36,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     elif args.command == "analyze":
         result = analyse_pdf(args.path)
     elif args.command == "batch":
-        result = analyse_directory(args.path)
+        result = analyse_directory(args.path, plugin_id=None)
         if args.csv:
-            export_batch_csv(result, args.csv)
+            export_batch_csv(result, args.csv, args.training_database)
     elif args.command == "gui":
         from .ui.main_window import main as gui_main
         return gui_main([])
@@ -52,4 +54,3 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

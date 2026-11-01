@@ -16,6 +16,11 @@ from portman_parsers.rules import ProfileStore, RuleEngine, RuleMode
 from portman_pdf_lab.analysis.fee_views import fee_cost_view
 from portman_pdf_lab.analysis.master_data_views import account_view, depot_account_link_view
 from portman_pdf_lab.application.comdirect_comparison import compare_comdirect_parsers
+from portman_pdf_lab.application.training_export import (
+    TrainingExportReader,
+    training_columns,
+    training_values,
+)
 
 
 def analyse_pdf(path: str | Path, rule_mode: RuleMode | str = RuleMode.STANDARD,
@@ -99,7 +104,9 @@ def analyse_pdf(path: str | Path, rule_mode: RuleMode | str = RuleMode.STANDARD,
                 "timings": {**timings, "total_ns": perf_counter_ns() - total_start}}
 
 
-def analyse_directory(path: str | Path, progress=None, cancelled=None) -> dict[str, object]:
+def analyse_directory(path: str | Path, progress=None, cancelled=None,
+                      profile_store: ProfileStore | None = None,
+                      plugin_id: str | None = None) -> dict[str, object]:
     root = Path(path)
     files = sorted(root.rglob("*.pdf"))
     results = []; seen = {}
@@ -110,7 +117,7 @@ def analyse_directory(path: str | Path, progress=None, cancelled=None) -> dict[s
         if digest in seen:
             result = {"source": str(item), "source_hash": digest, "duplicate_of": seen[digest], "skipped": True}
         else:
-            seen[digest] = str(item); result = analyse_pdf(item)
+            seen[digest] = str(item); result = analyse_pdf(item, profile_store=profile_store, plugin_id=plugin_id)
         results.append(result)
         if progress:
             progress(index, len(files), item)
@@ -118,15 +125,29 @@ def analyse_directory(path: str | Path, progress=None, cancelled=None) -> dict[s
             "discovered": len(files), "cancelled": len(results) < len(files)}
 
 
-def export_batch_csv(report: dict[str, object], path: str | Path) -> Path:
+def export_batch_csv(report: dict[str, object], path: str | Path,
+                     training_database: str | Path | None = None) -> Path:
     target = Path(path)
-    with target.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=("source", "source_hash", "plugin_id", "handler_id", "status", "runtime_ns"))
-        writer.writeheader()
-        for item in report.get("files", []):
-            detection = item.get("detection", {})
-            writer.writerow({"source": item.get("source", ""), "source_hash": item.get("source_hash", ""),
-                             "plugin_id": detection.get("plugin_id", ""), "handler_id": detection.get("handler_id", ""),
-                             "status": "DUPLICATE" if item.get("duplicate_of") else "ERROR" if item.get("error") else "OK",
-                             "runtime_ns": item.get("timings", {}).get("total_ns", "")})
+    files = list(report.get("files", []))
+    with TrainingExportReader(training_database) as reader:
+        training_by_index = [reader.for_report(item) for item in files]
+        base_fields = ("source", "source_hash", "plugin_id", "handler_id", "status", "runtime_ns")
+        # The union is calculated before writing, so training columns are always
+        # at the far right and documents without training stay empty.
+        max_items = max((len(items) for items in training_by_index), default=0)
+        training_fields = training_columns([{} for _ in range(max_items)])
+        fields = (*base_fields, *training_fields)
+        with target.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            for item, training in zip(files, training_by_index):
+                detection = item.get("detection", {}) if isinstance(item.get("detection"), dict) else {}
+                values = {"source": item.get("source", ""), "source_hash": item.get("source_hash", ""),
+                          "plugin_id": detection.get("plugin_id", ""), "handler_id": detection.get("handler_id", ""),
+                          "status": "DUPLICATE" if item.get("duplicate_of") else "ERROR" if item.get("error") else "OK",
+                          "runtime_ns": item.get("timings", {}).get("total_ns", "")}
+                values.update(training_values(training))
+                writer.writerow(values)
+        if reader.warning:
+            report.setdefault("warnings", []).append(reader.warning)
     return target

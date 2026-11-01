@@ -9,13 +9,12 @@ from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QInputDialog,
     QMainWindow, QMessageBox, QProgressBar, QPushButton, QSplitter, QTabWidget,
-    QTableWidget, QTableWidgetItem, QTextEdit, QToolBar, QVBoxLayout, QWidget, QSizePolicy,
+    QTextEdit, QToolBar, QVBoxLayout, QWidget, QSizePolicy,
 )
 
 from portman_parsers.extraction import extract_pdf
 from portman_parsers.registry import default_registry
 from pypdf import PdfReader
-from portman_pdf_lab.application.pdf_analysis import analyse_pdf
 from portman_pdf_lab.application.reference_service import analyse_and_store
 from portman_pdf_lab.reviews.models import ReviewStatus
 from portman_pdf_lab.storage import ReferenceRepository
@@ -28,7 +27,7 @@ from portman_pdf_lab.ui.field_mapping import CatalogHelpDialog, EditorFactory, F
 from portman_pdf_lab.field_catalog import CatalogStore
 from portman_pdf_lab.training import TrainingService
 from portman_pdf_lab.ui.pdf_markings import (
-    ORIGIN_PARSER, PdfMarking, collect_marking_specs, resolve_marking_specs,
+    PdfMarking, collect_marking_specs, resolve_marking_specs,
     text_layer_markers,
 )
 
@@ -292,6 +291,22 @@ class MainWindow(QMainWindow):
         if not path: return
         self.settings.setValue("dialogs/last-directory", str(Path(path)))
         files = sorted(Path(path).rglob("*.pdf")); self.cancel_requested = False
+        export_training = QMessageBox.question(
+            self, "Parser-Trainingsdaten",
+            "Vorhandene Parser-Trainingsdaten lesend an die CSV anhängen?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) == QMessageBox.StandardButton.Yes
+        csv_path = None
+        if export_training:
+            csv_path, _ = QFileDialog.getSaveFileName(
+                self, "Batch-CSV speichern", str(Path(path) / "parser-batch.csv"), "CSV (*.csv)"
+            )
+            if not csv_path:
+                export_training = False
+        self._batch_csv_path = Path(csv_path) if csv_path and export_training else None
+        self._batch_training_database = self.repository_path if export_training else None
+        self._batch_reports = []
         self.progress.setRange(0, len(files)); self.progress.setValue(0); self.progress.setVisible(True)
         for item in files: self.analyse(item)
 
@@ -309,6 +324,8 @@ class MainWindow(QMainWindow):
     def _analysis_ready(self, path: Path, report: dict):
         if self.cancel_requested: return
         key = str(path); self.documents[key] = report
+        if hasattr(self, "_batch_reports"):
+            self._batch_reports.append(report)
         if not self.document_list.findItems(key, Qt.MatchExactly): self.document_list.addItem(key)
         self.document_list.setCurrentRow(self.document_list.count() - 1)
         if self.current_pdf == path:
@@ -327,6 +344,15 @@ class MainWindow(QMainWindow):
         if self.progress.isVisible():
             self.progress.setValue(self.progress.value() + 1)
             if self.progress.value() >= self.progress.maximum(): self.progress.setVisible(False)
+            if not self.progress.isVisible() and getattr(self, "_batch_csv_path", None):
+                from portman_pdf_lab.application.pdf_analysis import export_batch_csv
+                batch = {"files": list(getattr(self, "_batch_reports", []))}
+                export_batch_csv(batch, self._batch_csv_path, self._batch_training_database)
+                message = f"CSV exportiert: {self._batch_csv_path}"
+                if batch.get("warnings"):
+                    message += " | Hinweis: " + " | ".join(batch["warnings"])
+                self.statusBar().showMessage(message, 8000)
+                self._batch_csv_path = None
         self.statusBar().showMessage("Analyse abgeschlossen", 3000)
 
     def _filter_documents(self, text: str):
