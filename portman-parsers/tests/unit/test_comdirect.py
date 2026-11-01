@@ -121,3 +121,38 @@ Neuer Saldo 31.01.2026 110,00"""
  source=PdfDocument("duplicate-report","2"*64,(PdfPage(1,text),)); plugin=ComdirectFinanzreportPlugin(); result=plugin.parse(source,plugin.detect(source)[0])
  assert len(result.events)==1 and any(x.code=="DUPLICATE_BOOKING" for x in result.issues)
  assert result.attributes["document_number"]=="9" and result.attributes["period_start"]=="01.01.2026"
+
+def test_dividend_security_column_recognizes_wkn_isin_and_name():
+ text = """comdirect
+Gutschrift fälliger Wertpapier-Erträge
+Dividendengutschrift
+Depotbestand                          Wertpapier-Bezeichnung                WKN/ISIN
+per 15.05.2024                        SAP SE                                  716460
+STK               0,733               Inhaber-Aktien o.N.               DE0007164600
+zahlbar ab 21.05.2024
+Abrechnung Dividendengutschrift
+Zu Ihren Gunsten EUR 1,61"""
+ plugin=ComdirectPlugin(); source=PdfDocument("sap-dividend","b"*64,(PdfPage(1,text),))
+ result=plugin.parse(source,plugin.detect(source)[0]); event=result.events[0]
+ assert event.kind=="DIVIDEND" and not event.trades
+ assert (event.security_name,event.security_wkn,event.security_isin)==("SAP SE","716460","DE0007164600")
+ assert len(event.security_identity_evidence_ids)==3
+ assert event.cash_movements[0].amount==Decimal("1.61")
+
+
+def test_dividend_security_column_generalizes_to_alphanumeric_wkn():
+ from portman_parsers.plugins.comdirect import extract_comdirect_security_identity
+ text="""Wertpapier-Bezeichnung            WKN/ISIN
+Beispiel MSCI ETF                  A0S9GB
+Inhaber-Anteile                    DE000A0S9GB0"""
+ assert extract_comdirect_security_identity(text)==("Beispiel MSCI ETF","A0S9GB","DE000A0S9GB0")
+
+
+def test_dividend_security_column_does_not_pick_unrelated_six_digit_number():
+ from portman_parsers.plugins.comdirect import extract_comdirect_security_identity
+ text="""Konto 123456
+Wertpapier-Bezeichnung            WKN/ISIN
+Aktienfonds                       unbekannt
+Inhaber-Anteile                    keine ISIN
+Referenz 716460"""
+ assert extract_comdirect_security_identity(text)==(None,None,None)
