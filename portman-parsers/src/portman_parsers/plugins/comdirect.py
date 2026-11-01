@@ -196,7 +196,7 @@ class ComdirectPlugin:
    if missing: issues.append(Issue(stable_id("issue",event_id,code),code,IssueSeverity.WARNING,message,event_id=event_id,nature=IssueNature.MISSING_INFORMATION))
   event_ev=ev("economic_event",settlement.group(0) if settlement else next(p for x,p in TITLES if x==h)); iban=IBAN.search(text); account_id=None; accounts=()
   if iban:
-   iban_value=re.sub(r"\s","",iban.group(0)); ie=ev("iban",iban.group(0)); account_id=stable_id("account","comdirect",iban_value); accounts=(Account(account_id,bank_name=FieldValue.from_pdf(iban_value,1,ie),currency=FieldValue.from_pdf("EUR",1,ie)),)
+   iban_value=re.sub(r"\s","",iban.group(0)); ie=ev("iban",iban.group(0)); account_id=stable_id("account","comdirect",iban_value); accounts=(Account(account_id,bank_name=FieldValue.from_pdf("comdirect",1,ie),iban=FieldValue.from_pdf(iban_value,1,ie),currency=FieldValue.from_pdf("EUR",1,ie)),)
   links=()
   if depot_id and account_id:
    links=(DepotAccountLink(stable_id("depot-account",depot_id,account_id,doc.document_id),depot_id,account_id,FieldValue.from_pdf("SETTLEMENT",1,ie),valid_from=FieldValue.from_pdf(date(valuta.group(1)),1,event_ev) if valuta else FieldValue.unknown(),is_default=FieldValue.manual(False)),)
