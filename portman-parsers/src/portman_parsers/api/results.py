@@ -1,6 +1,7 @@
 """Aggregate parser result and deterministic JSON conversion."""
 
 from dataclasses import dataclass, fields, is_dataclass
+from copy import deepcopy
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
@@ -14,6 +15,34 @@ from .events import AdvanceTaxCalculation, AdvanceTaxCarryforward, FinancialEven
 from .evidence import Evidence
 from .issues import Issue
 from .values import FieldValue, MissingValue
+
+
+SCHEMA_VERSION = "1.6.0"
+LEGACY_SCHEMA_VERSIONS = frozenset({"1.5.0"})
+
+
+def normalize_result_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Add Phase-0 optional fields while keeping older JSON readable.
+
+    Stored parser runs are intentionally not rewritten.  The adapter creates a
+    current in-memory view with explicit defaults for consumers that understand
+    the current contract.
+    """
+    result = deepcopy(dict(payload))
+    version = str(result.get("schema_version") or "1.5.0")
+    if version not in LEGACY_SCHEMA_VERSIONS and version != SCHEMA_VERSION:
+        raise ValueError(f"unsupported parser result schema: {version}")
+    for event in result.get("events", ()):
+        if isinstance(event, dict):
+            event.setdefault("security_name", MissingValue.UNKNOWN.value)
+            event.setdefault("security_wkn", MissingValue.UNKNOWN.value)
+            event.setdefault("security_isin", MissingValue.UNKNOWN.value)
+            event.setdefault("security_identity_evidence_ids", [])
+            event.setdefault("bank_reference", MissingValue.UNKNOWN.value)
+            event.setdefault("bank_reference_status", "MISSING")
+            event.setdefault("bank_reference_evidence_ids", [])
+    result["schema_version"] = SCHEMA_VERSION
+    return result
 
 
 def _field_values(value: Any):
@@ -53,7 +82,7 @@ class ParsedDocument:
     plugin_id: str
     plugin_version: str
     handler_id: str
-    schema_version: str = "1.5.0"
+    schema_version: str = SCHEMA_VERSION
     events: tuple[FinancialEvent, ...] = ()
     snapshots: tuple[PositionSnapshot, ...] = ()
     evidence: tuple[Evidence, ...] = ()
@@ -116,4 +145,3 @@ class ParsedDocument:
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-

@@ -85,3 +85,22 @@ def test_export_contains_metadata_without_copying_pdf(tmp_path):
     content = target.read_text(encoding="utf-8")
     assert "outside/reference.pdf" in content
     assert not (tmp_path / "reference.pdf").exists()
+
+
+def test_legacy_parser_run_is_readable_with_phase0_defaults(tmp_path):
+    repo = repository(tmp_path)
+    run = repo.save_run("doc-1", "fnz.finvesto", "depotauszug", "2.0", "1.5.0",
+                        {"schema_version": "1.5.0", "events": [{"event_id": "e-1"}]}, [], 1)
+    stored = repo.run(run)
+    assert stored["result"]["schema_version"] == "1.6.0"
+    assert stored["result"]["events"][0]["bank_reference_status"] == "MISSING"
+
+
+def test_new_bank_reference_survives_sqlite_roundtrip(tmp_path):
+    repo = repository(tmp_path)
+    run = repo.save_run("doc-1", "user.comdirect-ertraege", "dividendengutschrift", "2.0", "1.6.0",
+                        {"events": [{"event_id": "e-1", "bank_reference": "Ref-ABC123",
+                                     "bank_reference_status": "RECOGNIZED"}]}, [], 1)
+    event = repo.run(run)["result"]["events"][0]
+    assert event["bank_reference"] == "Ref-ABC123"
+    assert event["bank_reference_status"] == "RECOGNIZED"

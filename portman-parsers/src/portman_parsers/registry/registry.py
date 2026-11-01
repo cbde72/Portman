@@ -63,6 +63,13 @@ class PluginRegistry:
         except KeyError as exc:
             raise UnknownPluginError(plugin_id) from exc
 
+    def handler_status(self, plugin_id: str, handler_id: str) -> str:
+        metadata = next((item for item in APPROVED_PLUGINS if item.plugin_id == plugin_id), None)
+        handler = next((item for item in metadata.handlers if item.handler_id == handler_id), None) if metadata else None
+        if handler is None:
+            raise UnknownPluginError(f"unknown handler: {plugin_id}/{handler_id}")
+        return handler.readiness
+
     def metadata(self) -> tuple[PluginMetadata, ...]:
         return tuple(self._plugins[key].metadata for key in sorted(self._plugins))
 
@@ -122,4 +129,3 @@ def default_registry() -> PluginRegistry:
             plugin = MetadataOnlyPlugin(metadata)
         registry.register(plugin)
     return registry
-

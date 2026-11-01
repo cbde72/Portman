@@ -9,6 +9,7 @@ import sqlite3
 from typing import Iterator
 
 from portman_pdf_lab.reviews.models import ReviewStatus
+from portman_parsers.api import normalize_result_payload
 
 SCHEMA_VERSION = 3
 
@@ -227,7 +228,7 @@ class ReferenceRepository:
             row = db.execute("SELECT * FROM parser_runs WHERE run_id=?", (run_id,)).fetchone()
         if not row:
             raise KeyError(run_id)
-        value = dict(row); value["result"] = json.loads(value.pop("result_json")); value["issues"] = json.loads(value.pop("issues_json"))
+        value = dict(row); value["result"] = normalize_result_payload(json.loads(value.pop("result_json"))); value["issues"] = json.loads(value.pop("issues_json"))
         return value
 
     def runs_for_document(self, document_id: str) -> tuple[dict, ...]:
