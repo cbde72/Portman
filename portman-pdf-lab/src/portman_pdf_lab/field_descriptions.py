@@ -343,7 +343,15 @@ def resolve_description(path: str, catalog: FieldCatalog | None = None,
     if catalog:
         definition = catalog.field_for_description(path)
     store = description_catalog or catalog_for_field_catalog(catalog)
+    existing = store.get(path)
+    if existing is not None:
+        return existing
     entry = store.resolve(path, definition)
     if store.path:
-        store.save()
+        try:
+            store.save()
+        except PermissionError:
+            # A concurrent Qt callback or Windows file scanner may hold the
+            # destination; the description remains available in memory.
+            warnings.warn(f"Description catalog temporarily locked: {store.path}", RuntimeWarning)
     return entry
