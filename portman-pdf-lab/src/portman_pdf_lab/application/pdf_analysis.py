@@ -8,7 +8,7 @@ import json
 
 from portman_parsers.api import Issue, IssueNature, IssueSeverity, to_json_compatible
 from portman_parsers.extraction import PdfExtractionError, extract_pdf
-from portman_parsers.registry import default_registry
+from portman_parsers.registry import default_registry, UnknownPluginError
 from portman_parsers.utilities import stable_id
 from portman_parsers.validation import validate_parsed_document
 from portman_parsers.rules import ProfileStore, RuleEngine, RuleMode
@@ -19,7 +19,8 @@ from portman_pdf_lab.application.comdirect_comparison import compare_comdirect_p
 
 
 def analyse_pdf(path: str | Path, rule_mode: RuleMode | str = RuleMode.STANDARD,
-                profile_store: ProfileStore | None = None) -> dict[str, object]:
+                profile_store: ProfileStore | None = None,
+                plugin_id: str | None = None) -> dict[str, object]:
     source = Path(path)
     total_start = perf_counter_ns()
     timings = {}
@@ -45,11 +46,20 @@ def analyse_pdf(path: str | Path, rule_mode: RuleMode | str = RuleMode.STANDARD,
                     "text_preparation": preparation_report(document),
                     "timings": {**timings, "total_ns": perf_counter_ns() - total_start}}
         registry = default_registry()
-        started = perf_counter_ns(); detection = registry.select(document); timings["detection_ns"] = perf_counter_ns() - started
+        started = perf_counter_ns()
+        if plugin_id:
+            # Restrict detection to the selected registered plugin.  Do not
+            # manufacture detections when that plugin does not recognize a PDF.
+            plugin = registry.plugin(plugin_id)
+            candidates = tuple(sorted(plugin.detect(document), key=lambda d: (-d.confidence, d.handler_id)))
+            detection = candidates[0] if candidates else None
+        else:
+            detection = registry.select(document)
+        timings["detection_ns"] = perf_counter_ns() - started
         if detection is None:
             issue = Issue(stable_id("issue", document.document_id, "unsupported"),
                           "UNSUPPORTED_DOCUMENT", IssueSeverity.ERROR,
-                          "No approved parser recognized this document.")
+                          "Selected parser did not recognize this document." if plugin_id else "No approved parser recognized this document.")
             return {"source": str(source), "document_id": document.document_id,
                     "source_hash": document.source_hash, "issues": to_json_compatible((issue,)),
                     "text_preparation": preparation_report(document),
@@ -84,7 +94,7 @@ def analyse_pdf(path: str | Path, rule_mode: RuleMode | str = RuleMode.STANDARD,
         timings["reporting_ns"] = perf_counter_ns() - started
         report["timings"] = {**timings, "total_ns": perf_counter_ns() - total_start}
         return report
-    except (PdfExtractionError, OSError, ValueError) as exc:
+    except (PdfExtractionError, OSError, ValueError, UnknownPluginError) as exc:
         return {"source": str(source), "error": type(exc).__name__, "message": str(exc),
                 "timings": {**timings, "total_ns": perf_counter_ns() - total_start}}
 
