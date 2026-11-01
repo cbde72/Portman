@@ -42,7 +42,7 @@ def test_complete_quick_training_stays_in_field_analysis_and_separates_release(t
     application = app(); window, repository, pdf = prepared(tmp_path)
     try:
         assert window.ui_mode.currentText() == "Schnell"
-        venue = window.field_analysis.row_for_path("attributes.user_fields.trade.venue")
+        venue = window.field_analysis.row_for_path("events[0].trades[0].security_name")
         window._start_field_training(venue)
         assert window.tabs.currentWidget() is window.field_analysis and not window.quick_training.isHidden()
         assert window.quick_training.context.parser_id == "user.comdirect-ertraege"
@@ -87,7 +87,7 @@ def test_complete_quick_training_stays_in_field_analysis_and_separates_release(t
 def test_quick_training_cancel_and_mode_switch_preserve_panel_state(tmp_path):
     application = app(); window, _repository, _pdf = prepared(tmp_path)
     try:
-        venue = window.field_analysis.row_for_path("attributes.user_fields.trade.venue")
+        venue = window.field_analysis.row_for_path("events[0].trades[0].security_name")
         window._start_field_training(venue); context = window.quick_training.context
         window.ui_mode.setCurrentText("Experte")
         assert window.quick_training.context is context and window.quick_training.isHidden()
