@@ -78,3 +78,20 @@ def test_embedded_u_letters_are_not_removed():
     text, diagnostics = _normalize(value)
     assert text == value
     assert "ISOLATED_REPEATED_U_GLYPH_LINE_REMOVED" not in diagnostics
+
+
+def test_embedded_u_font_artifacts_trigger_pdfium_fallback(monkeypatch, tmp_path):
+    from portman_parsers.extraction import preparation
+    pdf = tmp_path / "sample.pdf"
+    pdf.write_bytes(b"test")
+    original = "HerrnUUUUUUUUUUUUUUUUUUU\nChristophUBuehringUUUUUUUUUUUUUU\nDividendengutschrift"
+    fallback = "Herrn\nChristoph Buehring\nDividendengutschrift\nEUR 1,61"
+    monkeypatch.setattr(preparation, "_pdfium_page",
+                        lambda path, page: (fallback, (), "test-pdfium"))
+    prepared = preparation.prepare_pdf(pdf, [original], "a" * 64)
+    page = prepared.pages[0]
+    assert page.fallback_used
+    assert page.extractor_id == "pdfium"
+    assert "Christoph Buehring" in page.normalized_text
+    assert "UUUUUUUU" not in page.normalized_text
+    assert page.original_text == original
