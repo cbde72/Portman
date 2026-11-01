@@ -284,3 +284,37 @@ def test_main_window_field_analysis_tab_and_training_navigation(tmp_path):
     finally:
         window.close()
         application.processEvents()
+
+
+def test_dividend_identity_fields_are_independent_and_visible_in_field_analysis(tmp_path):
+    catalog = CatalogStore(tmp_path).catalog("comdirect", "user.comdirect-ertraege", "comdirect Dividendengutschrift", "*")
+    result = {"events": [{"security_name": "Example-ETF Inhaber-Anteile o.N.",
+                           "security_wkn": "A1B2C3", "security_isin": "DE000A1B2C35"}]}
+    rows = {row.path: row for row in build_field_analysis_rows({"result": result}, catalog)}
+    assert rows["events[0].security_name"].value == "Example-ETF Inhaber-Anteile o.N."
+    assert rows["events[0].security_wkn"].value == "A1B2C3"
+    assert rows["events[0].security_isin"].value == "DE000A1B2C35"
+
+
+def stored_document(tmp_path):
+    path = create_demo_pdf(tmp_path / "analysis.pdf", TEXT)
+    report = analyse_pdf(path, "STANDARD")
+    detection, result = report["detection"], report["result"]
+    repository = ReferenceRepository(tmp_path / "analysis.sqlite")
+    document_id = repository.register_document(
+        report["document_id"], report["source_hash"], str(path),
+        detection["plugin_id"], detection["document_type"])
+    report["run_id"] = repository.save_run(
+        document_id, detection["plugin_id"], detection["handler_id"],
+        detection["plugin_version"], result["schema_version"], result,
+        report.get("issues", []), report["timings"]["total_ns"])
+    catalog = CatalogStore(tmp_path / "catalogs").catalog(
+        "comdirect", result["plugin_id"], detection["document_type"],
+        result.get("attributes", {}).get("layout_path", "*"))
+    return path, report, repository, catalog, document_id
+
+
+def row_for(rows, path):
+    return next(row for row in rows if row.path == path)
+
+
