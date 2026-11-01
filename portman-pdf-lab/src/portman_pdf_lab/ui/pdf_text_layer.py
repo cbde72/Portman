@@ -169,7 +169,7 @@ class PdfTextLayer(QTextEdit):
             for marking in groups:
                 label = QAction(f"{marking.label}: {marking.value or '—'} [{marking.origin}]", self)
                 label.setEnabled(False); menu.addAction(label)
-        for label, action in (("Feld zuordnen", "map"), ("Neues Feld definieren", "new"),
+        for label, action in (("Feld zuordnen", "map"),
                               ("Als Referenzwert übernehmen", "reference"), ("Fundstelle anzeigen", "locate")):
             item = QAction(label, self); item.setEnabled(selection is not None)
             item.triggered.connect(lambda checked=False, name=action: self._request(name)); menu.addAction(item)
