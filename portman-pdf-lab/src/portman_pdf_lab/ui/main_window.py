@@ -1,10 +1,15 @@
 """Lean, independent PySide6 desktop interface for PDF analysis and review."""
 
+from collections.abc import Callable, Mapping
 import json
+import logging
 from pathlib import Path
 import sys
 
-from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal, Slot, QStandardPaths, QSettings
+from PySide6.QtCore import (
+    QObject, QRunnable, Qt, QThreadPool, QSignalBlocker, Signal, Slot,
+    QStandardPaths, QSettings,
+)
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QInputDialog,
@@ -15,6 +20,7 @@ from PySide6.QtWidgets import (
 from portman_parsers.extraction import extract_pdf
 from portman_parsers.registry import default_registry
 from pypdf import PdfReader
+from portman_pdf_lab.application.pdf_analysis import analyse_pdf, export_batch_csv
 from portman_pdf_lab.application.reference_service import analyse_and_store
 from portman_pdf_lab.reviews.models import ReviewStatus
 from portman_pdf_lab.storage import ReferenceRepository
@@ -40,6 +46,9 @@ from portman_pdf_lab.ui.direct_pdf_view import DirectPdfView
 from portman_pdf_lab.ui.quick_training import QuickTrainingPanel
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 def _positive_int(value) -> int:
     try:
         number = int(value)
@@ -49,23 +58,57 @@ def _positive_int(value) -> int:
 
 
 class WorkerSignals(QObject):
-    result = Signal(object)
-    error = Signal(str)
-    finished = Signal()
+    result = Signal(str, object)   # (path, report)
+    error = Signal(str, str)       # (path, message)
+    finished = Signal(str)         # path
 
 
 class AnalysisWorker(QRunnable):
-    def __init__(self, path: Path, repository_path: Path, rule_mode="STANDARD", plugin_id=None):
-        super().__init__(); self.path = path; self.repository_path = repository_path; self.rule_mode = rule_mode; self.plugin_id = plugin_id; self.signals = WorkerSignals()
+    """One PDF analysis task.
+
+    ``persist=False`` (batch / "Run On Folder") uses the pure, non-writing
+    :func:`analyse_pdf` path and never touches SQLite, reference values, parser
+    history, training data or field-catalog files.  ``persist=True`` keeps the
+    original single-document behaviour via :func:`analyse_and_store`.
+
+    ``autoDelete`` is disabled so the Qt thread pool never deletes the C++
+    runnable while Python still holds it; lifetime is managed through
+    ``MainWindow.workers``.
+    """
+
+    def __init__(self, path: Path, repository_path: Path, rule_mode="STANDARD",
+                 plugin_id=None, persist: bool = True,
+                 cancelled: Callable[[], bool] | None = None,
+                 batch: bool = False):
+        super().__init__()
+        self.setAutoDelete(False)
+        self.path = Path(path)
+        self.repository_path = repository_path
+        self.rule_mode = rule_mode
+        self.plugin_id = plugin_id
+        self.persist = persist
+        self.cancelled = cancelled
+        self.batch = batch
+        self.signals = WorkerSignals()
 
     @Slot()
     def run(self):
+        path_str = str(self.path)
         try:
-            self.signals.result.emit(analyse_and_store(self.path, ReferenceRepository(self.repository_path), self.rule_mode, plugin_id=self.plugin_id)[0])
-        except Exception as exc:  # defensive GUI boundary
-            self.signals.error.emit(str(exc))
+            if self.cancelled is not None and self.cancelled():
+                return
+            if self.persist:
+                report = analyse_and_store(self.path, ReferenceRepository(self.repository_path),
+                                           self.rule_mode, plugin_id=self.plugin_id)[0]
+            else:
+                # Batch mode is strictly read-only: STANDARD, no profile store,
+                # no repository, therefore no SQLite/catalog writes.
+                report = analyse_pdf(self.path, "STANDARD", plugin_id=self.plugin_id)
+            self.signals.result.emit(path_str, report)
+        except Exception as exc:  # defensive GUI boundary; never crash a slot
+            self.signals.error.emit(path_str, f"{type(exc).__name__}: {exc}")
         finally:
-            self.signals.finished.emit()
+            self.signals.finished.emit(path_str)
 
 
 class MainWindow(QMainWindow):
@@ -79,6 +122,8 @@ class MainWindow(QMainWindow):
         self.resize(1500, 900)
         self.thread_pool = QThreadPool.globalInstance()
         self.workers: set[AnalysisWorker] = set()
+        # Single source of truth: every path maps to exactly one report dict.
+        # No other type is ever stored here; see ``_normalise_report`` / ``_report_for``.
         self.documents: dict[str, dict] = {}
         self.current_pdf: Path | None = None
         data_dir = Path(QStandardPaths.writableLocation(QStandardPaths.AppLocalDataLocation))
@@ -95,6 +140,15 @@ class MainWindow(QMainWindow):
             )
         self.current_run_id: int | None = None
         self.cancel_requested = False
+        self._batch_active = False
+        self._batch_cancel_requested = False
+        self._batch_total = 0
+        self._batch_completed = 0
+        self._batch_order: list[str] = []
+        self._batch_reports: dict[str, dict] = {}
+        self._batch_csv_path: Path | None = None
+        self._batch_training_database: Path | None = None
+        self._selecting_document = False
         self.settings = settings or QSettings("Portman", "PDFLab")
         self.page_texts: dict[int, str] = {}
         self._pdf_text_cache: dict[int, str] = {}
@@ -290,89 +344,264 @@ class MainWindow(QMainWindow):
         path = QFileDialog.getExistingDirectory(self, "PDF-Ordner wählen", start)
         if not path: return
         self.settings.setValue("dialogs/last-directory", str(Path(path)))
-        files = sorted(Path(path).rglob("*.pdf")); self.cancel_requested = False
+        files = sorted(Path(path).rglob("*.pdf"))
+        if not files:
+            QMessageBox.information(self, "Ordner analysieren", "Im gewählten Ordner wurden keine PDF-Dateien gefunden.")
+            return
         export_training = QMessageBox.question(
             self, "Parser-Trainingsdaten",
             "Vorhandene Parser-Trainingsdaten lesend an die CSV anhängen?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         ) == QMessageBox.StandardButton.Yes
-        csv_path = None
-        if export_training:
-            csv_path, _ = QFileDialog.getSaveFileName(
-                self, "Batch-CSV speichern", str(Path(path) / "parser-batch.csv"), "CSV (*.csv)"
-            )
-            if not csv_path:
-                export_training = False
-        self._batch_csv_path = Path(csv_path) if csv_path and export_training else None
-        self._batch_training_database = self.repository_path if export_training else None
-        self._batch_reports = []
-        self.progress.setRange(0, len(files)); self.progress.setValue(0); self.progress.setVisible(True)
-        for item in files: self.analyse(item)
+        # The CSV is always written, even when no training columns are requested.
+        default_csv = Path(path) / "parser-batch.csv"
+        csv_path, _ = QFileDialog.getSaveFileName(
+            self, "Batch-CSV speichern", str(default_csv), "CSV (*.csv)"
+        )
+        if not csv_path:
+            csv_path = str(default_csv)
+            self.statusBar().showMessage("Kein CSV-Ziel gewählt – Standardpfad wird verwendet.", 5000)
+        self.start_batch(files, Path(csv_path),
+                         self.repository_path if export_training else None)
 
+    def start_batch(self, files, csv_path: str | Path,
+                    training_database: str | Path | None = None):
+        """Start a read-only batch analysis with one CSV row per PDF.
+
+        Batch workers use ``persist=False`` and never call
+        :func:`analyse_and_store`; SQLite, reference values, training data and
+        parser history are not written.  The CSV is exported when all workers
+        have finished, including after a cancel request (partial result).
+        """
+        order: list[str] = []
+        seen: set[str] = set()
+        for item in files:
+            key = str(Path(item))
+            if key not in seen:
+                seen.add(key); order.append(key)
+        if self._batch_active:
+            self.statusBar().showMessage("Eine Batchanalyse läuft bereits.", 5000)
+            return
+        self.cancel_requested = False
+        self._batch_cancel_requested = False
+        self._batch_active = True
+        self._batch_total = len(order)
+        self._batch_completed = 0
+        self._batch_order = order
+        self._batch_reports = {}
+        self._batch_csv_path = Path(csv_path)
+        self._batch_training_database = Path(training_database) if training_database else None
+        self.progress.setRange(0, len(order)); self.progress.setValue(0)
+        self.progress.setVisible(bool(order))
+        if not order:
+            self._finish_batch()
+            return
+        for key in order:
+            self.analyse(Path(key), persist=False, batch=True)
+
+    @Slot()
     def cancel_batch(self):
-        self.cancel_requested = True; self.thread_pool.clear(); self.progress.setVisible(False)
-        self.statusBar().showMessage("Batchanalyse abgebrochen", 3000)
+        if not self._batch_active:
+            return
+        self.cancel_requested = True
+        self._batch_cancel_requested = True
+        # Do not clear the thread pool: queued workers still emit ``finished``
+        # and thereby let the batch export its partial CSV deterministically.
+        self.statusBar().showMessage("Batchanalyse wird abgebrochen …", 5000)
 
-    def analyse(self, path: Path, rule_mode=None):
+    def analyse(self, path: Path, rule_mode=None, persist: bool = True, batch: bool = False):
+        path = Path(path)
         self.statusBar().showMessage(f"Analysiere {path.name} …")
-        worker = AnalysisWorker(path, self.repository_path, rule_mode or self.training_widget.mode.currentText(), self.parser_choice.currentData()); self.workers.add(worker)
-        worker.signals.result.connect(lambda result, p=path: self._analysis_ready(p, result))
-        worker.signals.error.connect(lambda message: QMessageBox.warning(self, "Analysefehler", message))
-        worker.signals.finished.connect(lambda w=worker: self._worker_finished(w)); self.thread_pool.start(worker)
+        worker = AnalysisWorker(
+            path, self.repository_path,
+            rule_mode or self.training_widget.mode.currentText(),
+            self.parser_choice.currentData(), persist=persist,
+            cancelled=(lambda: self._batch_cancel_requested) if batch else None,
+            batch=batch,
+        )
+        self.workers.add(worker)
+        worker.signals.result.connect(
+            lambda result_path, result, w=worker: self._analysis_ready(result_path, result, w))
+        worker.signals.error.connect(
+            lambda error_path, message, w=worker: self._analysis_failed(error_path, message, w))
+        worker.signals.finished.connect(
+            lambda _finished_path, w=worker: self._worker_finished(w))
+        self.thread_pool.start(worker)
 
-    def _analysis_ready(self, path: Path, report: dict):
-        if self.cancel_requested: return
-        key = str(path); self.documents[key] = report
-        if hasattr(self, "_batch_reports"):
-            self._batch_reports.append(report)
-        if not self.document_list.findItems(key, Qt.MatchExactly): self.document_list.addItem(key)
-        self.document_list.setCurrentRow(self.document_list.count() - 1)
-        if self.current_pdf == path:
-            self.show_report(report); self.refresh_field_analysis(); self.refresh_pdf_markings()
-        if self.quick_training.active and report.get("rule_mode_effective") == "EXTENDED":
-            context = self.quick_training.context; reference = EditorFactory.text(self.quick_training.editor)
-            decision = next((item for item in report.get("rule_decisions", ())
-                             if item.get("field_path") == context.field_path), {})
-            extended = decision.get("effective_value")
-            status = "ERKANNT" if str(extended) == str(reference) and extended is not None else "PRÜFEN"
-            self.quick_training.rechecked(context.current_value, extended, reference, status)
+    @staticmethod
+    def _error_report(path: str, code: str, message: str) -> dict:
+        return {"source": path, "error": code, "message": message,
+                "issues": [{"code": code, "message": message}]}
+
+    def _normalise_report(self, path: str, report) -> dict:
+        """Enforce the ``dict[str, dict]`` contract for ``self.documents``."""
+        if isinstance(report, Mapping):
+            value = dict(report)
+            value.setdefault("source", path)
+            return value
+        message = (f"Ungültiger Analysebericht für {path}: "
+                   f"{type(report).__name__} statt Dictionary.")
+        LOGGER.error(message)
+        return self._error_report(path, "INVALID_REPORT", message)
+
+    def _analysis_ready(self, path, report, worker=None):
+        key = str(Path(path))
+        value = self._normalise_report(key, report)
+        self.documents[key] = value
+        is_batch = bool(worker is not None and getattr(worker, "batch", False))
+        if is_batch:
+            self._batch_reports[key] = value
+        # During a batch run the user's current selection must stay stable;
+        # single-document analyses still reveal their result immediately.
+        self._show_document_item(key, select=not is_batch)
+        try:
+            if self.current_pdf == Path(key):
+                self.show_report(value); self.refresh_field_analysis(); self.refresh_pdf_markings()
+            if (self.quick_training.active and self.quick_training.context is not None
+                    and value.get("rule_mode_effective") == "EXTENDED"):
+                context = self.quick_training.context; reference = EditorFactory.text(self.quick_training.editor)
+                decision = next((item for item in value.get("rule_decisions", ())
+                                 if item.get("field_path") == context.field_path), {})
+                extended = decision.get("effective_value")
+                status = "ERKANNT" if str(extended) == str(reference) and extended is not None else "PRÜFEN"
+                self.quick_training.rechecked(context.current_value, extended, reference, status)
+        except Exception as exc:  # a malformed report must not abort the GUI
+            LOGGER.exception("Report konnte nicht angezeigt werden: %s", key)
+            self.statusBar().showMessage(
+                f"Report konnte nicht angezeigt werden: {Path(key).name} – {exc}", 8000)
+
+    def _analysis_failed(self, path, message, worker=None):
+        key = str(Path(path))
+        text = str(message or "Unbekannter Analysefehler")
+        LOGGER.error("Analyse fehlgeschlagen für %s: %s", key, text)
+        value = self._error_report(key, "ANALYSIS_FAILED", text)
+        self.documents[key] = value
+        is_batch = bool(worker is not None and getattr(worker, "batch", False))
+        if is_batch:
+            self._batch_reports[key] = value
+        self._show_document_item(key, select=not is_batch)
+        self.statusBar().showMessage(f"Analysefehler: {Path(key).name} – {text}", 8000)
+
+    def _show_document_item(self, key: str, select: bool = True):
+        """Add a document once and keep its list entry tied to ``key``."""
+        items = self.document_list.findItems(key, Qt.MatchExactly)
+        if items:
+            item = items[0]
+        else:
+            blocker = QSignalBlocker(self.document_list)
+            try:
+                self.document_list.addItem(key)
+                item = self.document_list.item(self.document_list.count() - 1)
+            finally:
+                del blocker
+        item.setData(Qt.UserRole, key)
+        if not select:
+            return
+        row = self.document_list.row(item)
+        if self.document_list.currentRow() != row:
+            self.document_list.setCurrentRow(row)
+        else:
+            self._select_document(key)
 
     def _worker_finished(self, worker=None):
         if worker is not None:
             self.workers.discard(worker)
-        if self.progress.isVisible():
-            self.progress.setValue(self.progress.value() + 1)
-            if self.progress.value() >= self.progress.maximum(): self.progress.setVisible(False)
-            if not self.progress.isVisible() and getattr(self, "_batch_csv_path", None):
-                from portman_pdf_lab.application.pdf_analysis import export_batch_csv
-                batch = {"files": list(getattr(self, "_batch_reports", []))}
-                export_batch_csv(batch, self._batch_csv_path, self._batch_training_database)
-                message = f"CSV exportiert: {self._batch_csv_path}"
-                if batch.get("warnings"):
-                    message += " | Hinweis: " + " | ".join(batch["warnings"])
-                self.statusBar().showMessage(message, 8000)
-                self._batch_csv_path = None
+        if worker is not None and getattr(worker, "batch", False):
+            self._batch_completed += 1
+            if self._batch_active:
+                self.progress.setValue(min(self._batch_completed, self._batch_total))
+                if self._batch_completed >= self._batch_total:
+                    self._finish_batch()
+                    return
+            return
         self.statusBar().showMessage("Analyse abgeschlossen", 3000)
+
+    def _finish_batch(self):
+        if not self._batch_active:
+            return
+        self._batch_active = False
+        self.progress.setVisible(False)
+        target = self._batch_csv_path
+        training_database = self._batch_training_database
+        self._batch_csv_path = None
+        self._batch_training_database = None
+        reports = [self._batch_reports[key] for key in self._batch_order
+                   if key in self._batch_reports]
+        if target is None:
+            self.statusBar().showMessage("Batchanalyse abgeschlossen", 5000)
+            return
+        batch = {"files": reports}
+        try:
+            export_batch_csv(batch, target, training_database)
+        except Exception as exc:  # a failed export must never terminate the GUI
+            LOGGER.exception("CSV-Export fehlgeschlagen: %s", target)
+            self.statusBar().showMessage(f"CSV-Export fehlgeschlagen: {exc}", 10000)
+            return
+        message = f"CSV exportiert: {target} ({len(reports)} Dokumente)"
+        if batch.get("warnings"):
+            message += " | Hinweis: " + " | ".join(batch["warnings"])
+        self.statusBar().showMessage(message, 10000)
 
     def _filter_documents(self, text: str):
         needle = text.casefold()
         for index in range(self.document_list.count()):
             item = self.document_list.item(index); item.setHidden(needle not in item.text().casefold())
 
+    def _report_for(self, key: str) -> dict:
+        report = self.documents.get(key)
+        if isinstance(report, dict):
+            return report
+        if key in self.documents:
+            message = (f"Ungültiger Report in self.documents für {key}: "
+                       f"{type(report).__name__} statt Dictionary.")
+            LOGGER.error(message)
+            # Self-heal the contract instead of leaving an unusable value.
+            report = self._error_report(key, "INVALID_REPORT", message)
+            self.documents[key] = report
+            return report
+        return {}
+
     def _select_document(self, key: str):
-        if not key or key not in self.documents: return
-        self.current_pdf = Path(key); self.current_run_id = self.documents[key].get("run_id")
-        self._selected_field_path = ""
-        self._pending_pdf_selection = None
-        self.load_pdf(self.current_pdf); self.show_report(self.documents[key])
-        catalog = self._catalog()
-        self.training_widget.bind_report(self.documents[key], self.current_pdf, catalog)
-        self.field_analysis.bind_report(self.documents[key], catalog)
-        if self.current_run_id:
-            self._load_annotation_highlights(ReferenceRepository(self.repository_path).run(self.current_run_id)["document_id"])
-        else:
-            self.refresh_pdf_markings()
+        if self._selecting_document or not key:
+            return
+        if key not in self.documents:
+            return
+        report = self._report_for(key)
+        self._selecting_document = True
+        try:
+            self.current_pdf = Path(key)
+            run_id = report.get("run_id")
+            self.current_run_id = run_id if isinstance(run_id, int) else None
+            self._selected_field_path = ""
+            self._pending_pdf_selection = None
+            try:
+                self.load_pdf(self.current_pdf)
+            except Exception as exc:  # broken/removed PDF must not break selection
+                LOGGER.exception("PDF konnte nicht geladen werden: %s", key)
+                self.page_label.setText("PDF nicht lesbar")
+                self.statusBar().showMessage(
+                    f"PDF konnte nicht geladen werden: {Path(key).name} – {exc}", 8000)
+            self.show_report(report)
+            catalog = self._catalog()
+            self.training_widget.bind_report(report, self.current_pdf, catalog)
+            self.field_analysis.bind_report(report, catalog)
+            if self.current_run_id:
+                try:
+                    self._load_annotation_highlights(
+                        ReferenceRepository(self.repository_path).run(self.current_run_id)["document_id"])
+                except Exception as exc:  # missing run/repository is a data issue, not a crash
+                    LOGGER.warning("Annotationen konnten nicht geladen werden (%s): %s",
+                                   self.current_run_id, exc)
+                    self.refresh_pdf_markings()
+            else:
+                self.refresh_pdf_markings()
+        except Exception as exc:  # a broken report must never abort the Qt slot
+            LOGGER.exception("Dokument konnte nicht ausgewählt werden: %s", key)
+            self.statusBar().showMessage(
+                f"Dokument konnte nicht angezeigt werden: {Path(key).name} – {exc}", 8000)
+        finally:
+            self._selecting_document = False
 
     def review_current(self, status: ReviewStatus):
         if self.current_run_id is None:
@@ -489,7 +718,7 @@ class MainWindow(QMainWindow):
 
     def refresh_pdf_markings(self):
         """Recompute highlights from the current report without reparsing PDFs."""
-        report = self.documents.get(str(self.current_pdf), {}) if self.current_pdf else {}
+        report = self._report_for(str(self.current_pdf)) if self.current_pdf else {}
         if not report:
             self._marking_specs = []; self._current_markings = []; self._layer_markings = []
             if hasattr(self.pdf_view, "setMarkings"):
@@ -596,7 +825,7 @@ class MainWindow(QMainWindow):
         return any(table.currentRow() >= 0 for table in self.tables.values())
 
     def _current_report(self):
-        return self.documents.get(str(self.current_pdf), {}) if self.current_pdf else {}
+        return self._report_for(str(self.current_pdf)) if self.current_pdf else {}
 
     def _start_field_training(self, row):
         """Open the existing training tab fully preselected from field analysis."""
@@ -761,7 +990,11 @@ class MainWindow(QMainWindow):
             self.pdf_text_layer.show_page(page_index + 1)
 
     def show_report(self, report: dict):
+        if not isinstance(report, Mapping):
+            LOGGER.error("show_report erwartet ein Dictionary, erhalten: %s", type(report).__name__)
+            return
         result = report.get("result", {})
+        result = result if isinstance(result, Mapping) else {}
         preparation = report.get("text_preparation") if isinstance(report, dict) else {}
         preparation = preparation if isinstance(preparation, dict) else {}
         quality = str(preparation.get("quality") or "")
@@ -808,7 +1041,7 @@ class MainWindow(QMainWindow):
             self._navigating = False
 
     def _catalog(self):
-        report = self.documents.get(str(self.current_pdf), {}) if self.current_pdf else {}
+        report = self._current_report()
         detection = report.get("detection", {}); result = report.get("result", {})
         detected_id = detection.get("plugin_id", "")
         bank = "comdirect" if "comdirect" in detected_id.casefold() else (detected_id.split(".")[0] or "generic")

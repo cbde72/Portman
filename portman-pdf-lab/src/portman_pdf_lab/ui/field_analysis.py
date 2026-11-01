@@ -614,8 +614,10 @@ class FieldAnalysisWidget(QWidget):
         }.get(quality.casefold(), "Textqualität: —"))
         self.document_hash = str(document_hash or (self.report or {}).get("source_hash") or "")
         self.document_id = ""
-        repository = self.repository()
         run_id = (self.report or {}).get("run_id")
+        # Reports without a persisted run (read-only batch) must not construct a
+        # repository: its constructor creates/migrates the SQLite database.
+        repository = self.repository() if run_id else None
         if repository is not None and run_id:
             try:
                 run = repository.run(int(run_id))
