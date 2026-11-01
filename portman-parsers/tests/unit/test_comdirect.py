@@ -178,9 +178,25 @@ Zu Ihren Gunsten EUR 1,61
  assert not event.trades
 
 
+def test_dividend_reference_label_variants_are_supported_without_rewriting_value():
+ from portman_parsers.plugins.comdirect import BANK_REFERENCE
+ for label in ("Referenz-Nr. ", "Referenz-Nr.: ", "Referenz Nr ", "Referenznummer: "):
+  match=BANK_REFERENCE.search(f"({label}14IkXK3WUKY00GUQ)")
+  assert match and match.group(1)=="14IkXK3WUKY00GUQ"
+
+
 def test_dividend_without_reference_does_not_invent_link_identifier():
  plugin=ComdirectPlugin()
  source=doc("Abrechnung Dividendengutschrift")
  event=plugin.parse(source,plugin.detect(source)[0]).events[0]
  assert not event.bank_reference_evidence_ids
- assert not isinstance(event.bank_reference,str)
+ assert event.bank_reference_status=="MISSING"
+ assert str(event.bank_reference)=="UNKNOWN"
+
+
+def test_dividend_reference_invalid_and_multiple_values_are_not_selected():
+ plugin=ComdirectPlugin()
+ for text, status in (("(Referenz-Nr. ABC123)", "INVALID"),
+                      ("Referenz-Nr. 14IKXK3WUKY00GUQ Referenznummer 24ABC987ZYX00001", "AMBIGUOUS")):
+  event=plugin.parse(PdfDocument("reference-status","g"*64,(PdfPage(1,"comdirect\nAbrechnung Dividendengutschrift\n"+text),)), plugin.detect(PdfDocument("reference-status","g"*64,(PdfPage(1,"comdirect\nAbrechnung Dividendengutschrift\n"+text),)))[0]).events[0]
+  assert event.bank_reference_status==status and str(event.bank_reference)=="NOT_FOUND"

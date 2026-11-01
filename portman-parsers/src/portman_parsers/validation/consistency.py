@@ -14,15 +14,41 @@ def validate_parsed_document(result: ParsedDocument) -> tuple[Issue, ...]:
     all_fees = tuple(fee for event in result.events for fee in event.fee_events)
     all_taxes = tuple(tax for event in result.events for tax in event.tax_events)
     fee_ids = {fee.fee_id for fee in all_fees}
+
+    def evidence_issues(owner: str, event_id: str | None, evidence_ids) -> None:
+        for evidence_id in evidence_ids:
+            evidence = evidence_by_id.get(evidence_id)
+            if evidence is None:
+                issues.append(Issue(
+                    stable_id("issue", owner, evidence_id), "EVIDENCE_REFERENCE_MISSING",
+                    IssueSeverity.ERROR, f"{owner} references unknown evidence {evidence_id}.",
+                    evidence_id=evidence_id, event_id=event_id))
+            elif evidence.document_id != result.document_id:
+                issues.append(Issue(
+                    stable_id("issue", owner, evidence_id, "document"), "EVIDENCE_DOCUMENT_MISMATCH",
+                    IssueSeverity.ERROR, f"{owner} references evidence from another document.",
+                    evidence_id=evidence_id, event_id=event_id))
+
     for event in result.events:
         issues.extend(validate_event(event))
-        for evidence_id in event.evidence_ids:
-            if evidence_id not in known_evidence:
-                issues.append(Issue(
-                    stable_id("issue", event.event_id, evidence_id),
-                    "EVIDENCE_REFERENCE_MISSING", IssueSeverity.ERROR,
-                    f"Event {event.event_id} references unknown evidence {evidence_id}.",
-                    evidence_id=evidence_id, event_id=event.event_id))
+        evidence_issues(f"Event {event.event_id}", event.event_id, event.evidence_ids)
+        evidence_issues(f"Event {event.event_id} security identity", event.event_id,
+                        event.security_identity_evidence_ids)
+        evidence_issues(f"Event {event.event_id} bank reference", event.event_id,
+                        event.bank_reference_evidence_ids)
+        for trade in event.trades:
+            evidence_issues(f"Trade {trade.trade_id}", event.event_id, trade.evidence_ids)
+        for movement in (*event.cash_movements, *event.security_movements):
+            evidence_issues(f"Movement {movement.movement_id}", event.event_id, movement.evidence_ids)
+        for tax in event.tax_events:
+            evidence_issues(f"Tax event {tax.tax_event_id}", event.event_id, tax.evidence_ids)
+        for fee in event.fee_events:
+            evidence_issues(f"Fee {fee.fee_id}", event.event_id, fee.evidence_ids)
+            for allocation in fee.allocations:
+                evidence_issues(f"Fee allocation {allocation.target_id}", event.event_id,
+                                allocation.evidence_ids)
+        for cost in event.cost_events:
+            evidence_issues(f"Cost event {cost.cost_event_id}", event.event_id, cost.evidence_ids)
     for first, second in possible_duplicate_events(result.events):
         issues.append(Issue(
             stable_id("issue", first, second), "POSSIBLE_DUPLICATE", IssueSeverity.WARNING,
@@ -55,13 +81,6 @@ def validate_parsed_document(result: ParsedDocument) -> tuple[Issue, ...]:
     issues.extend(deduplicate_fees(all_fees).issues)
     issues.extend(deduplicate_tax_events(all_taxes).issues)
     for tax in all_taxes:
-        for evidence_id in tax.evidence_ids:
-            if evidence_id not in known_evidence:
-                issues.append(Issue(
-                    stable_id("issue", tax.tax_event_id, evidence_id),
-                    "TAX_EVIDENCE_REFERENCE_MISSING", IssueSeverity.ERROR,
-                    f"Tax event {tax.tax_event_id} references unknown evidence {evidence_id}.",
-                    evidence_id=evidence_id, event_id=tax.event_id))
         if tax.depot_id and tax.depot_id not in depot_ids:
             issues.append(Issue(
                 stable_id("issue", tax.tax_event_id, "depot"),
@@ -90,4 +109,3 @@ def validate_parsed_document(result: ParsedDocument) -> tuple[Issue, ...]:
                     f"Security movement {movement.movement_id} references unknown depot {movement.depot_id}.",
                     event_id=event.event_id))
     return tuple(issues)
-
