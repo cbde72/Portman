@@ -764,6 +764,8 @@ class MainWindow(QMainWindow):
         CatalogHelpDialog(self._catalog(), self).exec()
 
     def _pdf_text_action(self, action, selection):
+        if action == "new":
+            return  # New user-defined field creation has been removed.
         if action in {"edit", "remove"} and selection is None:
             QMessageBox.information(self, "PDF-Annotation", "Bitte zuerst die zu bearbeitende Fundstelle markieren."); return
         if action == "locate":
@@ -789,7 +791,7 @@ class MainWindow(QMainWindow):
         preselect = training_context.field_path if training_context is not None else ""
         quick = self.ui_mode.currentText() == "Schnell" and bool(preselect)
         dialog = FieldMappingDialog(self._catalog(), self.catalog_store, context, selection.text,
-                                    selection.page_number, selection.coordinates, action == "new", self,
+                                    selection.page_number, selection.coordinates, False, self,
                                     preselect=preselect, quick=quick)
         if not dialog.exec() or not dialog.mapping_result: return
         mapped = dialog.mapping_result
