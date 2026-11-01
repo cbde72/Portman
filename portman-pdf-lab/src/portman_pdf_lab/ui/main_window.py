@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from portman_parsers.extraction import extract_pdf
+from portman_parsers.registry import default_registry
 from pypdf import PdfReader
 from portman_pdf_lab.application.pdf_analysis import analyse_pdf
 from portman_pdf_lab.application.reference_service import analyse_and_store
@@ -55,13 +56,13 @@ class WorkerSignals(QObject):
 
 
 class AnalysisWorker(QRunnable):
-    def __init__(self, path: Path, repository_path: Path, rule_mode="STANDARD"):
-        super().__init__(); self.path = path; self.repository_path = repository_path; self.rule_mode = rule_mode; self.signals = WorkerSignals()
+    def __init__(self, path: Path, repository_path: Path, rule_mode="STANDARD", plugin_id=None):
+        super().__init__(); self.path = path; self.repository_path = repository_path; self.rule_mode = rule_mode; self.plugin_id = plugin_id; self.signals = WorkerSignals()
 
     @Slot()
     def run(self):
         try:
-            self.signals.result.emit(analyse_and_store(self.path, ReferenceRepository(self.repository_path), self.rule_mode)[0])
+            self.signals.result.emit(analyse_and_store(self.path, ReferenceRepository(self.repository_path), self.rule_mode, plugin_id=self.plugin_id)[0])
         except Exception as exc:  # defensive GUI boundary
             self.signals.error.emit(str(exc))
         finally:
@@ -118,6 +119,19 @@ class MainWindow(QMainWindow):
         cancel_action = QAction("Abbrechen", self); cancel_action.triggered.connect(self.cancel_batch); toolbar.addAction(cancel_action)
         toolbar.addSeparator(); toolbar.addWidget(QLabel("Modus:"))
         self.ui_mode = QComboBox(); self.ui_mode.addItems(("Schnell", "Experte")); toolbar.addWidget(self.ui_mode)
+        toolbar.addWidget(QLabel("Plugin:"))
+        self.parser_choice = QComboBox()
+        self.parser_choice.addItem("Automatisch erkennen", None)
+        for item in default_registry().metadata():
+            if any(handler.implemented for handler in item.handlers):
+                self.parser_choice.addItem(f"{item.group} – {item.plugin_id}", item.plugin_id)
+        toolbar.addWidget(self.parser_choice)
+        reparse_action = QAction("Neu parsen", self)
+        reparse_action.triggered.connect(self.reparse_current)
+        toolbar.addAction(reparse_action)
+        quick_values_action = QAction("Erkannte Werte", self)
+        quick_values_action.triggered.connect(self.show_quick_values)
+        toolbar.addAction(quick_values_action)
         approve_action = QAction("Freigeben", self); approve_action.triggered.connect(lambda: self.review_current(ReviewStatus.APPROVED)); toolbar.addAction(approve_action)
         reject_action = QAction("Korrektur nötig", self); reject_action.triggered.connect(lambda: self.review_current(ReviewStatus.NEEDS_CORRECTION)); toolbar.addAction(reject_action)
         help_action = QAction("Feldhilfe", self); help_action.triggered.connect(self.show_field_help); toolbar.addAction(help_action)
@@ -284,7 +298,7 @@ class MainWindow(QMainWindow):
 
     def analyse(self, path: Path, rule_mode=None):
         self.statusBar().showMessage(f"Analysiere {path.name} …")
-        worker = AnalysisWorker(path, self.repository_path, rule_mode or self.training_widget.mode.currentText()); self.workers.add(worker)
+        worker = AnalysisWorker(path, self.repository_path, rule_mode or self.training_widget.mode.currentText(), self.parser_choice.currentData()); self.workers.add(worker)
         worker.signals.result.connect(lambda result, p=path: self._analysis_ready(p, result))
         worker.signals.error.connect(lambda message: QMessageBox.warning(self, "Analysefehler", message))
         worker.signals.finished.connect(lambda w=worker: self._worker_finished(w)); self.thread_pool.start(worker)
@@ -613,7 +627,21 @@ class MainWindow(QMainWindow):
         if row is not None:
             FieldHelpDialog(row, self).exec()
 
-    def _show_standard_values(self):
+    def reparse_current(self):
+        """Run the active plugin and mode again for the selected PDF."""
+        if self.current_pdf is None:
+            QMessageBox.information(self, "Neu parsen", "Bitte zuerst ein PDF auswählen.")
+            return
+        if not self.current_pdf.is_file():
+            QMessageBox.warning(self, "Neu parsen", "Die PDF-Datei ist nicht mehr vorhanden.")
+            return
+        self.analyse(self.current_pdf)
+
+    def show_quick_values(self):
+        """Display only financial values actually emitted by the base parser."""
+        self._show_standard_values(financial_only=True)
+
+    def _show_standard_values(self, financial_only=False):
         """Show only values from the stored base STANDARD result.
 
         An EXTENDED/COMPARE report still contains the unchanged base result in
@@ -633,7 +661,7 @@ class MainWindow(QMainWindow):
             if answer == QMessageBox.Yes:
                 self.analyse(self.current_pdf, "STANDARD")
             return
-        rows = build_standard_value_rows(report, self._catalog())
+        rows = build_standard_value_rows(report, self._catalog(), financial_only=financial_only)
         dialog = StandardValuesDialog(rows, report, self)
         dialog.fieldActivated.connect(self._standard_value_activated)
         self._standard_values_dialog = dialog
@@ -764,6 +792,8 @@ class MainWindow(QMainWindow):
         CatalogHelpDialog(self._catalog(), self).exec()
 
     def _pdf_text_action(self, action, selection):
+        if action == "new":
+            return  # New user-defined field creation has been removed.
         if action in {"edit", "remove"} and selection is None:
             QMessageBox.information(self, "PDF-Annotation", "Bitte zuerst die zu bearbeitende Fundstelle markieren."); return
         if action == "locate":
@@ -789,7 +819,7 @@ class MainWindow(QMainWindow):
         preselect = training_context.field_path if training_context is not None else ""
         quick = self.ui_mode.currentText() == "Schnell" and bool(preselect)
         dialog = FieldMappingDialog(self._catalog(), self.catalog_store, context, selection.text,
-                                    selection.page_number, selection.coordinates, action == "new", self,
+                                    selection.page_number, selection.coordinates, False, self,
                                     preselect=preselect, quick=quick)
         if not dialog.exec() or not dialog.mapping_result: return
         mapped = dialog.mapping_result

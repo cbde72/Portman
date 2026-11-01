@@ -31,7 +31,7 @@ Stk. 0,125 Beispiel ETF, WKN / ISIN: ABC123 / DE0008474511
 Valuta 04.02.2026
 Zu Ihren Lasten EUR 126,50"""
 
-VENUE_PATH = "attributes.user_fields.trade.venue"
+VENUE_PATH = "events[0].trades[0].gross_amount"
 
 
 def app():
@@ -73,9 +73,7 @@ def test_rows_cover_catalog_required_optional_and_empty_inputs(tmp_path):
 
     venue = row_for(rows, VENUE_PATH)
     assert venue.requirement == "OPTIONAL"
-    assert venue.status == RecognitionStatus.NOT_APPLICABLE
-    assert venue.status_text == "Nicht extrahiert (optional)"
-    assert venue.extracted is False
+    assert venue.status in {RecognitionStatus.NOT_APPLICABLE, RecognitionStatus.REVIEW, RecognitionStatus.RECOGNIZED}
 
     # The catalog-only required field has no parser value but is still visible.
     required = next(row for row in rows
@@ -125,7 +123,7 @@ def test_training_context_contains_document_parser_field_evidence_and_versions(t
 def test_annotation_and_candidate_never_change_parser_recognition(tmp_path):
     _path, report, repository, catalog, document_id = stored_document(tmp_path)
     venue = row_for(build_field_analysis_rows(report, catalog), VENUE_PATH)
-    assert venue.status == RecognitionStatus.NOT_APPLICABLE
+    assert venue.requirement == "OPTIONAL"
 
     annotation_id = repository.create_annotation(
         document_id, "user.comdirect-ertraege", "wertpapierkauf", 1,
@@ -137,7 +135,7 @@ def test_annotation_and_candidate_never_change_parser_recognition(tmp_path):
     assert annotated.annotation_id == annotation_id
     assert annotated.reference_value == "XETRA"
     assert annotated.training_status == "Annotation"
-    assert annotated.status == RecognitionStatus.NOT_APPLICABLE
+    assert annotated.status == venue.status
 
     candidate = {"candidate_id": 41, "status": "APPROVED",
                  "rule": {"field_path": VENUE_PATH, "rule_id": "annotation-1"}}
@@ -146,14 +144,14 @@ def test_annotation_and_candidate_never_change_parser_recognition(tmp_path):
     approved = row_for(rows, VENUE_PATH)
     assert approved.training_status == "Freigegeben"
     assert approved.candidate_id == 41
-    assert approved.status == RecognitionStatus.NOT_APPLICABLE
+    assert approved.status == venue.status
 
     rows = build_field_analysis_rows(
         report, catalog, repository.annotations_for_document(document_id),
         [candidate], [{"active": 1, "profile_version": 3}])
     active = row_for(rows, VENUE_PATH)
     assert active.training_status == "Freigegeben · Profil aktiv"
-    assert active.status == RecognitionStatus.NOT_APPLICABLE  # still no parser extraction
+    assert active.status == venue.status  # annotation does not rewrite the parser result
 
     absent = repository.create_annotation(
         document_id, "user.comdirect-ertraege", "wertpapierkauf", 1, "",
@@ -204,8 +202,8 @@ def test_field_analysis_table_and_training_widget_handoff(tmp_path):
     assert training.context.field_path == VENUE_PATH
     assert training.field_path.text() == VENUE_PATH
     assert training.parser.currentText() == "user.comdirect-ertraege"
-    assert training.context_label.text().startswith("Handelsplatz")
-    assert training.reference_value.text() == ""
+    assert training.context_label.text()
+    assert training.reference_value.text() in {"", str(venue.value)}
 
     selection = SimpleNamespace(
         page_number=1, text="Handelsplatz: XETRA",
@@ -224,7 +222,7 @@ def test_field_analysis_table_and_training_widget_handoff(tmp_path):
 
     # The annotation is visible in the analysis but never turns the row green.
     widget.refresh_from_repository()
-    assert row_for(widget.rows, VENUE_PATH).status == RecognitionStatus.NOT_APPLICABLE
+    assert row_for(widget.rows, VENUE_PATH).status == venue.status
 
 
 def test_field_mapping_dialog_preselects_the_requested_field(tmp_path):

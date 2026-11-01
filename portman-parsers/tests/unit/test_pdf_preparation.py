@@ -62,3 +62,36 @@ def test_extract_pdf_documents_preparation_version(tmp_path):
     assert document.metadata["text_preparation_version"] == PREPARATION_VERSION
     assert document.metadata["text_extractors"] == "pypdf"
     assert document.metadata["text_quality"] == "ok"
+
+
+def test_isolated_long_u_glyph_line_removed_without_altering_valid_values():
+    text, diagnostics = _normalize(
+        "SAP SE\nUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU\n0,733 STK\nU.S. Treasury\nU U U")
+    assert "UUUUUUUUUUUUUUUU" not in text
+    assert "SAP SE" in text and "0,733 STK" in text
+    assert "U.S. Treasury" in text and "U U U" in text
+    assert "ISOLATED_REPEATED_U_GLYPH_LINE_REMOVED" in diagnostics
+
+
+def test_embedded_u_letters_are_not_removed():
+    value = "KUNDENNUMMER UUUUUUUUUUUUUUUUU 716460"
+    text, diagnostics = _normalize(value)
+    assert text == value
+    assert "ISOLATED_REPEATED_U_GLYPH_LINE_REMOVED" not in diagnostics
+
+
+def test_embedded_u_font_artifacts_trigger_pdfium_fallback(monkeypatch, tmp_path):
+    from portman_parsers.extraction import preparation
+    pdf = tmp_path / "sample.pdf"
+    pdf.write_bytes(b"test")
+    original = "HerrnUUUUUUUUUUUUUUUUUUU\nChristophUBuehringUUUUUUUUUUUUUU\nDividendengutschrift"
+    fallback = "Herrn\nChristoph Buehring\nDividendengutschrift\nEUR 1,61"
+    monkeypatch.setattr(preparation, "_pdfium_page",
+                        lambda path, page: (fallback, (), "test-pdfium"))
+    prepared = preparation.prepare_pdf(pdf, [original], "a" * 64)
+    page = prepared.pages[0]
+    assert page.fallback_used
+    assert page.extractor_id == "pdfium"
+    assert "Christoph Buehring" in page.normalized_text
+    assert "UUUUUUUU" not in page.normalized_text
+    assert page.original_text == original

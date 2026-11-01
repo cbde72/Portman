@@ -116,3 +116,26 @@ def test_field_value_metadata_has_its_own_description():
     assert "Herkunft" in resolve_description("accounts[0].bank_name.source").description
     assert "Prüfstatus" in resolve_description("accounts[0].bank_name.review_status").description
     assert "Seitenzahl" in resolve_description("accounts[0].bank_name.page_number").description
+
+
+def test_quick_values_only_shows_actual_financial_fields():
+    report = {"result": {
+        "plugin_id": "user.comdirect-ertraege",
+        "result_id": "technical-run-1",
+        "attributes": {"user_fields": {"custom": "not a financial DTO value"}},
+        "events": [{"event_id": "evt-1", "kind": "TRADE",
+                    "cash_movements": [{"movement_id": "mv-1", "amount": "0", "currency": "EUR",
+                                        "status": "ACTUAL"}]}],
+        "accounts": [{"account_id": "acc-1", "bank_name": {"value": "comdirect",
+                      "source": "PDF"}}],
+        "evidence": [{"evidence_id": "e1", "page_number": 1, "excerpt": "irrelevant"}],
+    }}
+    rows = build_standard_value_rows(report, financial_only=True)
+    paths = {row.path for row in rows}
+    assert "events[0].cash_movements[0].amount" in paths
+    assert "events[0].cash_movements[0].currency" in paths
+    assert "accounts[0].bank_name.value" in paths
+    assert not any("evidence" in path or "attributes" in path for path in paths)
+    assert "plugin_id" not in paths and "result_id" not in paths
+    assert "events[0].event_id" not in paths
+    assert "events[0].cash_movements[0].movement_id" not in paths

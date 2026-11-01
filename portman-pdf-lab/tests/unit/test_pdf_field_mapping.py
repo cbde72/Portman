@@ -2,6 +2,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import pytest
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import QApplication, QLineEdit
 
@@ -37,16 +38,16 @@ def test_scanned_page_has_explicit_no_textlayer_message():
     assert not layer.isEnabled() and "OCR" in layer.toPlainText() and layer.selection() is None
 
 
-def test_catalog_yaml_versions_custom_optional_field_and_help(tmp_path):
+def test_catalog_does_not_create_new_user_fields(tmp_path):
     store = CatalogStore(tmp_path / "catalogs")
     catalog = store.catalog("comdirect", "user.comdirect-ertraege", "Kauf", "layout-a")
-    assert catalog.field("security.isin").path != catalog.field("security.wkn").path
-    assert catalog.field("trade.venue").requirement == "OPTIONAL"
-    updated, custom = store.add_optional_field(catalog, "trade.counterparty", "Gegenpartei")
+    assert catalog.field("trade.venue") is None
+    with pytest.raises(ValueError, match="nicht angelegt"):
+        store.add_optional_field(catalog, "trade.counterparty", "Gegenpartei")
     restarted = store.catalog("comdirect", "user.comdirect-ertraege", "Kauf", "layout-a")
-    assert updated.version == 2 and restarted.field(custom.path).requirement == "OPTIONAL"
-    help_text = catalog_help_html(restarted)
-    assert "Unbedingt erforderliche" in help_text and "Optionale Werte" in help_text and "Gegenpartei" in help_text
+    assert restarted.version == catalog.version
+    assert restarted.field("trade.counterparty") is None
+    assert "Optionale Werte" in catalog_help_html(restarted)
 
 
 def test_catalog_driven_editors_preserve_original_and_normalized_values(tmp_path):
@@ -57,16 +58,16 @@ def test_catalog_driven_editors_preserve_original_and_normalized_values(tmp_path
     assert original == "1.234,500" and normalized == "1234.500"
 
 
-def test_mapping_existing_and_new_optional_field(tmp_path):
+def test_mapping_only_existing_fields_even_when_define_new_requested(tmp_path):
     application = app(); store = CatalogStore(tmp_path); catalog = store.catalog()
     context = {"bank": "comdirect", "parser_id": "user.comdirect-ertraege", "document_type": "Kauf", "rule_mode": "STANDARD"}
-    dialog = FieldMappingDialog(catalog, store, context, "XETRA", 2)
-    index = next(i for i in range(dialog.field_choice.count()) if dialog.field_choice.itemData(i) == "trade.venue")
+    dialog = FieldMappingDialog(catalog, store, context, "1,25", 2, define_new=True)
+    assert not hasattr(dialog, "new_field")
+    assert not hasattr(dialog, "new_id")
+    index = next(i for i in range(dialog.field_choice.count()) if dialog.field_choice.itemData(i) == "trade.quantity")
     dialog.field_choice.setCurrentIndex(index); dialog._accept()
-    assert dialog.mapping_result.field.path == "attributes.user_fields.trade.venue" and dialog.mapping_result.page_number == 2
-    custom = FieldMappingDialog(catalog, store, context, "Spezialwert", 1, define_new=True)
-    custom.new_id.setText("trade.special"); custom.new_label.setText("Spezial"); custom._accept()
-    assert custom.mapping_result.field.path == "attributes.user_fields.trade.special"
+    assert dialog.mapping_result.field.path == "events[0].trades[0].quantity"
+    assert dialog.mapping_result.page_number == 2
 
 
 def test_annotation_coordinates_survive_repository_restart(tmp_path):
@@ -111,7 +112,23 @@ def test_trade_dependencies_and_account_document_do_not_create_security_errors(t
     rows = {row.field_id: row for row in build_field_analysis_rows({"result":result}, catalog)}
     assert rows["security.isin"].status == RecognitionStatus.RECOGNIZED
     assert rows["security.wkn"].status == RecognitionStatus.NOT_APPLICABLE
-    assert rows["trade.venue"].status == RecognitionStatus.NOT_APPLICABLE
+    assert "trade.venue" not in rows
     assert rows["trade.quantity"].status == RecognitionStatus.MISSING
     account = store.catalog("bank of scotland", "user.bank-of-scotland-kontoauszug", "Bank of Scotland Kontoauszug", "*")
     assert not any(field.field_id.startswith(("security.", "trade.")) for field in account.fields)
+
+
+def test_saved_custom_field_definitions_are_purged_from_yaml(tmp_path):
+    from portman_pdf_lab.field_catalog import FieldCatalog, FieldDefinition
+    store = CatalogStore(tmp_path / "catalogs")
+    catalog = store.catalog("comdirect", "user.comdirect-ertraege", "Kauf", "layout-a")
+    legacy = FieldDefinition("user.custom", "attributes.user_fields.user.custom",
+                             "Altes Benutzerfeld", "Überholte Benutzerdefinition")
+    legacy_catalog = FieldCatalog(catalog.bank, catalog.parser_id, catalog.document_type,
+                                  catalog.layout, catalog.version, catalog.fields + (legacy,), catalog.path)
+    legacy_catalog.save(catalog.path)
+    loaded = store.catalog("comdirect", "user.comdirect-ertraege", "Kauf", "layout-a")
+    assert loaded.field("user.custom") is None
+    assert all(not item.path.startswith("attributes.user_fields.") for item in loaded.fields)
+    assert all(not item.path.startswith("attributes.user_fields.")
+               for item in FieldCatalog.load(catalog.path).fields)

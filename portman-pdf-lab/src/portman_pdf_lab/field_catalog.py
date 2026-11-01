@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
+import os
+import tempfile
 import re
 from typing import Any
 
@@ -48,7 +50,6 @@ TRADE_FIELDS = (
     FieldDefinition("trade.amount", "events[0].cash_movements[0].amount", "Settlement", "Tatsächlicher oder erwarteter Geldbetrag gemäß Status", "DECIMAL", editor="AMOUNT", requirement="REQUIRED", normalizers=("DECIMAL_DE", "DECIMAL_EN"), order=60),
     FieldDefinition("trade.currency", "events[0].cash_movements[0].currency", "Settlement-Währung", "Ausgewiesene Währung", requirement="REQUIRED", order=65),
     FieldDefinition("trade.fees", "events[0].fee_events", "Gebühren", "Ausgewiesene Gebühren; leer ist zulässig, wenn nicht gedruckt", "LIST", requirement="OPTIONAL", order=70),
-    FieldDefinition("trade.venue", "attributes.user_fields.trade.venue", "Handelsplatz", "Optionaler Ausführungs- oder Handelsplatz", "TEXT", requirement="OPTIONAL", editor="VENUE", patterns=("Handelsplatz", "Ausführungsplatz"), order=80),
 )
 
 TECHNICAL_FIELDS = (
@@ -73,7 +74,6 @@ ACCOUNT_FIELDS = (
     FieldDefinition("booking.date", "events[0].event_date", "Buchungsdatum", "Datum der Kontobuchung", "DATE", requirement="REQUIRED", editor="DATE", order=30),
     FieldDefinition("booking.amount", "events[0].cash_movements[0].amount", "Betrag", "Gebuchter Betrag", "DECIMAL", requirement="REQUIRED", editor="AMOUNT", order=40),
     FieldDefinition("booking.currency", "events[0].cash_movements[0].currency", "Währung", "Buchungswährung", requirement="REQUIRED", order=50),
-    FieldDefinition("booking.value_date", "attributes.user_fields.booking.value_date", "Valuta", "Optionales Valutadatum", "DATE", requirement="OPTIONAL", editor="DATE", order=60),
 )
 
 DEPOT_FIELDS = (
@@ -186,6 +186,34 @@ class CatalogStore:
         clean = lambda value: re.sub(r"[^a-zA-Z0-9_.-]", "_", value or "all").strip("._") or "all"
         return ".".join(map(clean, (bank, parser_id, document_type, layout)))
 
+    @staticmethod
+    def _without_user_fields(catalog: FieldCatalog) -> FieldCatalog:
+        """Remove saved custom definitions from the active YAML catalog on load."""
+        kept = tuple(field for field in catalog.fields
+                     if not field.path.startswith("attributes.user_fields."))
+        if len(kept) == len(catalog.fields):
+            return catalog
+        cleaned = FieldCatalog(catalog.bank, catalog.parser_id, catalog.document_type,
+                               catalog.layout, catalog.version, kept, catalog.path)
+        if catalog.path is not None:
+            # Atomic rewrite avoids invalid YAML in the event of an interruption.
+            payload = {"schema_version": FieldCatalog.SCHEMA_VERSION,
+                       "catalog_version": cleaned.version, "bank": cleaned.bank,
+                       "parser_id": cleaned.parser_id, "document_type": cleaned.document_type,
+                       "layout": cleaned.layout, "fields": [asdict(item) for item in kept]}
+            fd, temporary = tempfile.mkstemp(prefix=".clean-catalog-", suffix=".tmp",
+                                             dir=catalog.path.parent)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    yaml.safe_dump(payload, stream, allow_unicode=True, sort_keys=False)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, catalog.path)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+        return cleaned
+
     def catalog(self, bank="comdirect", parser_id="user.comdirect-ertraege", document_type="*", layout="*"):
         candidates = sorted(self.root.glob(f"{bank}.*.yaml"))
         compatible = []
@@ -194,23 +222,16 @@ class CatalogStore:
             if catalog.parser_id in {parser_id, "*"} and catalog.document_type in {document_type, "*"} and catalog.layout in {layout, "*"}:
                 compatible.append(catalog)
         if compatible:
-            return max(compatible, key=lambda item: (sum((item.parser_id == parser_id,
+            return self._without_user_fields(max(compatible, key=lambda item: (sum((item.parser_id == parser_id,
                                                            item.document_type == document_type,
-                                                           item.layout == layout)), item.version))
+                                                           item.layout == layout)), item.version)))
         catalog = FieldCatalog(bank, parser_id, document_type, layout, 1, fields_for_document(parser_id, document_type))
         catalog.path = catalog.save(self.root / f"{self._stem(bank, parser_id, document_type, layout)}.v1.yaml")
-        return catalog
+        return self._without_user_fields(catalog)
 
     def add_optional_field(self, catalog: FieldCatalog, field_id: str, label: str, data_type="TEXT"):
-        safe_id = re.sub(r"[^a-zA-Z0-9_.-]", "_", field_id).strip("._")
-        if not safe_id:
-            raise ValueError("field id is empty")
-        path = f"attributes.user_fields.{safe_id}"
-        if catalog.field(path) or catalog.field(safe_id):
-            raise ValueError("field already exists")
-        definition = FieldDefinition(safe_id, path, label or safe_id, "Benutzerdefiniertes optionales Anzeigefeld",
-                                     data_type, requirement="OPTIONAL", order=800)
-        updated = FieldCatalog(catalog.bank, catalog.parser_id, catalog.document_type, catalog.layout,
-                               catalog.version + 1, catalog.fields + (definition,))
-        updated.path = updated.save(self.root / f"{self._stem(catalog.bank, catalog.parser_id, catalog.document_type, catalog.layout)}.v{updated.version}.yaml")
-        return updated, definition
+        """Creation of user-defined fields is disabled in PDF Lab.
+
+        Previously saved fields remain readable and usable.
+        """
+        raise ValueError("Neue Benutzerfelder können in PDF Lab nicht angelegt werden.")

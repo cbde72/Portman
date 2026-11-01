@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
+import os
+import tempfile
+import warnings
 from pathlib import Path
 import re
 from typing import Any
@@ -269,7 +272,19 @@ class DescriptionCatalog:
         source = Path(path)
         if not source.exists():
             return cls(path=source)
-        payload = json.loads(source.read_text(encoding="utf-8"))
+        raw = source.read_text(encoding="utf-8")
+        if not raw.strip():
+            # An interrupted/empty store is safe to rebuild from field definitions.
+            return cls(path=source)
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            # Preserve malformed user data for investigation; never overwrite it.
+            warnings.warn(f"Invalid description catalog preserved at {source}", RuntimeWarning)
+            return cls()
+        if not isinstance(payload, dict):
+            warnings.warn(f"Invalid description catalog structure preserved at {source}", RuntimeWarning)
+            return cls()
         if int(payload.get("schema_version", 0)) != DESCRIPTION_SCHEMA_VERSION:
             raise ValueError("unsupported description catalog schema")
         entries = tuple(DescriptionEntry(**item) for item in payload.get("entries", ()))
@@ -279,9 +294,20 @@ class DescriptionCatalog:
         if self.path is None:
             raise ValueError("description catalog has no path")
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps({"schema_version": DESCRIPTION_SCHEMA_VERSION,
-                                         "entries": [asdict(item) for item in sorted(self._entries.values(), key=lambda x: x.normalized_path)]},
-                                        ensure_ascii=False, indent=2), encoding="utf-8")
+        payload = json.dumps({"schema_version": DESCRIPTION_SCHEMA_VERSION,
+                              "entries": [asdict(item) for item in sorted(self._entries.values(), key=lambda x: x.normalized_path)]},
+                             ensure_ascii=False, indent=2)
+        # Never expose a truncated JSON file to Qt callbacks reading the store.
+        fd, tmp_name = tempfile.mkstemp(prefix=".field-descriptions-", suffix=".tmp", dir=self.path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_name, self.path)
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
         return self.path
 
     def get(self, path: str) -> DescriptionEntry | None:
@@ -317,7 +343,7 @@ def resolve_description(path: str, catalog: FieldCatalog | None = None,
     if catalog:
         definition = catalog.field_for_description(path)
     store = description_catalog or catalog_for_field_catalog(catalog)
-    entry = store.resolve(path, definition)
-    if store.path:
-        store.save()
-    return entry
+    # Lookups from GUI paint/update callbacks must never write to disk.
+    # The description store is persisted only by explicit catalog imports,
+    # edits, or DescriptionCatalog.save(), not by rendering a row.
+    return store.resolve(path, definition)

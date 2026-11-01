@@ -20,6 +20,7 @@ PREPARATION_VERSION = "7.3.0"
 _REPLACEMENT = "\ufffd"
 _ARTIFACT_TOKEN = re.compile(r"\b[A-Z]{1,4}\d{4,10}\b")
 _AT_RUN = re.compile(r"@{8,}")
+_U_RUN_LINE = re.compile(r"(?m)^[ \\t]*U{16,}[ \\t]*$")
 _NUMBER = re.compile(r"[-+]?\d+(?:[,.]\d+)?")
 
 
@@ -103,6 +104,10 @@ def _diagnose(text: str) -> tuple[str, ...]:
         diagnostics.append("REPEATED_SUSPICIOUS_TOKEN_SP010000")
     if _AT_RUN.search(text):
         diagnostics.append("REPEATED_AT_GLYPH_RUN")
+    if _U_RUN_LINE.search(text):
+        diagnostics.append("ISOLATED_REPEATED_U_GLYPH_LINE")
+    if re.search(r"U{12,}", text):
+        diagnostics.append("REPEATED_U_GLYPH_RUN")
     artifact_tokens = _ARTIFACT_TOKEN.findall(text)
     repeated = {token for token in artifact_tokens if artifact_tokens.count(token) >= 2}
     if repeated:
@@ -123,6 +128,8 @@ def _quality(text: str, diagnostics: Iterable[str]) -> str:
         return "NO_TEXT"
     severe = {"UNICODE_REPLACEMENT_CHARACTER", "LOW_CHARACTER_VARIETY"}
     if severe.intersection(diagnostics):
+        return "UNRELIABLE"
+    if "REPEATED_U_GLYPH_RUN" in diagnostics:
         return "UNRELIABLE"
     if diagnostics:
         return "SUSPICIOUS"
@@ -153,6 +160,9 @@ def _normalize(text: str) -> tuple[str, tuple[str, ...]]:
     if _AT_RUN.search(normalized):
         normalized = _AT_RUN.sub(" ", normalized)
         diagnostics.append("REPEATED_AT_GLYPH_RUN_REMOVED_WITH_CONTEXT")
+    if _U_RUN_LINE.search(normalized):
+        normalized = _U_RUN_LINE.sub("", normalized)
+        diagnostics.append("ISOLATED_REPEATED_U_GLYPH_LINE_REMOVED")
     normalized = re.sub(r"[ \t]+", " ", normalized)
     normalized = re.sub(r" *\n *", "\n", normalized)
     return normalized, tuple(dict.fromkeys(diagnostics))
@@ -250,7 +260,8 @@ def prepare_pdf(path: str | Path, pages: Iterable[str], source_hash: str,
                     diagnostics.append(f"PAGE_{number}_FALLBACK_PDFIUM")
                 else:
                     diagnostics.append(f"PAGE_{number}_FALLBACK_NOT_BETTER")
-        layout_text = _layout_from_spans(blocks) or "\n".join(block.text for block in blocks) or normalized
+        layout_raw = _layout_from_spans(blocks) or "\n".join(block.text for block in blocks)
+        layout_text = _normalize(layout_raw)[0] if layout_raw else normalized
         prepared.append(PagePreparation(number, original, normalized, extractor_id,
                                          extractor_version, quality, page_diagnostics,
                                          blocks, mapping, fallback, layout_text))
