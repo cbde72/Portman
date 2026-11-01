@@ -126,6 +126,12 @@ class MainWindow(QMainWindow):
             if any(handler.implemented for handler in item.handlers):
                 self.parser_choice.addItem(f"{item.group} – {item.plugin_id}", item.plugin_id)
         toolbar.addWidget(self.parser_choice)
+        reparse_action = QAction("Neu parsen", self)
+        reparse_action.triggered.connect(self.reparse_current)
+        toolbar.addAction(reparse_action)
+        quick_values_action = QAction("Erkannte Werte", self)
+        quick_values_action.triggered.connect(self.show_quick_values)
+        toolbar.addAction(quick_values_action)
         approve_action = QAction("Freigeben", self); approve_action.triggered.connect(lambda: self.review_current(ReviewStatus.APPROVED)); toolbar.addAction(approve_action)
         reject_action = QAction("Korrektur nötig", self); reject_action.triggered.connect(lambda: self.review_current(ReviewStatus.NEEDS_CORRECTION)); toolbar.addAction(reject_action)
         help_action = QAction("Feldhilfe", self); help_action.triggered.connect(self.show_field_help); toolbar.addAction(help_action)
@@ -621,7 +627,21 @@ class MainWindow(QMainWindow):
         if row is not None:
             FieldHelpDialog(row, self).exec()
 
-    def _show_standard_values(self):
+    def reparse_current(self):
+        """Run the active plugin and mode again for the selected PDF."""
+        if self.current_pdf is None:
+            QMessageBox.information(self, "Neu parsen", "Bitte zuerst ein PDF auswählen.")
+            return
+        if not self.current_pdf.is_file():
+            QMessageBox.warning(self, "Neu parsen", "Die PDF-Datei ist nicht mehr vorhanden.")
+            return
+        self.analyse(self.current_pdf)
+
+    def show_quick_values(self):
+        """Display only financial values actually emitted by the base parser."""
+        self._show_standard_values(financial_only=True)
+
+    def _show_standard_values(self, financial_only=False):
         """Show only values from the stored base STANDARD result.
 
         An EXTENDED/COMPARE report still contains the unchanged base result in
@@ -641,7 +661,7 @@ class MainWindow(QMainWindow):
             if answer == QMessageBox.Yes:
                 self.analyse(self.current_pdf, "STANDARD")
             return
-        rows = build_standard_value_rows(report, self._catalog())
+        rows = build_standard_value_rows(report, self._catalog(), financial_only=financial_only)
         dialog = StandardValuesDialog(rows, report, self)
         dialog.fieldActivated.connect(self._standard_value_activated)
         self._standard_values_dialog = dialog
