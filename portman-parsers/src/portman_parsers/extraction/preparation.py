@@ -9,14 +9,21 @@ loads a PDF library.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 import re
+import threading
 import unicodedata
 from pathlib import Path
 from typing import Any, Iterable
 
 
 PREPARATION_VERSION = "7.3.0"
+# PDFium is a native library without thread synchronisation.  Parallel PDF Lab
+# workers that hit the PDFium fallback used to corrupt the process heap
+# (Windows 0xc0000374) while opening documents and reading text pages.  All
+# PDFium calls in this module are therefore serialised with one process-wide
+# lock; object creation *and* destruction stay inside the critical section.
+_PDFIUM_LOCK = threading.RLock()
 _REPLACEMENT = "\ufffd"
 _ARTIFACT_TOKEN = re.compile(r"\b[A-Z]{1,4}\d{4,10}\b")
 _AT_RUN = re.compile(r"@{8,}")
@@ -205,23 +212,35 @@ def _layout_from_spans(blocks: tuple[TextBlock, ...]) -> str:
 
 
 def _pdfium_page(path: Path, page_number: int) -> tuple[str, tuple[TextBlock, ...], str] | None:
-    """Best-effort PDFium text and character geometry, never a hard dependency."""
+    """Best-effort PDFium text and character geometry, never a hard dependency.
+
+    PDFium is not thread-safe.  The whole document/page/text-page lifetime is
+    protected by :data:`_PDFIUM_LOCK`, including explicit closing, so native
+    heap corruption cannot leak into another worker thread.
+    """
     try:
         import pypdfium2 as pdfium  # optional extra: portman-parsers[pdfium]
-        document = pdfium.PdfDocument(str(path))
-        page = document[page_number - 1]
-        textpage = page.get_textpage()
-        text = textpage.get_text_range()
-        spans: list[TextSpan] = []
-        for index, char in enumerate(text):
-            try:
-                left, bottom, right, top = textpage.get_charbox(index)
-                quad = ((float(left), float(bottom)), (float(right), float(bottom)),
-                        (float(right), float(top)), (float(left), float(top)))
-            except (AttributeError, IndexError, TypeError, ValueError):
-                quad = ()
-            spans.append(TextSpan(index, index + 1, char, quad, "EXACT" if quad else "UNMAPPED"))
-        blocks = (TextBlock(0, len(text), text, tuple(spans), "OK", ()),)
+        with _PDFIUM_LOCK:
+            with pdfium.PdfDocument(str(path)) as document:
+                page = document[page_number - 1]
+                try:
+                    textpage = page.get_textpage()
+                    try:
+                        text = textpage.get_text_range()
+                        spans: list[TextSpan] = []
+                        for index, char in enumerate(text):
+                            try:
+                                left, bottom, right, top = textpage.get_charbox(index)
+                                quad = ((float(left), float(bottom)), (float(right), float(bottom)),
+                                        (float(right), float(top)), (float(left), float(top)))
+                            except (AttributeError, IndexError, TypeError, ValueError):
+                                quad = ()
+                            spans.append(TextSpan(index, index + 1, char, quad, "EXACT" if quad else "UNMAPPED"))
+                    finally:
+                        textpage.close()
+                finally:
+                    page.close()
+            blocks = (TextBlock(0, len(text), text, tuple(spans), "OK", ()),)
         return text, blocks, _version(pdfium)
     except (ImportError, OSError, RuntimeError, TypeError, ValueError, IndexError):
         return None

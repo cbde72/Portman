@@ -1,3 +1,12 @@
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+import sys
+import threading
+import time
+import types
+
+import pytest
+
 from portman_parsers.extraction import PREPARATION_VERSION, extract_pdf, prepare_pdf
 from portman_parsers.extraction.preparation import _normalize
 
@@ -95,3 +104,92 @@ def test_embedded_u_font_artifacts_trigger_pdfium_fallback(monkeypatch, tmp_path
     assert "Christoph Buehring" in page.normalized_text
     assert "UUUUUUUU" not in page.normalized_text
     assert page.original_text == original
+
+
+class _ConcurrencyTracker:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
+
+    def call(self):
+        tracker = self
+
+        class _Call:
+            def __enter__(self):
+                with tracker._lock:
+                    tracker.active += 1
+                    tracker.max_active = max(tracker.max_active, tracker.active)
+                time.sleep(0.005)
+
+            def __exit__(self, *_exc):
+                with tracker._lock:
+                    tracker.active -= 1
+                return False
+
+        return _Call()
+
+
+def test_pdfium_calls_are_serialized_across_threads(monkeypatch):
+    """PDFium is not thread-safe; concurrent fallbacks must never overlap."""
+    from portman_parsers.extraction import preparation
+
+    tracker = _ConcurrencyTracker()
+
+    class FakeTextPage:
+        def get_text_range(self):
+            with tracker.call():
+                return "Wert 1,00"
+
+        def get_charbox(self, _index):
+            return (0.0, 0.0, 1.0, 1.0)
+
+        def close(self):
+            pass
+
+    class FakePage:
+        def get_textpage(self):
+            return FakeTextPage()
+
+        def close(self):
+            pass
+
+    class FakeDocument:
+        def __init__(self, _path):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def __getitem__(self, _index):
+            return FakePage()
+
+    fake_pdfium = types.ModuleType("pypdfium2")
+    fake_pdfium.PdfDocument = FakeDocument
+    fake_pdfium.__version__ = "fake"
+    monkeypatch.setitem(sys.modules, "pypdfium2", fake_pdfium)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(
+            lambda _index: preparation._pdfium_page(Path("fallback.pdf"), 1),
+            range(24),
+        ))
+
+    assert all(result is not None for result in results)
+    assert tracker.max_active == 1, "PDFium work must not run in parallel"
+
+
+def test_concurrent_extraction_of_pdfium_fallback_pdfs_is_safe(tmp_path):
+    """Regression for Windows heap corruption (0xc0000374) in parallel PDFium."""
+    pytest.importorskip("pypdfium2")
+    path = tmp_path / "fallback.pdf"
+    path.write_bytes(simple_pdf("SP010000 SP010000\nSAP DE0007164600\nWert 1,00 EUR"))
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        documents = list(pool.map(lambda _index: extract_pdf(path), range(24)))
+
+    assert all(document.pages for document in documents)
+    assert all("pdfium" in document.metadata["text_extractors"] for document in documents)

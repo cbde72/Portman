@@ -14,6 +14,8 @@ from pathlib import Path
 import sqlite3
 import time
 
+import pytest
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QSettings
@@ -128,6 +130,37 @@ def test_batch_analyses_20_pdfs_exports_csv_and_never_writes_sqlite(
         assert len(fields) > 7
         assert all(any(row[field] for row in rows) for field in fields[7:])
         assert (tmp_path / "fields_description.csv").exists()
+    finally:
+        window.thread_pool.waitForDone(); window.close(); application.processEvents()
+
+
+def test_batch_analyses_many_pdfium_fallback_pdfs_without_native_crash(
+        tmp_path):
+    """Parallel batch workers must serialise the non-thread-safe PDFium calls.
+
+    The former Run On Folder crash was a native Windows heap corruption
+    (0xc0000374) when several workers entered PDFium through the text fallback
+    at the same time.  Every synthetic PDF here forces that fallback.
+    """
+    pytest.importorskip("pypdfium2")
+    application = app(); window = window_for(tmp_path)
+    fallback_text = "SP010000 SP010000\nSAP DE0007164600\nWert 1,00 EUR"
+    paths = [create_demo_pdf(tmp_path / f"fallback-{index:02d}.pdf", fallback_text)
+             for index in range(16)]
+    csv_path = tmp_path / "fallback-batch.csv"
+    try:
+        window.start_batch(paths, csv_path)
+        assert wait_for(application, lambda: not window._batch_active, timeout=120)
+        wait_for(application, lambda: window.workers == set(), timeout=30)
+
+        with csv_path.open(newline="", encoding="utf-8-sig") as handle:
+            rows = list(csv.DictReader(handle))
+        assert len(rows) == len(paths)
+        assert all(row["status"] == "OK" for row in rows)
+        assert all("pdfium" in report["text_preparation"]["extractors"]
+                   for report in window.documents.values())
+        assert window.windowTitle() == "Portman PDF Lab"
+        assert not (tmp_path / "references.sqlite").exists()
     finally:
         window.thread_pool.waitForDone(); window.close(); application.processEvents()
 
