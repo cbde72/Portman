@@ -116,3 +116,19 @@ def test_trade_dependencies_and_account_document_do_not_create_security_errors(t
     assert rows["trade.quantity"].status == RecognitionStatus.MISSING
     account = store.catalog("bank of scotland", "user.bank-of-scotland-kontoauszug", "Bank of Scotland Kontoauszug", "*")
     assert not any(field.field_id.startswith(("security.", "trade.")) for field in account.fields)
+
+
+def test_saved_custom_field_definitions_are_purged_from_yaml(tmp_path):
+    from portman_pdf_lab.field_catalog import FieldCatalog, FieldDefinition
+    store = CatalogStore(tmp_path / "catalogs")
+    catalog = store.catalog("comdirect", "user.comdirect-ertraege", "Kauf", "layout-a")
+    legacy = FieldDefinition("user.custom", "attributes.user_fields.user.custom",
+                             "Altes Benutzerfeld", "Überholte Benutzerdefinition")
+    legacy_catalog = FieldCatalog(catalog.bank, catalog.parser_id, catalog.document_type,
+                                  catalog.layout, catalog.version, catalog.fields + (legacy,), catalog.path)
+    legacy_catalog.save(catalog.path)
+    loaded = store.catalog("comdirect", "user.comdirect-ertraege", "Kauf", "layout-a")
+    assert loaded.field("user.custom") is None
+    assert all(not item.path.startswith("attributes.user_fields.") for item in loaded.fields)
+    assert all(not item.path.startswith("attributes.user_fields.")
+               for item in FieldCatalog.load(catalog.path).fields)
