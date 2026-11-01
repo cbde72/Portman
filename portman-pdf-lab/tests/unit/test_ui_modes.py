@@ -59,10 +59,10 @@ def test_quick_mode_hides_missing_optional_but_keeps_required(tmp_path):
     rows = [(value.field_analysis.table.row_at(i), value.field_analysis.table.isRowHidden(i))
             for i in range(value.field_analysis.table.rowCount())]
     quantity = next(hidden for row, hidden in rows if row.field_id == "trade.quantity")
-    venue = next(hidden for row, hidden in rows if row.field_id == "trade.venue")
+    venue = next(hidden for row, hidden in rows if row.field_id == "trade.gross_amount")
     assert quantity is False and venue is True
     value.field_analysis.show_all.setChecked(True)
     venue_row = next(i for i in range(value.field_analysis.table.rowCount())
-                     if value.field_analysis.table.row_at(i).field_id == "trade.venue")
+                     if value.field_analysis.table.row_at(i).field_id == "trade.gross_amount")
     assert not value.field_analysis.table.isRowHidden(venue_row)
     value.close(); application.processEvents()
