@@ -62,3 +62,19 @@ def test_extract_pdf_documents_preparation_version(tmp_path):
     assert document.metadata["text_preparation_version"] == PREPARATION_VERSION
     assert document.metadata["text_extractors"] == "pypdf"
     assert document.metadata["text_quality"] == "ok"
+
+
+def test_isolated_long_u_glyph_line_removed_without_altering_valid_values():
+    text, diagnostics = _normalize(
+        "SAP SE\nUUUUUUUUUUUUUUUUUUUUUUUUUUUUUU\n0,733 STK\nU.S. Treasury\nU U U")
+    assert "UUUUUUUUUUUUUUUU" not in text
+    assert "SAP SE" in text and "0,733 STK" in text
+    assert "U.S. Treasury" in text and "U U U" in text
+    assert "ISOLATED_REPEATED_U_GLYPH_LINE_REMOVED" in diagnostics
+
+
+def test_embedded_u_letters_are_not_removed():
+    value = "KUNDENNUMMER UUUUUUUUUUUUUUUUU 716460"
+    text, diagnostics = _normalize(value)
+    assert text == value
+    assert "ISOLATED_REPEATED_U_GLYPH_LINE_REMOVED" not in diagnostics
