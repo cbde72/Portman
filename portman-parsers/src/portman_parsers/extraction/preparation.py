@@ -256,7 +256,8 @@ def prepare_pdf(path: str | Path, pages: Iterable[str], source_hash: str,
                     diagnostics.append(f"PAGE_{number}_FALLBACK_PDFIUM")
                 else:
                     diagnostics.append(f"PAGE_{number}_FALLBACK_NOT_BETTER")
-        layout_text = _layout_from_spans(blocks) or "\n".join(block.text for block in blocks) or normalized
+        layout_raw = _layout_from_spans(blocks) or "\n".join(block.text for block in blocks)
+        layout_text = _normalize(layout_raw)[0] if layout_raw else normalized
         prepared.append(PagePreparation(number, original, normalized, extractor_id,
                                          extractor_version, quality, page_diagnostics,
                                          blocks, mapping, fallback, layout_text))
