@@ -156,3 +156,31 @@ Aktienfonds                       unbekannt
 Inhaber-Anteile                    keine ISIN
 Referenz 716460"""
  assert extract_comdirect_security_identity(text)==(None,None,None)
+
+
+def test_dividend_reference_number_is_preserved_with_evidence():
+ text="""comdirect
+Abrechnung Dividendengutschrift
+Wertpapier-Bezeichnung                  WKN/ISIN
+SAP SE                                  716460
+Inhaber-Aktien o.N.                     DE0007164600
+STK 0,733
+Zu Ihren Gunsten EUR 1,61
+(Referenz-Nr. 14IKXK3WUKY00GUQ)."""
+ plugin=ComdirectPlugin()
+ source=PdfDocument("dividend-reference","f"*64,(PdfPage(1,text),))
+ result=plugin.parse(source,plugin.detect(source)[0])
+ event=result.events[0]
+ assert event.bank_reference=="14IKXK3WUKY00GUQ"
+ assert len(event.bank_reference_evidence_ids)==1
+ evidence=next(item for item in result.evidence if item.evidence_id==event.bank_reference_evidence_ids[0])
+ assert evidence.page_number==1 and "14IKXK3WUKY00GUQ" in evidence.excerpt
+ assert not event.trades
+
+
+def test_dividend_without_reference_does_not_invent_link_identifier():
+ plugin=ComdirectPlugin()
+ source=doc("Abrechnung Dividendengutschrift")
+ event=plugin.parse(source,plugin.detect(source)[0]).events[0]
+ assert not event.bank_reference_evidence_ids
+ assert not isinstance(event.bank_reference,str)
