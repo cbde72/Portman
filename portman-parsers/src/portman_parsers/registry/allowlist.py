@@ -8,6 +8,15 @@ class HandlerMetadata:
     handler_id: str
     document_type: str
     implemented: bool = False
+    readiness: str = ""
+
+    def __post_init__(self) -> None:
+        value = self.readiness or ("IMPLEMENTED" if self.implemented else "METADATA_ONLY")
+        if value not in {"IMPLEMENTED", "PARTIAL", "METADATA_ONLY", "DISABLED"}:
+            raise ValueError(f"invalid handler readiness: {value}")
+        if value == "IMPLEMENTED" and not self.implemented:
+            raise ValueError("implemented handlers must be marked implemented")
+        object.__setattr__(self, "readiness", value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,4 +113,3 @@ def validate_allowlist() -> None:
 
 
 validate_allowlist()
-

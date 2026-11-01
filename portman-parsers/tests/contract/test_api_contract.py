@@ -20,7 +20,7 @@ from portman_parsers.api import (
 
 def test_api_and_schema_are_versioned():
     assert API_VERSION == "0.6"
-    assert SCHEMA_VERSION == "1.5.0"
+    assert SCHEMA_VERSION == "1.6.0"
 
 
 def test_pdf_document_orders_pages_without_binary_payload():
@@ -71,4 +71,3 @@ def test_duplicate_evidence_ids_are_rejected():
     with pytest.raises(ValueError, match="unique"):
         ParsedDocument("result-1", "doc-1", "demo", "1", "handler",
                        evidence=(evidence, evidence))
-

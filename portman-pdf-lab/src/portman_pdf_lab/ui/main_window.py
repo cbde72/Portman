@@ -123,8 +123,11 @@ class MainWindow(QMainWindow):
         self.parser_choice = QComboBox()
         self.parser_choice.addItem("Automatisch erkennen", None)
         for item in default_registry().metadata():
-            if any(handler.implemented for handler in item.handlers):
+            readiness = tuple(sorted({handler.readiness for handler in item.handlers}))
+            if any(status in {"IMPLEMENTED", "PARTIAL"} for status in readiness):
+                index = self.parser_choice.count()
                 self.parser_choice.addItem(f"{item.group} – {item.plugin_id}", item.plugin_id)
+                self.parser_choice.setItemData(index, ", ".join(readiness), Qt.ToolTipRole)
         toolbar.addWidget(self.parser_choice)
         reparse_action = QAction("Neu parsen", self)
         reparse_action.triggered.connect(self.reparse_current)

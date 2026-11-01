@@ -391,6 +391,9 @@ class FinancialEvent:
     security_wkn: str | MissingValue = MissingValue.UNKNOWN
     security_isin: str | MissingValue = MissingValue.UNKNOWN
     security_identity_evidence_ids: tuple[str, ...] = ()
+    bank_reference: str | MissingValue = MissingValue.UNKNOWN
+    bank_reference_status: str = "MISSING"
+    bank_reference_evidence_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.event_id or not self.document_id or not self.kind:
@@ -398,6 +401,9 @@ class FinancialEvent:
         for name in ("cash_movements", "security_movements", "tax_events", "cost_events", "evidence_ids", "fee_events", "trades"):
             object.__setattr__(self, name, tuple(getattr(self, name)))
         object.__setattr__(self, "security_identity_evidence_ids", tuple(self.security_identity_evidence_ids))
+        if self.bank_reference_status not in {"RECOGNIZED", "MISSING", "INVALID", "AMBIGUOUS"}:
+            raise ValueError("invalid bank reference status")
+        object.__setattr__(self, "bank_reference_evidence_ids", tuple(self.bank_reference_evidence_ids))
         children = (*self.cash_movements, *self.security_movements, *self.tax_events, *self.cost_events, *self.trades)
         if any(child.event_id != self.event_id for child in children):
             raise ValueError("all child records must reference their parent event")
@@ -434,4 +440,3 @@ class PositionSnapshot:
             raise ValueError("snapshot identity, document and account are required")
         object.__setattr__(self, "positions", tuple(self.positions))
         object.__setattr__(self, "evidence_ids", tuple(self.evidence_ids))
-

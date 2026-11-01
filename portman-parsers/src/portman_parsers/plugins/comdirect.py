@@ -11,6 +11,7 @@ TITLES=(("kosteninformation_mifid_ii",r"Kosteninformation\s+zum\s+Wertpapiergesc
 ISIN=re.compile(r"\b[A-Z]{2}[A-Z0-9]{9}\d\b"); IBAN=re.compile(r"DE(?:\s*\d){20}"); DEPOT=re.compile(r"Depot(?:nummer|nr\.)\s*:?\s*(\d+(?:\s+\d+)?)",re.I)
 QTY=re.compile(r"(?:Stk\.?|STK)\s*("+A+r")",re.I); VALUTA=re.compile(r"(?:Valuta|zahlbar\s+ab)\s*("+D+r")",re.I)
 WKN=re.compile(r"\bWKN\s*:?[ \t]*([A-Z0-9]{6})\b",re.I)
+BANK_REFERENCE=re.compile(r"\bReferenz(?:\s*[- ]?\s*(?:Nr\.?|nummer))\s*:?\s*([A-Z0-9]+)\b",re.I)
 TRADE_DATE=re.compile(r"(?:Geschäftstag|Schlusstag)\s*:?[ \t]*("+D+r")",re.I)
 EXECUTION_DATE=re.compile(r"(?:Ausführungstag|Ausführung)\s*:?[ \t]*("+D+r")",re.I)
 PRICE=re.compile(r"(?:Ausführungskurs|Kurs)\s*:?[ \t]*(?:(?P<cur1>[A-Z]{3})\s*)?(?P<a>"+A+r")(?:\s*(?P<cur2>[A-Z]{3}))?",re.I)
@@ -118,7 +119,25 @@ class ComdirectPlugin:
    pm=PRICE.search(text); mm=MARKET_VALUE.search(text); gm=GROSS.search(text); fx=FX.search(text); wm=WKN.search(text); nm=NAME.search(text); tm=TRADE_DATE.search(text); xm=EXECUTION_DATE.search(text)
    trades=(SecurityTrade(stable_id("trade",event_id),event_id,kind,nm.group(1).strip() if nm else MissingValue.NOT_FOUND,isin or MissingValue.NOT_FOUND,wm.group(1).upper() if wm else MissingValue.NOT_FOUND,qty if qty is not None else MissingValue.NOT_FOUND,date(tm.group(1)) if tm else MissingValue.NOT_FOUND,date(xm.group(1)) if xm else MissingValue.NOT_FOUND,date(valuta.group(1)) if valuta else MissingValue.NOT_FOUND,dec(pm.group("a")) if pm else MissingValue.NOT_FOUND,(pm.group("cur1") or pm.group("cur2")) if pm and (pm.group("cur1") or pm.group("cur2")) else MissingValue.NOT_FOUND,dec(mm.group("a")) if mm else MissingValue.NOT_FOUND,dec(gm.group("a")) if gm else MissingValue.NOT_FOUND,dec(fx.group(1)) if fx else MissingValue.NOT_FOUND,dec(settlement.group("a")) if settlement else MissingValue.NOT_FOUND,settlement.group("cur") if settlement else MissingValue.NOT_FOUND,depot_id,account_id,(event_ev,)),)
   identity_evidence=tuple(ev(label,value) for label,value in (("security_wkn",column_wkn),("security_isin",column_isin),("security_name",security_name)) if value)
-  event=FinancialEvent(event_id,doc.document_id,kind,date(valuta.group(1)) if valuta else None,cash,security,tax_events=taxes,fee_events=fees,evidence_ids=(event_ev,),trades=trades,security_name=security_name or MissingValue.UNKNOWN,security_wkn=column_wkn or (WKN.search(text).group(1).upper() if WKN.search(text) else MissingValue.UNKNOWN),security_isin=isin or MissingValue.UNKNOWN,security_identity_evidence_ids=identity_evidence); return self.result(doc,d,evidence,(event,),depots,accounts,tuple(issues),links)
+  reference_matches=tuple(BANK_REFERENCE.finditer(text))
+  valid_references=tuple(match.group(1) for match in reference_matches if 8 <= len(match.group(1)) <= 40)
+  invalid_references=tuple(match for match in reference_matches if not 8 <= len(match.group(1)) <= 40)
+  distinct_references=tuple(dict.fromkeys(valid_references))
+  if len(distinct_references) > 1:
+   reference=MissingValue.NOT_FOUND; reference_status="AMBIGUOUS"
+  elif invalid_references:
+   reference=MissingValue.NOT_FOUND; reference_status="INVALID"
+  elif distinct_references:
+   reference=distinct_references[0]; reference_status="RECOGNIZED"
+  else:
+   reference=MissingValue.UNKNOWN; reference_status="MISSING"
+  reference_evidence=tuple(ev("bank_reference",match.group(0)) for match in reference_matches)
+  if reference_status in {"AMBIGUOUS", "INVALID"}:
+   issues.append(Issue(stable_id("issue", event_id, "bank-reference", reference_status),
+                       "COMDIRECT_BANK_REFERENCE_" + reference_status, IssueSeverity.WARNING,
+                       "Bankreferenz ist nicht eindeutig bzw. formal ungültig.", event_id=event_id,
+                       nature=IssueNature.UNSECURED_ASSIGNMENT))
+  event=FinancialEvent(event_id,doc.document_id,kind,date(valuta.group(1)) if valuta else None,cash,security,tax_events=taxes,fee_events=fees,evidence_ids=(event_ev,),trades=trades,security_name=security_name or MissingValue.UNKNOWN,security_wkn=column_wkn or (WKN.search(text).group(1).upper() if WKN.search(text) else MissingValue.UNKNOWN),security_isin=isin or MissingValue.UNKNOWN,security_identity_evidence_ids=identity_evidence,bank_reference=reference,bank_reference_status=reference_status,bank_reference_evidence_ids=reference_evidence); return self.result(doc,d,evidence,(event,),depots,accounts,tuple(issues),links)
  def result(self,doc,d,evidence,events,depots=(),accounts=(),issues=(),links=(),tax_calculations=(),tax_carryforwards=()): return ParsedDocument(stable_id("result",doc.document_id,self.metadata.version),doc.document_id,self.metadata.plugin_id,self.metadata.version,d.handler_id,events=events,evidence=tuple(evidence),issues=issues,depots=depots,accounts=accounts,depot_account_links=links,tax_calculations=tax_calculations,tax_carryforwards=tax_carryforwards)
 
 class ComdirectFinanzreportPlugin(ComdirectPlugin):
