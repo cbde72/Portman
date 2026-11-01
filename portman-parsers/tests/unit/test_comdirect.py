@@ -135,7 +135,7 @@ Zu Ihren Gunsten EUR 1,61"""
  plugin=ComdirectPlugin(); source=PdfDocument("sap-dividend","b"*64,(PdfPage(1,text),))
  result=plugin.parse(source,plugin.detect(source)[0]); event=result.events[0]
  assert event.kind=="DIVIDEND" and not event.trades
- assert (event.security_name,event.security_wkn,event.security_isin)==("SAP SE","716460","DE0007164600")
+ assert (event.security_name,event.security_wkn,event.security_isin)==("SAP SE Inhaber-Aktien o.N.","716460","DE0007164600")
  assert len(event.security_identity_evidence_ids)==3
  assert event.cash_movements[0].amount==Decimal("1.61")
 
@@ -145,7 +145,7 @@ def test_dividend_security_column_generalizes_to_alphanumeric_wkn():
  text="""Wertpapier-Bezeichnung            WKN/ISIN
 Beispiel MSCI ETF                  A0S9GB
 Inhaber-Anteile                    DE000A0S9GB0"""
- assert extract_comdirect_security_identity(text)==("Beispiel MSCI ETF","A0S9GB","DE000A0S9GB0")
+ assert extract_comdirect_security_identity(text)==("Beispiel MSCI ETF Inhaber-Anteile","A0S9GB","DE000A0S9GB0")
 
 
 def test_dividend_security_column_does_not_pick_unrelated_six_digit_number():
