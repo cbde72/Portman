@@ -9,7 +9,7 @@ import re
 from PySide6.QtCore import Qt, QRegularExpression
 from PySide6.QtGui import QKeySequence, QRegularExpressionValidator, QShortcut
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
+    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout,
     QLabel, QLineEdit, QMessageBox, QPushButton, QTextEdit, QVBoxLayout, QWidget,
 )
 
@@ -108,10 +108,6 @@ class FieldMappingDialog(QDialog):
         self.field_choice = QComboBox()
         for field in catalog.visible_fields(): self.field_choice.addItem(field.label if quick else f"{field.label} — {field.path}", field.field_id)
         self.field_choice.currentIndexChanged.connect(self._field_changed); form.addRow("Zielfeld", self.field_choice)
-        self.new_field = QCheckBox("Neues optionales Erweiterungsfeld")
-        self.new_field.setChecked(define_new); self.new_field.toggled.connect(self._new_toggled); form.addRow(self.new_field)
-        self.new_id = QLineEdit(); self.new_id.setPlaceholderText("z. B. trade.venue_detail"); form.addRow("Neue Feld-ID", self.new_id)
-        self.new_label = QLineEdit(); form.addRow("Anzeigename", self.new_label)
         self.type_label = QLabel(); self.requirement_label = QLabel(); form.addRow("Datentyp", self.type_label); form.addRow("Pflichtstatus", self.requirement_label)
         self.editor_host = QWidget(); self.editor_layout = QHBoxLayout(self.editor_host); self.editor_layout.setContentsMargins(0, 0, 0, 0); form.addRow("Wert", self.editor_host)
         self.normalizer = QComboBox(); form.addRow("Normalisierung", self.normalizer)
@@ -120,9 +116,9 @@ class FieldMappingDialog(QDialog):
         layout.addLayout(form); buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._accept); buttons.rejected.connect(self.reject); layout.addWidget(buttons)
         self.help_shortcut = QShortcut(QKeySequence.HelpContents, self); self.help_shortcut.activated.connect(self.show_help)
-        self._new_toggled(define_new); self._preselect(preselect); self._field_changed()
+        self._preselect(preselect); self._field_changed()
         if quick:
-            self.field_choice.setEnabled(False); self.new_field.hide(); self.new_id.hide(); self.new_label.hide()
+            self.field_choice.setEnabled(False)
 
     def current_definition(self):
         return self.catalog.field(self.field_choice.currentData())
@@ -152,20 +148,9 @@ class FieldMappingDialog(QDialog):
         self.normalizer.clear(); self.normalizer.addItems(definition.normalizers)
         self._clear_editor(); self.value_editor = EditorFactory.create(definition, self.selected_text); self.editor_layout.addWidget(self.value_editor)
 
-    def _new_toggled(self, enabled):
-        self.field_choice.setEnabled(not enabled); self.new_id.setEnabled(enabled); self.new_label.setEnabled(enabled)
-        if enabled:
-            self.type_label.setText("TEXT"); self.requirement_label.setText("OPTIONAL")
-            self.normalizer.clear(); self.normalizer.addItem("TEXT")
-            self._clear_editor(); self.value_editor = QLineEdit(self.selected_text); self.editor_layout.addWidget(self.value_editor)
-        else:
-            self._field_changed()
-
     def _accept(self):
         try:
             definition = self.current_definition()
-            if self.new_field.isChecked():
-                self.catalog, definition = self.catalog_store.add_optional_field(self.catalog, self.new_id.text(), self.new_label.text())
             if not definition: raise ValueError("Zielfeld fehlt")
             value = EditorFactory.text(self.value_editor)
             original, normalized = EditorFactory.normalize(value, definition, self.normalizer.currentText())
