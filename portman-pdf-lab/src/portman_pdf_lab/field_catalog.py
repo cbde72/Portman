@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
+import os
+import tempfile
 import re
 from typing import Any
 
@@ -186,17 +188,31 @@ class CatalogStore:
 
     @staticmethod
     def _without_user_fields(catalog: FieldCatalog) -> FieldCatalog:
-        """Exclude obsolete user_fields definitions, including previously saved ones.
-
-        Historical YAML files are left unchanged for audit/recovery.  No user-defined
-        field is exposed to the GUI or used as a valid training target.
-        """
+        """Remove saved custom definitions from the active YAML catalog on load."""
         kept = tuple(field for field in catalog.fields
                      if not field.path.startswith("attributes.user_fields."))
         if len(kept) == len(catalog.fields):
             return catalog
-        return FieldCatalog(catalog.bank, catalog.parser_id, catalog.document_type,
-                            catalog.layout, catalog.version, kept, catalog.path)
+        cleaned = FieldCatalog(catalog.bank, catalog.parser_id, catalog.document_type,
+                               catalog.layout, catalog.version, kept, catalog.path)
+        if catalog.path is not None:
+            # Atomic rewrite avoids invalid YAML in the event of an interruption.
+            payload = {"schema_version": FieldCatalog.SCHEMA_VERSION,
+                       "catalog_version": cleaned.version, "bank": cleaned.bank,
+                       "parser_id": cleaned.parser_id, "document_type": cleaned.document_type,
+                       "layout": cleaned.layout, "fields": [asdict(item) for item in kept]}
+            fd, temporary = tempfile.mkstemp(prefix=".clean-catalog-", suffix=".tmp",
+                                             dir=catalog.path.parent)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    yaml.safe_dump(payload, stream, allow_unicode=True, sort_keys=False)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, catalog.path)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+        return cleaned
 
     def catalog(self, bank="comdirect", parser_id="user.comdirect-ertraege", document_type="*", layout="*"):
         candidates = sorted(self.root.glob(f"{bank}.*.yaml"))
