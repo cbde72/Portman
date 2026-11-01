@@ -48,7 +48,6 @@ TRADE_FIELDS = (
     FieldDefinition("trade.amount", "events[0].cash_movements[0].amount", "Settlement", "Tatsächlicher oder erwarteter Geldbetrag gemäß Status", "DECIMAL", editor="AMOUNT", requirement="REQUIRED", normalizers=("DECIMAL_DE", "DECIMAL_EN"), order=60),
     FieldDefinition("trade.currency", "events[0].cash_movements[0].currency", "Settlement-Währung", "Ausgewiesene Währung", requirement="REQUIRED", order=65),
     FieldDefinition("trade.fees", "events[0].fee_events", "Gebühren", "Ausgewiesene Gebühren; leer ist zulässig, wenn nicht gedruckt", "LIST", requirement="OPTIONAL", order=70),
-    FieldDefinition("trade.venue", "attributes.user_fields.trade.venue", "Handelsplatz", "Optionaler Ausführungs- oder Handelsplatz", "TEXT", requirement="OPTIONAL", editor="VENUE", patterns=("Handelsplatz", "Ausführungsplatz"), order=80),
 )
 
 TECHNICAL_FIELDS = (
@@ -73,7 +72,6 @@ ACCOUNT_FIELDS = (
     FieldDefinition("booking.date", "events[0].event_date", "Buchungsdatum", "Datum der Kontobuchung", "DATE", requirement="REQUIRED", editor="DATE", order=30),
     FieldDefinition("booking.amount", "events[0].cash_movements[0].amount", "Betrag", "Gebuchter Betrag", "DECIMAL", requirement="REQUIRED", editor="AMOUNT", order=40),
     FieldDefinition("booking.currency", "events[0].cash_movements[0].currency", "Währung", "Buchungswährung", requirement="REQUIRED", order=50),
-    FieldDefinition("booking.value_date", "attributes.user_fields.booking.value_date", "Valuta", "Optionales Valutadatum", "DATE", requirement="OPTIONAL", editor="DATE", order=60),
 )
 
 DEPOT_FIELDS = (
@@ -186,6 +184,20 @@ class CatalogStore:
         clean = lambda value: re.sub(r"[^a-zA-Z0-9_.-]", "_", value or "all").strip("._") or "all"
         return ".".join(map(clean, (bank, parser_id, document_type, layout)))
 
+    @staticmethod
+    def _without_user_fields(catalog: FieldCatalog) -> FieldCatalog:
+        """Exclude obsolete user_fields definitions, including previously saved ones.
+
+        Historical YAML files are left unchanged for audit/recovery.  No user-defined
+        field is exposed to the GUI or used as a valid training target.
+        """
+        kept = tuple(field for field in catalog.fields
+                     if not field.path.startswith("attributes.user_fields."))
+        if len(kept) == len(catalog.fields):
+            return catalog
+        return FieldCatalog(catalog.bank, catalog.parser_id, catalog.document_type,
+                            catalog.layout, catalog.version, kept, catalog.path)
+
     def catalog(self, bank="comdirect", parser_id="user.comdirect-ertraege", document_type="*", layout="*"):
         candidates = sorted(self.root.glob(f"{bank}.*.yaml"))
         compatible = []
@@ -194,12 +206,12 @@ class CatalogStore:
             if catalog.parser_id in {parser_id, "*"} and catalog.document_type in {document_type, "*"} and catalog.layout in {layout, "*"}:
                 compatible.append(catalog)
         if compatible:
-            return max(compatible, key=lambda item: (sum((item.parser_id == parser_id,
+            return self._without_user_fields(max(compatible, key=lambda item: (sum((item.parser_id == parser_id,
                                                            item.document_type == document_type,
-                                                           item.layout == layout)), item.version))
+                                                           item.layout == layout)), item.version)))
         catalog = FieldCatalog(bank, parser_id, document_type, layout, 1, fields_for_document(parser_id, document_type))
         catalog.path = catalog.save(self.root / f"{self._stem(bank, parser_id, document_type, layout)}.v1.yaml")
-        return catalog
+        return self._without_user_fields(catalog)
 
     def add_optional_field(self, catalog: FieldCatalog, field_id: str, label: str, data_type="TEXT"):
         """Creation of user-defined fields is disabled in PDF Lab.
