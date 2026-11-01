@@ -21,6 +21,28 @@ NAME=re.compile(r"(?:Wertpapierbezeichnung|Bezeichnung)\s*:?[ \t]*(.+)",re.I)
 SETTLE=re.compile(r"(?:Zu\s*Ihren\s*(?P<dir>Lasten|Gunsten)|(?:^|\n)Gutschrift|(?:^|\n)Zahlungsbetrag).{0,80}?(?P<cur>[A-Z]{3})\s*-?\s*(?P<a>"+A+r")",re.I|re.S)
 TAX=(("CAPITAL_GAINS_TAX",r"Kapitalertragsteuer\s*(?:EUR)?\s*-?("+A+r")"),("SOLIDARITY_SURCHARGE",r"Solidarit.tszuschlag\s*(?:EUR)?\s*-?("+A+r")"),("CHURCH_TAX",r"Kirchensteuer\s*(?:EUR)?\s*-?("+A+r")"),("WITHHOLDING_TAX",r"Quellensteuer\s*(?:[A-Z]{3})?\s*-?("+A+r")"))
 FEE=(("provision",r"Provision\s*:?\s*(?:EUR)?\s*-?("+A+r")"),("foreign_expenses",r"(?:Fremdspesen|fremde\s+Spesen)\s*:?\s*(?:EUR)?\s*-?("+A+r")"),("exchange_fee",r"(?:B.rsenplatz.*Entgelt|B.rsengeb.hr)\s*:?\s*(?:EUR)?\s*-?("+A+r")"))
+def extract_comdirect_security_identity(text):
+ """Read the value column beneath WKN/ISIN, independent of the issuer.
+
+ A header-scoped two-row match prevents taking a random six-digit account
+ number elsewhere in the document for the WKN. Explicit WKN labels remain
+ supported for trade forms with a different layout.
+ """
+ lines=text.splitlines()
+ for index,line in enumerate(lines):
+  if not re.search(r"WKN\s*/\s*ISIN",line,re.I): continue
+  block=lines[index+1:index+5]
+  if len(block)<2: continue
+  first=re.search(r"\b([A-Z0-9]{6})\s*$",block[0].strip(),re.I)
+  second=re.search(r"\b([A-Z]{2}[A-Z0-9]{9}\d)\s*$",block[1].strip(),re.I)
+  if not (first and second): continue
+  # Column-aware: a wide gap separates the security description from WKN.
+  before=block[0][:first.start()].rstrip()
+  columns=[part.strip() for part in re.split(r"\s{2,}",before) if part.strip()]
+  name=columns[-1] if columns else None
+  return name,first.group(1).upper(),second.group(1).upper()
+ return None,None,None
+
 def dec(v): return Decimal(v.replace(".","").replace(",","."))
 def date(v): return datetime.strptime(v,"%d.%m.%Y").date()
 
@@ -38,7 +60,8 @@ class ComdirectPlugin:
    page=next((p.number for p in doc.pages if excerpt in p.text),1); eid=stable_id("evidence",doc.document_id,page,field,excerpt,len(evidence))
    evidence.append(Evidence(eid,doc.document_id,page,field,excerpt,f"page:{page}",doc.source_hash,self.metadata.plugin_id,d.handler_id,self.metadata.version)); return eid
   title=re.search(next(p for h,p in TITLES if h==d.handler_id),text,re.I|re.S).group(0); eid=ev("document_type",title)
-  isin=ISIN.search(text).group(0) if ISIN.search(text) else None; depot_m=DEPOT.search(text); depot_id=None; depots=()
+  security_name, column_wkn, column_isin = extract_comdirect_security_identity(text)
+  isin=column_isin or (ISIN.search(text).group(0) if ISIN.search(text) else None); depot_m=DEPOT.search(text); depot_id=None; depots=()
   if depot_m:
    number=re.sub(r"\s", "",depot_m.group(1)); de=ev("depot_number",depot_m.group(0)); depot_id=stable_id("depot","comdirect",number)
    depots=(Depot(depot_id,bank_name=FieldValue.from_pdf("comdirect",1,de),depot_number=FieldValue.from_pdf(number,1,de),base_currency=FieldValue.from_pdf("EUR",1,de),depot_type=FieldValue.manual(DepotType.WERTPAPIER)),)
@@ -88,7 +111,8 @@ class ComdirectPlugin:
   if kind in {"BUY","SELL","REDEMPTION"}:
    pm=PRICE.search(text); mm=MARKET_VALUE.search(text); gm=GROSS.search(text); fx=FX.search(text); wm=WKN.search(text); nm=NAME.search(text); tm=TRADE_DATE.search(text); xm=EXECUTION_DATE.search(text)
    trades=(SecurityTrade(stable_id("trade",event_id),event_id,kind,nm.group(1).strip() if nm else MissingValue.NOT_FOUND,isin or MissingValue.NOT_FOUND,wm.group(1).upper() if wm else MissingValue.NOT_FOUND,qty if qty is not None else MissingValue.NOT_FOUND,date(tm.group(1)) if tm else MissingValue.NOT_FOUND,date(xm.group(1)) if xm else MissingValue.NOT_FOUND,date(valuta.group(1)) if valuta else MissingValue.NOT_FOUND,dec(pm.group("a")) if pm else MissingValue.NOT_FOUND,(pm.group("cur1") or pm.group("cur2")) if pm and (pm.group("cur1") or pm.group("cur2")) else MissingValue.NOT_FOUND,dec(mm.group("a")) if mm else MissingValue.NOT_FOUND,dec(gm.group("a")) if gm else MissingValue.NOT_FOUND,dec(fx.group(1)) if fx else MissingValue.NOT_FOUND,dec(settlement.group("a")) if settlement else MissingValue.NOT_FOUND,settlement.group("cur") if settlement else MissingValue.NOT_FOUND,depot_id,account_id,(event_ev,)),)
-  event=FinancialEvent(event_id,doc.document_id,kind,date(valuta.group(1)) if valuta else None,cash,security,tax_events=taxes,fee_events=fees,evidence_ids=(event_ev,),trades=trades); return self.result(doc,d,evidence,(event,),depots,accounts,tuple(issues),links)
+  identity_evidence=tuple(ev(label,value) for label,value in (("security_wkn",column_wkn),("security_isin",column_isin),("security_name",security_name)) if value)
+  event=FinancialEvent(event_id,doc.document_id,kind,date(valuta.group(1)) if valuta else None,cash,security,tax_events=taxes,fee_events=fees,evidence_ids=(event_ev,),trades=trades,security_name=security_name or MissingValue.UNKNOWN,security_wkn=column_wkn or (WKN.search(text).group(1).upper() if WKN.search(text) else MissingValue.UNKNOWN),security_isin=isin or MissingValue.UNKNOWN,security_identity_evidence_ids=identity_evidence); return self.result(doc,d,evidence,(event,),depots,accounts,tuple(issues),links)
  def result(self,doc,d,evidence,events,depots=(),accounts=(),issues=(),links=(),tax_calculations=(),tax_carryforwards=()): return ParsedDocument(stable_id("result",doc.document_id,self.metadata.version),doc.document_id,self.metadata.plugin_id,self.metadata.version,d.handler_id,events=events,evidence=tuple(evidence),issues=issues,depots=depots,accounts=accounts,depot_account_links=links,tax_calculations=tax_calculations,tax_carryforwards=tax_carryforwards)
 
 class ComdirectFinanzreportPlugin(ComdirectPlugin):
