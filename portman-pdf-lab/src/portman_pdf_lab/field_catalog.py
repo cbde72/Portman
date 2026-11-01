@@ -202,15 +202,8 @@ class CatalogStore:
         return catalog
 
     def add_optional_field(self, catalog: FieldCatalog, field_id: str, label: str, data_type="TEXT"):
-        safe_id = re.sub(r"[^a-zA-Z0-9_.-]", "_", field_id).strip("._")
-        if not safe_id:
-            raise ValueError("field id is empty")
-        path = f"attributes.user_fields.{safe_id}"
-        if catalog.field(path) or catalog.field(safe_id):
-            raise ValueError("field already exists")
-        definition = FieldDefinition(safe_id, path, label or safe_id, "Benutzerdefiniertes optionales Anzeigefeld",
-                                     data_type, requirement="OPTIONAL", order=800)
-        updated = FieldCatalog(catalog.bank, catalog.parser_id, catalog.document_type, catalog.layout,
-                               catalog.version + 1, catalog.fields + (definition,))
-        updated.path = updated.save(self.root / f"{self._stem(catalog.bank, catalog.parser_id, catalog.document_type, catalog.layout)}.v{updated.version}.yaml")
-        return updated, definition
+        """Creation of user-defined fields is disabled in PDF Lab.
+
+        Previously saved fields remain readable and usable.
+        """
+        raise ValueError("Neue Benutzerfelder können in PDF Lab nicht angelegt werden.")
