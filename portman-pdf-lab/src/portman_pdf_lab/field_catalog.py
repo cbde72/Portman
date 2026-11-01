@@ -99,14 +99,15 @@ TAX_FIELDS = (
 )
 
 DIVIDEND_FIELDS = (
-    FieldDefinition("security.isin", "events[0].trades[0].isin", "ISIN", "Wertpapieridentifikation", "ISIN", requirement="CONDITIONAL", condition={"op":"REQUIRED_UNLESS_VALID","paths":["events[0].trades[0].wkn","events[0].trades[0].security_name"]}, editor="ISIN", order=10),
-    FieldDefinition("security.wkn", "events[0].trades[0].wkn", "WKN", "Alternative Wertpapieridentifikation", "WKN", requirement="CONDITIONAL", condition={"op":"REQUIRED_UNLESS_VALID","paths":["events[0].trades[0].isin","events[0].trades[0].security_name"]}, editor="WKN", order=20),
-    FieldDefinition("payment.amount", "events[0].cash_movements[0].amount", "Zahlbetrag", "Ausgewiesene Ausschüttung", "DECIMAL", requirement="REQUIRED", editor="AMOUNT", order=30),
-    FieldDefinition("payment.currency", "events[0].cash_movements[0].currency", "Währung", "Zahlungswährung", requirement="REQUIRED", order=40),
-    FieldDefinition("payment.status", "events[0].cash_movements[0].status", "Cashflowstatus", "ACTUAL oder EXPECTED", requirement="REQUIRED", order=50),
-    FieldDefinition("payment.taxes", "events[0].tax_events", "Steuern", "Nur ausgewiesene Steuerinformationen", "LIST", requirement="OPTIONAL", order=60),
-    FieldDefinition("tax.amount", "events[0].tax_events[0].components[0].amount", "Steuerbetrag", "Ausgewiesener Betrag einer Steuerkomponente", "DECIMAL", requirement="OPTIONAL", editor="AMOUNT", order=61),
-    FieldDefinition("fee.amount", "events[0].fee_events[0].amount", "Gebührenbetrag", "Ausgewiesener Betrag einer Gebührenposition", "DECIMAL", requirement="OPTIONAL", editor="AMOUNT", order=62),
+    FieldDefinition("security.isin", "events[0].security_isin", "ISIN", "Wertpapieridentifikation", "ISIN", requirement="CONDITIONAL", condition={"op":"REQUIRED_UNLESS_VALID","paths":["events[0].security_wkn","events[0].security_name"]}, editor="ISIN", order=10),
+    FieldDefinition("security.wkn", "events[0].security_wkn", "WKN", "Alternative Wertpapieridentifikation", "WKN", requirement="CONDITIONAL", condition={"op":"REQUIRED_UNLESS_VALID","paths":["events[0].security_isin","events[0].security_name"]}, editor="WKN", order=20),
+    FieldDefinition("security.name", "events[0].security_name", "Wertpapiername", "Bezeichnung des ausgeschütteten Wertpapiers", requirement="REQUIRED", order=30),
+    FieldDefinition("payment.amount", "events[0].cash_movements[0].amount", "Zahlbetrag", "Ausgewiesene Ausschüttung", "DECIMAL", requirement="REQUIRED", editor="AMOUNT", order=40),
+    FieldDefinition("payment.currency", "events[0].cash_movements[0].currency", "Währung", "Zahlungswährung", requirement="REQUIRED", order=50),
+    FieldDefinition("payment.status", "events[0].cash_movements[0].status", "Cashflowstatus", "ACTUAL oder EXPECTED", requirement="REQUIRED", order=60),
+    FieldDefinition("payment.taxes", "events[0].tax_events", "Steuern", "Nur ausgewiesene Steuerinformationen", "LIST", requirement="OPTIONAL", order=70),
+    FieldDefinition("tax.amount", "events[0].tax_events[0].components[0].amount", "Steuerbetrag", "Ausgewiesener Betrag einer Steuerkomponente", "DECIMAL", requirement="OPTIONAL", editor="AMOUNT", order=71),
+    FieldDefinition("fee.amount", "events[0].fee_events[0].amount", "Gebührenbetrag", "Ausgewiesener Betrag einer Gebührenposition", "DECIMAL", requirement="OPTIONAL", editor="AMOUNT", order=72),
 )
 
 DEFAULT_FIELDS = TECHNICAL_FIELDS
