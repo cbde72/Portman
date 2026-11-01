@@ -24,6 +24,29 @@ from portman_pdf_lab.ui.result_view import (
 
 HEADERS = ("Variable", "Wert", "Beschreibung", "Feldname", "Einheit / Währung",
            "Datentyp", "Parser-ID", "Regel-ID", "PDF-Seite", "Evidence", "Status")
+FINANCIAL_ROOTS = frozenset({
+    "accounts", "depots", "depot_snapshots", "account_balances",
+    "depot_account_links", "events", "snapshots", "tax_calculations",
+    "tax_carryforwards",
+})
+# Parser bookkeeping and transport metadata are not financial result values.
+NON_VALUE_SEGMENTS = frozenset({
+    "attributes", "evidence", "evidence_ids", "issues", "review_status",
+    "page_number", "source_ref", "confidence", "plugin_id",
+    "plugin_version", "handler_id", "document_id", "result_id",
+    "schema_version", "event_id", "movement_id", "trade_id",
+    "tax_event_id", "fee_id", "cost_event_id", "snapshot_id",
+    "position_id", "link_id", "balance_id",
+})
+
+
+def is_financial_value_path(path: str) -> bool:
+    normalized = normalize_field_path(path)
+    parts = normalized.replace("[]", "").split(".")
+    return bool(parts and parts[0] in FINANCIAL_ROOTS and
+                not any(part in NON_VALUE_SEGMENTS for part in parts))
+
+
 def normalize_description_path(path: str) -> str:
     """Backward-compatible name for the central catalog normalizer."""
     return normalize_field_path(path)
@@ -83,7 +106,8 @@ class StandardValueRow:
 
 
 def build_standard_value_rows(report: Mapping[str, Any] | None,
-                              catalog: FieldCatalog | None = None) -> list[StandardValueRow]:
+                              catalog: FieldCatalog | None = None,
+                              financial_only: bool = False) -> list[StandardValueRow]:
     """Build rows exclusively from the original report's STANDARD result."""
     report = report or {}
     result = report.get("result") if isinstance(report.get("result"), Mapping) else {}
@@ -94,6 +118,8 @@ def build_standard_value_rows(report: Mapping[str, Any] | None,
     }
     rows: list[StandardValueRow] = []
     for display in flatten_result(result, evidence_by_id):
+        if financial_only and not is_financial_value_path(display.path):
+            continue
         if (display.status == RecognitionStatus.NOT_APPLICABLE or
                 display.value == "[]" or not _actual_value(display.value)):
             continue
