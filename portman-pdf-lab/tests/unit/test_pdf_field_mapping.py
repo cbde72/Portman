@@ -61,7 +61,7 @@ def test_catalog_driven_editors_preserve_original_and_normalized_values(tmp_path
 def test_mapping_only_existing_fields_even_when_define_new_requested(tmp_path):
     application = app(); store = CatalogStore(tmp_path); catalog = store.catalog()
     context = {"bank": "comdirect", "parser_id": "user.comdirect-ertraege", "document_type": "Kauf", "rule_mode": "STANDARD"}
-    dialog = FieldMappingDialog(catalog, store, context, "XETRA", 2, define_new=True)
+    dialog = FieldMappingDialog(catalog, store, context, "1,25", 2, define_new=True)
     assert not hasattr(dialog, "new_field")
     assert not hasattr(dialog, "new_id")
     index = next(i for i in range(dialog.field_choice.count()) if dialog.field_choice.itemData(i) == "trade.quantity")
