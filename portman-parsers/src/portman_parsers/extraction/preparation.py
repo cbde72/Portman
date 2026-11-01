@@ -106,6 +106,8 @@ def _diagnose(text: str) -> tuple[str, ...]:
         diagnostics.append("REPEATED_AT_GLYPH_RUN")
     if _U_RUN_LINE.search(text):
         diagnostics.append("ISOLATED_REPEATED_U_GLYPH_LINE")
+    if re.search(r"U{12,}", text):
+        diagnostics.append("REPEATED_U_GLYPH_RUN")
     artifact_tokens = _ARTIFACT_TOKEN.findall(text)
     repeated = {token for token in artifact_tokens if artifact_tokens.count(token) >= 2}
     if repeated:
@@ -126,6 +128,8 @@ def _quality(text: str, diagnostics: Iterable[str]) -> str:
         return "NO_TEXT"
     severe = {"UNICODE_REPLACEMENT_CHARACTER", "LOW_CHARACTER_VARIETY"}
     if severe.intersection(diagnostics):
+        return "UNRELIABLE"
+    if "REPEATED_U_GLYPH_RUN" in diagnostics:
         return "UNRELIABLE"
     if diagnostics:
         return "SUSPICIOUS"
