@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 )
 
 from portman_parsers.extraction import extract_pdf
+from portman_parsers.registry import default_registry
 from pypdf import PdfReader
 from portman_pdf_lab.application.pdf_analysis import analyse_pdf
 from portman_pdf_lab.application.reference_service import analyse_and_store
@@ -55,13 +56,13 @@ class WorkerSignals(QObject):
 
 
 class AnalysisWorker(QRunnable):
-    def __init__(self, path: Path, repository_path: Path, rule_mode="STANDARD"):
-        super().__init__(); self.path = path; self.repository_path = repository_path; self.rule_mode = rule_mode; self.signals = WorkerSignals()
+    def __init__(self, path: Path, repository_path: Path, rule_mode="STANDARD", plugin_id=None):
+        super().__init__(); self.path = path; self.repository_path = repository_path; self.rule_mode = rule_mode; self.plugin_id = plugin_id; self.signals = WorkerSignals()
 
     @Slot()
     def run(self):
         try:
-            self.signals.result.emit(analyse_and_store(self.path, ReferenceRepository(self.repository_path), self.rule_mode)[0])
+            self.signals.result.emit(analyse_and_store(self.path, ReferenceRepository(self.repository_path), self.rule_mode, plugin_id=self.plugin_id)[0])
         except Exception as exc:  # defensive GUI boundary
             self.signals.error.emit(str(exc))
         finally:
@@ -118,6 +119,13 @@ class MainWindow(QMainWindow):
         cancel_action = QAction("Abbrechen", self); cancel_action.triggered.connect(self.cancel_batch); toolbar.addAction(cancel_action)
         toolbar.addSeparator(); toolbar.addWidget(QLabel("Modus:"))
         self.ui_mode = QComboBox(); self.ui_mode.addItems(("Schnell", "Experte")); toolbar.addWidget(self.ui_mode)
+        toolbar.addWidget(QLabel("Plugin:"))
+        self.parser_choice = QComboBox()
+        self.parser_choice.addItem("Automatisch erkennen", None)
+        for item in default_registry().metadata():
+            if any(handler.implemented for handler in item.handlers):
+                self.parser_choice.addItem(f"{item.group} – {item.plugin_id}", item.plugin_id)
+        toolbar.addWidget(self.parser_choice)
         approve_action = QAction("Freigeben", self); approve_action.triggered.connect(lambda: self.review_current(ReviewStatus.APPROVED)); toolbar.addAction(approve_action)
         reject_action = QAction("Korrektur nötig", self); reject_action.triggered.connect(lambda: self.review_current(ReviewStatus.NEEDS_CORRECTION)); toolbar.addAction(reject_action)
         help_action = QAction("Feldhilfe", self); help_action.triggered.connect(self.show_field_help); toolbar.addAction(help_action)
@@ -284,7 +292,7 @@ class MainWindow(QMainWindow):
 
     def analyse(self, path: Path, rule_mode=None):
         self.statusBar().showMessage(f"Analysiere {path.name} …")
-        worker = AnalysisWorker(path, self.repository_path, rule_mode or self.training_widget.mode.currentText()); self.workers.add(worker)
+        worker = AnalysisWorker(path, self.repository_path, rule_mode or self.training_widget.mode.currentText(), self.parser_choice.currentData()); self.workers.add(worker)
         worker.signals.result.connect(lambda result, p=path: self._analysis_ready(p, result))
         worker.signals.error.connect(lambda message: QMessageBox.warning(self, "Analysefehler", message))
         worker.signals.finished.connect(lambda w=worker: self._worker_finished(w)); self.thread_pool.start(worker)
