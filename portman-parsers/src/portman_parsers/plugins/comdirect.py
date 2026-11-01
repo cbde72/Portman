@@ -1,4 +1,5 @@
 """Independent comdirect handlers; no V09 compatibility layer."""
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 import re
@@ -22,33 +23,109 @@ NAME=re.compile(r"(?:Wertpapierbezeichnung|Bezeichnung)\s*:?[ \t]*(.+)",re.I)
 SETTLE=re.compile(r"(?:Zu\s*Ihren\s*(?P<dir>Lasten|Gunsten)|(?:^|\n)Gutschrift|(?:^|\n)Zahlungsbetrag).{0,80}?(?P<cur>[A-Z]{3})\s*-?\s*(?P<a>"+A+r")",re.I|re.S)
 TAX=(("CAPITAL_GAINS_TAX",r"Kapitalertragsteuer\s*(?:EUR)?\s*-?("+A+r")"),("SOLIDARITY_SURCHARGE",r"Solidarit.tszuschlag\s*(?:EUR)?\s*-?("+A+r")"),("CHURCH_TAX",r"Kirchensteuer\s*(?:EUR)?\s*-?("+A+r")"),("WITHHOLDING_TAX",r"Quellensteuer\s*(?:[A-Z]{3})?\s*-?("+A+r")"))
 FEE=(("provision",r"Provision\s*:?\s*(?:EUR)?\s*-?("+A+r")"),("foreign_expenses",r"(?:Fremdspesen|fremde\s+Spesen)\s*:?\s*(?:EUR)?\s*-?("+A+r")"),("exchange_fee",r"(?:B.rsenplatz.*Entgelt|B.rsengeb.hr)\s*:?\s*(?:EUR)?\s*-?("+A+r")"))
-def extract_comdirect_security_identity(text):
- """Read the value column beneath WKN/ISIN, independent of the issuer.
+@dataclass(frozen=True)
+class _SecurityIdentity:
+  name: str | None = None
+  wkn: str | None = None
+  isin: str | None = None
+  status: str = "MISSING"
+  reason: str = ""
+  name_rows: tuple[str, ...] = ()
 
- A header-scoped two-row match prevents taking a random six-digit account
- number elsewhere in the document for the WKN. Explicit WKN labels remain
- supported for trade forms with a different layout.
- """
- lines=text.splitlines()
- for index,line in enumerate(lines):
-  if not re.search(r"WKN\s*/\s*ISIN",line,re.I): continue
-  block=lines[index+1:index+5]
-  if len(block)<2: continue
-  first=re.search(r"\b([A-Z0-9]{6})\s*$",block[0].strip(),re.I)
-  second=re.search(r"\b([A-Z]{2}[A-Z0-9]{9}\d)\s*$",block[1].strip(),re.I)
-  if not (first and second): continue
-  # Column-aware: a wide gap separates the security description from WKN.
-  before=block[0][:first.start()].rstrip()
-  columns=[part.strip() for part in re.split(r"\s{2,}",before) if part.strip()]
-  name=columns[-1] if columns else None
-  second_before=block[1][:second.start()].rstrip()
-  second_parts=[part.strip() for part in re.split(r"\s{2,}",second_before) if part.strip()]
-  # The following row contains the security class/description, not a second security.
-  suffix=second_parts[-1] if second_parts else None
-  if suffix and name:
-   name=f"{name} {suffix}"
-  return name,first.group(1).upper(),second.group(1).upper()
- return None,None,None
+
+def _valid_isin(value):
+  value = re.sub(r"\s+", "", str(value or "")).upper()
+  if not re.fullmatch(r"[A-Z]{2}[A-Z0-9]{9}[0-9]", value):
+   return False
+  digits = "".join(str(ord(char) - 55) if char.isalpha() else char for char in value)
+  total = sum((int(char) * (2 if (len(digits) - index) % 2 == 0 else 1)) // 10 +
+              (int(char) * (2 if (len(digits) - index) % 2 == 0 else 1)) % 10
+              for index, char in enumerate(digits))
+  return total % 10 == 0
+
+
+def _join_spaced_letters(value):
+  """Repair PDF glyph spacing only for an unambiguous letter run."""
+  value = re.sub(r"\s+", " ", str(value or "")).strip()
+  pattern = re.compile(r"(?<![\wÄÖÜäöüß])(?:[A-Za-zÄÖÜäöüß]\s+){3,}[A-Za-zÄÖÜäöüß](?![\wÄÖÜäöüß])")
+  def collapse(match):
+   return re.sub(r"\s+", "", match.group(0))
+  value = pattern.sub(collapse, value)
+  value = re.sub(r"\s*-\s*", "-", value)
+  value = re.sub(r"\s*\.\s*", ".", value)
+  value = re.sub(r"(?<=[A-Za-zÄÖÜäöüß])o\.N\.", " o.N.", value, flags=re.I)
+  return value
+
+
+def _identity_name(line, marker, row_index):
+  before = line[:marker].strip()
+  parts = [part.strip() for part in re.split(r"\s{2,}", before) if part.strip()]
+  if len(parts) > 1:
+   value = parts[-1]
+  else:
+   value = before
+   if row_index == 0:
+    value = re.sub(r"^per\s+\d{2}\.\d{2}\.\d{4}\s+", "", value, flags=re.I)
+   else:
+    value = re.sub(r"^STK\.?\s*[\d.,]+\s+", "", value, flags=re.I)
+  return _join_spaced_letters(value)
+
+
+def _extract_comdirect_security_identity(text, layout_text=None):
+  """Extract one identity block, validating both the column and ISIN."""
+  source = layout_text or text
+  lines = source.splitlines()
+  for index, header in enumerate(lines):
+   if not re.search(r"Wertpapier\s*-?\s*Bezeichnung", header, re.I) or not re.search(r"WKN\s*/\s*ISIN", header, re.I):
+    continue
+   rows = []
+   for line in lines[index + 1:index + 8]:
+    if not line.strip() or re.search(r"(?:Abrechnung|zahlbar|Zu Ihren|Gutschrift)", line, re.I):
+     break
+    rows.append(line)
+    if len(rows) == 2:
+     break
+   wkn_hits = []
+   isin_hits = []
+   for row_index, line in enumerate(rows):
+    for match in re.finditer(r"(?<![A-Z0-9])([A-Z0-9]{6})(?![A-Z0-9])", line):
+     wkn_hits.append((match.group(1).upper(), line, match.start(), row_index))
+    for match in re.finditer(r"(?<![A-Z0-9])([A-Z]{2}[A-Z0-9]{9}\d)(?![A-Z0-9])", line, re.I):
+     value = match.group(1).upper()
+     isin_hits.append((value, line, match.start(), row_index, _valid_isin(value)))
+   valid_isins = [item for item in isin_hits if item[4]]
+   invalid_isins = [item for item in isin_hits if not item[4]]
+   if len(wkn_hits) > 1 or len(valid_isins) > 1:
+    return _SecurityIdentity(status="AMBIGUOUS", reason="mehrere Kennungen im selben Wertpapierblock")
+   if invalid_isins and not valid_isins:
+    return _SecurityIdentity(status="INVALID", reason="ISIN-Prüfziffer oder ISIN-Format ungültig")
+   if not wkn_hits and not valid_isins:
+    continue
+   wkn = wkn_hits[0][0] if wkn_hits else None
+   isin = valid_isins[0][0] if valid_isins else None
+   name_rows = []
+   if wkn_hits:
+    name_rows.append(_identity_name(wkn_hits[0][1], wkn_hits[0][2], wkn_hits[0][3]))
+   if valid_isins:
+    name_rows.append(_identity_name(valid_isins[0][1], valid_isins[0][2], valid_isins[0][3]))
+   name_rows = tuple(item for item in name_rows if item)
+   return _SecurityIdentity(" ".join(dict.fromkeys(name_rows)) or None, wkn, isin, "RECOGNIZED")
+  return _SecurityIdentity()
+
+
+def extract_comdirect_security_identity(text, layout_text=None):
+  """Backward-compatible tuple API for the validated identity extractor."""
+  identity = _extract_comdirect_security_identity(text, layout_text)
+  return identity.name, identity.wkn, identity.isin
+
+
+def _document_layout_text(document):
+  try:
+   import json
+   pages = json.loads(document.metadata.get("text_preparation_json", "{}"))
+   return "\n".join(page.get("layout_text", "") for page in pages.get("pages", ()) if page.get("layout_text"))
+  except (AttributeError, TypeError, ValueError):
+   return ""
 
 def dec(v): return Decimal(v.replace(".","").replace(",","."))
 def date(v): return datetime.strptime(v,"%d.%m.%Y").date()
@@ -67,8 +144,17 @@ class ComdirectPlugin:
    page=next((p.number for p in doc.pages if excerpt in p.text),1); eid=stable_id("evidence",doc.document_id,page,field,excerpt,len(evidence))
    evidence.append(Evidence(eid,doc.document_id,page,field,excerpt,f"page:{page}",doc.source_hash,self.metadata.plugin_id,d.handler_id,self.metadata.version)); return eid
   title=re.search(next(p for h,p in TITLES if h==d.handler_id),text,re.I|re.S).group(0); eid=ev("document_type",title)
-  security_name, column_wkn, column_isin = extract_comdirect_security_identity(text)
-  isin=column_isin or (ISIN.search(text).group(0) if ISIN.search(text) else None); depot_m=DEPOT.search(text); depot_id=None; depots=()
+  layout = _document_layout_text(doc)
+  identity = _extract_comdirect_security_identity(text, layout)
+  security_name, column_wkn, column_isin = identity.name, identity.wkn, identity.isin
+  global_isins = [match.group(0).upper() for match in ISIN.finditer(text) if _valid_isin(match.group(0))]
+  other_isins = {value for value in global_isins if value != column_isin}
+  if column_isin and other_isins:
+   identity = _SecurityIdentity(identity.name, identity.wkn, None, "AMBIGUOUS", "unterschiedliche ISINs im Dokument", identity.name_rows)
+  isin = column_isin if not other_isins else None
+  if not column_isin and identity.status == "MISSING" and len(set(global_isins)) == 1:
+   isin = global_isins[0]
+  depot_m=DEPOT.search(text); depot_id=None; depots=()
   if depot_m:
    number=re.sub(r"\s", "",depot_m.group(1)); de=ev("depot_number",depot_m.group(0)); depot_id=stable_id("depot","comdirect",number)
    depots=(Depot(depot_id,bank_name=FieldValue.from_pdf("comdirect",1,de),depot_number=FieldValue.from_pdf(number,1,de),base_currency=FieldValue.from_pdf("EUR",1,de),depot_type=FieldValue.manual(DepotType.WERTPAPIER)),)
@@ -95,30 +181,43 @@ class ComdirectPlugin:
     calculations=(AdvanceTaxCalculation(tax.tax_event_id,MissingValue.UNKNOWN,MissingValue.UNKNOWN,MissingValue.UNKNOWN,tax.advance_before_partial_exemption,tax.taxable_amount,withheld,comps,approval_status=TaxApprovalStatus.SYNTHETIC_ONLY),)
     if depot_id and isin and tax.tax_year and isinstance(tax.taxable_amount,Decimal): carryforwards=(AdvanceTaxCarryforward(stable_id("carryforward",tax.tax_event_id),tax.tax_event_id,depot_id,isin,tax.tax_year,tax.taxable_amount,(eid,)),)
    return self.result(doc,d,evidence,events,depots,tax_calculations=calculations,tax_carryforwards=carryforwards)
-  return self.transaction(doc,d,evidence,ev,depots,depot_id,isin,eid,security_name,column_wkn,column_isin)
- def transaction(self,doc,d,evidence,ev,depots,depot_id,isin,eid,security_name=None,column_wkn=None,column_isin=None):
+  return self.transaction(doc,d,evidence,ev,depots,depot_id,isin,eid,security_name,column_wkn,column_isin,identity)
+ def transaction(self,doc,d,evidence,ev,depots,depot_id,isin,eid,security_name=None,column_wkn=None,column_isin=None,identity=None):
   text=doc.text; h=d.handler_id; kind="BUY" if h=="wertpapierkauf" else "SELL" if h=="wertpapierverkauf" else "REDEMPTION" if h=="einloesung" else "DIVIDEND"
   q=QTY.search(text); qty=dec(q.group(1)) if q else None; settlement=SETTLE.search(text); valuta=VALUTA.search(text); event_id=stable_id("event",doc.document_id,h,isin,settlement.group("a") if settlement else "")
   issues=[]
+  identity = identity or _SecurityIdentity()
+  if identity.status in {"AMBIGUOUS", "INVALID"}:
+   issues.append(Issue(stable_id("issue", event_id, "security-identity", identity.status),
+                       "COMDIRECT_SECURITY_" + identity.status, IssueSeverity.WARNING,
+                       identity.reason or "Wertpapieridentität muss manuell geprüft werden.",
+                       event_id=event_id, nature=IssueNature.UNSECURED_ASSIGNMENT))
   for code,missing,message in (("COMDIRECT_SECURITY_MISSING",not isin,"Wertpapieridentität fehlt."),("COMDIRECT_QUANTITY_MISSING",qty is None,"Stückzahl fehlt."),("COMDIRECT_SETTLEMENT_MISSING",settlement is None,"Settlementbetrag fehlt.")):
    if missing: issues.append(Issue(stable_id("issue",event_id,code),code,IssueSeverity.WARNING,message,event_id=event_id,nature=IssueNature.MISSING_INFORMATION))
   event_ev=ev("economic_event",settlement.group(0) if settlement else next(p for x,p in TITLES if x==h)); iban=IBAN.search(text); account_id=None; accounts=()
   if iban:
-   identity=re.sub(r"\s","",iban.group(0)); ie=ev("iban",iban.group(0)); account_id=stable_id("account","comdirect",identity); accounts=(Account(account_id,bank_name=FieldValue.from_pdf("comdirect",1,ie),iban=FieldValue.from_pdf(identity,1,ie),currency=FieldValue.from_pdf("EUR",1,ie)),)
+   iban_value=re.sub(r"\s","",iban.group(0)); ie=ev("iban",iban.group(0)); account_id=stable_id("account","comdirect",iban_value); accounts=(Account(account_id,bank_name=FieldValue.from_pdf("comdirect",1,ie),iban=FieldValue.from_pdf(iban_value,1,ie),currency=FieldValue.from_pdf("EUR",1,ie)),)
   links=()
   if depot_id and account_id:
    links=(DepotAccountLink(stable_id("depot-account",depot_id,account_id,doc.document_id),depot_id,account_id,FieldValue.from_pdf("SETTLEMENT",1,ie),valid_from=FieldValue.from_pdf(date(valuta.group(1)),1,event_ev) if valuta else FieldValue.unknown(),is_default=FieldValue.manual(False)),)
   cash=()
+  security=()
   if settlement:
-   sign=-1 if kind=="BUY" or (settlement.group("dir") or "").lower()=="lasten" else 1; cash=(CashMovement(stable_id("cash",event_id),event_id,dec(settlement.group("a"))*sign,settlement.group("cur"),CashStatus.ACTUAL if account_id else CashStatus.EXPECTED,account_id=account_id,evidence_ids=(event_ev,),movement_type=CashMovementType.SECURITY_BUY if kind=="BUY" else CashMovementType.SECURITY_SELL if kind in {"SELL","REDEMPTION"} else CashMovementType.DIVIDEND_CREDIT),)
-  security=() if not(qty and isin) else (SecurityMovement(stable_id("security",event_id),event_id,isin,qty if kind=="BUY" else -qty,(event_ev,),depot_id),)
+    sign=-1 if kind=="BUY" or (settlement.group("dir") or "").lower()=="lasten" else 1; cash=(CashMovement(stable_id("cash",event_id),event_id,dec(settlement.group("a"))*sign,settlement.group("cur"),CashStatus.ACTUAL if account_id else CashStatus.EXPECTED,account_id=account_id,evidence_ids=(event_ev,),movement_type=CashMovementType.SECURITY_BUY if kind=="BUY" else CashMovementType.SECURITY_SELL if kind in {"SELL","REDEMPTION"} else CashMovementType.DIVIDEND_CREDIT),)
+  # A dividend credit carries identity but is not a purchase, sale or depot
+  # position change.  Never synthesize a SecurityMovement for it.
+  security=() if kind not in {"BUY", "SELL", "REDEMPTION"} or not(qty and isin) else (SecurityMovement(stable_id("security",event_id),event_id,isin,qty if kind=="BUY" else -qty,(event_ev,),depot_id),)
   fees=tuple(FeeEvent(stable_id("fee",event_id,k),"trading",k,dec(m.group(1)),"EUR",date(valuta.group(1)) if valuta else date("01.01.1970"),FeeEffect.INCLUDED_IN_SETTLEMENT,doc.document_id,"comdirect",depot_id=depot_id,account_id=account_id,security_id=isin,transaction_id=event_id,evidence_ids=(event_ev,)) for k,p in FEE for m in [re.search(p,text,re.I)] if m)
   comps=tuple(TaxComponent(k,dec(m.group(1)),"EUR") for k,p in TAX for m in [re.search(p,text,re.I)] if m); taxes=(TaxEvent(stable_id("tax",event_id),event_id,"WITHHOLDING",comps,evidence_ids=(event_ev,),depot_id=depot_id,isin=isin,bank_id="comdirect",account_id=account_id),) if comps else ()
   trades=()
   if kind in {"BUY","SELL","REDEMPTION"}:
    pm=PRICE.search(text); mm=MARKET_VALUE.search(text); gm=GROSS.search(text); fx=FX.search(text); wm=WKN.search(text); nm=NAME.search(text); tm=TRADE_DATE.search(text); xm=EXECUTION_DATE.search(text)
    trades=(SecurityTrade(stable_id("trade",event_id),event_id,kind,nm.group(1).strip() if nm else MissingValue.NOT_FOUND,isin or MissingValue.NOT_FOUND,wm.group(1).upper() if wm else MissingValue.NOT_FOUND,qty if qty is not None else MissingValue.NOT_FOUND,date(tm.group(1)) if tm else MissingValue.NOT_FOUND,date(xm.group(1)) if xm else MissingValue.NOT_FOUND,date(valuta.group(1)) if valuta else MissingValue.NOT_FOUND,dec(pm.group("a")) if pm else MissingValue.NOT_FOUND,(pm.group("cur1") or pm.group("cur2")) if pm and (pm.group("cur1") or pm.group("cur2")) else MissingValue.NOT_FOUND,dec(mm.group("a")) if mm else MissingValue.NOT_FOUND,dec(gm.group("a")) if gm else MissingValue.NOT_FOUND,dec(fx.group(1)) if fx else MissingValue.NOT_FOUND,dec(settlement.group("a")) if settlement else MissingValue.NOT_FOUND,settlement.group("cur") if settlement else MissingValue.NOT_FOUND,depot_id,account_id,(event_ev,)),)
-  identity_evidence=tuple(ev(label,value) for label,value in (("security_wkn",column_wkn),("security_isin",column_isin),("security_name",security_name)) if value)
+  labelled_wkn = next((match.group(1).upper() for match in WKN.finditer(text)), None)
+  if labelled_wkn and not re.fullmatch(r"[A-Z0-9]{6}", labelled_wkn):
+   labelled_wkn = None
+  resolved_wkn = column_wkn or labelled_wkn
+  identity_evidence=tuple(ev(label,value) for label,value in (("security_wkn",resolved_wkn),("security_isin",isin),("security_name",security_name)) if value)
   reference_matches=tuple(BANK_REFERENCE.finditer(text))
   valid_references=tuple(match.group(1) for match in reference_matches if 8 <= len(match.group(1)) <= 40)
   invalid_references=tuple(match for match in reference_matches if not 8 <= len(match.group(1)) <= 40)
@@ -137,7 +236,7 @@ class ComdirectPlugin:
                        "COMDIRECT_BANK_REFERENCE_" + reference_status, IssueSeverity.WARNING,
                        "Bankreferenz ist nicht eindeutig bzw. formal ungültig.", event_id=event_id,
                        nature=IssueNature.UNSECURED_ASSIGNMENT))
-  event=FinancialEvent(event_id,doc.document_id,kind,date(valuta.group(1)) if valuta else None,cash,security,tax_events=taxes,fee_events=fees,evidence_ids=(event_ev,),trades=trades,security_name=security_name or MissingValue.UNKNOWN,security_wkn=column_wkn or (WKN.search(text).group(1).upper() if WKN.search(text) else MissingValue.UNKNOWN),security_isin=isin or MissingValue.UNKNOWN,security_identity_evidence_ids=identity_evidence,bank_reference=reference,bank_reference_status=reference_status,bank_reference_evidence_ids=reference_evidence); return self.result(doc,d,evidence,(event,),depots,accounts,tuple(issues),links)
+  event=FinancialEvent(event_id,doc.document_id,kind,date(valuta.group(1)) if valuta else None,cash,security,tax_events=taxes,fee_events=fees,evidence_ids=(event_ev,),trades=trades,security_name=security_name or MissingValue.UNKNOWN,security_wkn=resolved_wkn or MissingValue.UNKNOWN,security_isin=isin or MissingValue.UNKNOWN,security_identity_evidence_ids=identity_evidence,bank_reference=reference,bank_reference_status=reference_status,bank_reference_evidence_ids=reference_evidence); return self.result(doc,d,evidence,(event,),depots,accounts,tuple(issues),links)
  def result(self,doc,d,evidence,events,depots=(),accounts=(),issues=(),links=(),tax_calculations=(),tax_carryforwards=()): return ParsedDocument(stable_id("result",doc.document_id,self.metadata.version),doc.document_id,self.metadata.plugin_id,self.metadata.version,d.handler_id,events=events,evidence=tuple(evidence),issues=issues,depots=depots,accounts=accounts,depot_account_links=links,tax_calculations=tax_calculations,tax_carryforwards=tax_carryforwards)
 
 class ComdirectFinanzreportPlugin(ComdirectPlugin):
