@@ -19,6 +19,7 @@ from portman_parsers.api import (
 )
 from portman_parsers.registry.allowlist import APPROVED_PLUGINS
 from portman_parsers.utilities import stable_id
+from .comdirect import _extract_comdirect_security_identity
 
 AMOUNT = r"\d[\d.]*,\d+"
 DATE = r"\d{2}\.\d{2}\.\d{4}"
@@ -106,13 +107,14 @@ class ComdirectPPPlugin:
         handler = detection.handler_id
         side = "BUY" if handler == "wertpapierkauf" else "SELL" if handler == "wertpapierverkauf" else "REDEMPTION" if handler == "einloesung" else "DIVIDEND"
         security = SECURITY_ROW.search(text)
+        column_identity = _extract_comdirect_security_identity(text)
         isin_match = ISIN.search(text)
         wkn_match = WKN.search(text)
         shares_match = re.search(r"(?:Stk\.?|STK)\s*[\- ]*(" + AMOUNT + r")", text, re.I)
         shares = _decimal(security.group("shares")) if security else _decimal(shares_match.group(1)) if shares_match else None
-        isin = security.group("isin") if security else isin_match.group(0) if isin_match else None
-        wkn = security.group("wkn") if security else wkn_match.group(1) if wkn_match else MissingValue.NOT_FOUND
-        name = security.group("name").strip() if security else MissingValue.NOT_FOUND
+        isin = security.group("isin") if security else (column_identity.isin or (isin_match.group(0) if isin_match else None))
+        wkn = security.group("wkn") if security else (column_identity.wkn or (wkn_match.group(1) if wkn_match else MissingValue.NOT_FOUND))
+        name = security.group("name").strip() if security else column_identity.name or MissingValue.NOT_FOUND
 
         settlement = re.search(r"(?:Zu\s*Ihren\s*(?P<direction>Lasten|Gunsten)|Abrechnungsbetrag|Gutschrift)"
                                r"[^\n]{0,100}?(?P<currency>[A-Z]{3})[\s-]*(?P<amount>" + AMOUNT + r")", text, re.I)
@@ -145,7 +147,7 @@ class ComdirectPPPlugin:
                                  settlement.group("currency"), CashStatus.EXPECTED,
                                  evidence_ids=(event_evidence,), movement_type=movement_type),)
         securities = ()
-        if isin and shares is not None:
+        if side in {"BUY", "SELL", "REDEMPTION"} and isin and shares is not None:
             quantity = shares if side == "BUY" else -shares if side in {"SELL", "REDEMPTION"} else shares
             securities = (SecurityMovement(stable_id("security", event_id), event_id, isin, quantity, (event_evidence,)),)
         fees = tuple(FeeEvent(stable_id("fee", event_id, kind), "trading", kind,
@@ -171,10 +173,19 @@ class ComdirectPPPlugin:
                                     _decimal(settlement.group("amount")) if settlement else MissingValue.NOT_FOUND,
                                     settlement.group("currency") if settlement else MissingValue.NOT_FOUND,
                                     evidence_ids=(event_evidence,)),)
+        identity_evidence = tuple(ev(field, value) for field, value in (
+            ("security_name", name if isinstance(name, str) else None),
+            ("security_wkn", wkn if isinstance(wkn, str) else None),
+            ("security_isin", isin),
+        ) if value)
         event = FinancialEvent(event_id, document.document_id, side,
                                _date(valuta.group(1)) if valuta else _date(trade_date.group(1)) if trade_date else None,
                                cash, securities, tax_events=taxes, fee_events=fees,
-                               evidence_ids=(event_evidence,), trades=trades)
+                               evidence_ids=(event_evidence,), trades=trades,
+                               security_name=name if isinstance(name, str) else MissingValue.UNKNOWN,
+                               security_wkn=wkn if isinstance(wkn, str) else MissingValue.UNKNOWN,
+                               security_isin=isin or MissingValue.UNKNOWN,
+                               security_identity_evidence_ids=identity_evidence)
         return self._result(document, detection, evidence, (event,), tuple(issues))
 
     def _tax_notice(self, document, detection, evidence, ev, title_evidence):
