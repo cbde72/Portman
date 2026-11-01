@@ -35,3 +35,13 @@ def test_atomic_save_produces_valid_json_and_no_temp_files(tmp_path):
     store.save()
     assert json.loads(path.read_text(encoding="utf-8"))["schema_version"] == 1
     assert not list(tmp_path.glob(".field-descriptions-*.tmp"))
+
+
+def test_rendering_description_does_not_persist_file(tmp_path):
+    from portman_pdf_lab.field_catalog import CatalogStore
+    from portman_pdf_lab.field_descriptions import resolve_description
+    catalog = CatalogStore(tmp_path / "catalogs").catalog()
+    path = catalog.path.parent / "field-descriptions.v1.json"
+    assert not path.exists()
+    assert resolve_description("events[0].trades[0].quantity", catalog).description
+    assert not path.exists()
