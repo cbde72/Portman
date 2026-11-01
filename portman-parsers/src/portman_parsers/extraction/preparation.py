@@ -20,6 +20,7 @@ PREPARATION_VERSION = "7.3.0"
 _REPLACEMENT = "\ufffd"
 _ARTIFACT_TOKEN = re.compile(r"\b[A-Z]{1,4}\d{4,10}\b")
 _AT_RUN = re.compile(r"@{8,}")
+_U_RUN_LINE = re.compile(r"(?m)^[ \\t]*U{16,}[ \\t]*$")
 _NUMBER = re.compile(r"[-+]?\d+(?:[,.]\d+)?")
 
 
@@ -103,6 +104,8 @@ def _diagnose(text: str) -> tuple[str, ...]:
         diagnostics.append("REPEATED_SUSPICIOUS_TOKEN_SP010000")
     if _AT_RUN.search(text):
         diagnostics.append("REPEATED_AT_GLYPH_RUN")
+    if _U_RUN_LINE.search(text):
+        diagnostics.append("ISOLATED_REPEATED_U_GLYPH_LINE")
     artifact_tokens = _ARTIFACT_TOKEN.findall(text)
     repeated = {token for token in artifact_tokens if artifact_tokens.count(token) >= 2}
     if repeated:
@@ -153,6 +156,9 @@ def _normalize(text: str) -> tuple[str, tuple[str, ...]]:
     if _AT_RUN.search(normalized):
         normalized = _AT_RUN.sub(" ", normalized)
         diagnostics.append("REPEATED_AT_GLYPH_RUN_REMOVED_WITH_CONTEXT")
+    if _U_RUN_LINE.search(normalized):
+        normalized = _U_RUN_LINE.sub("", normalized)
+        diagnostics.append("ISOLATED_REPEATED_U_GLYPH_LINE_REMOVED")
     normalized = re.sub(r"[ \t]+", " ", normalized)
     normalized = re.sub(r" *\n *", "\n", normalized)
     return normalized, tuple(dict.fromkeys(diagnostics))
