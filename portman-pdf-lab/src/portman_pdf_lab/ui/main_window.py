@@ -84,6 +84,15 @@ class MainWindow(QMainWindow):
         data_dir = Path(QStandardPaths.writableLocation(QStandardPaths.AppLocalDataLocation))
         self.repository_path = Path(repository_path) if repository_path else data_dir / "reference.sqlite"
         self.catalog_store = CatalogStore(data_dir / "field-catalogs")
+        # The supplied YAML is a curated description source, not a runtime
+        # parser profile.  Import it once into the central description store;
+        # verified user/catalog definitions remain authoritative.
+        factual_catalog = Path(__file__).resolve().parents[4] / "data" / "Portman_PDF_Lab_Feldkatalog_v1.0.0.yaml"
+        if factual_catalog.exists():
+            self.catalog_store.import_factual_catalog(
+                factual_catalog,
+                factual_catalog.with_suffix(factual_catalog.suffix + ".audit.json"),
+            )
         self.current_run_id: int | None = None
         self.cancel_requested = False
         self.settings = settings or QSettings("Portman", "PDFLab")
@@ -565,7 +574,7 @@ class MainWindow(QMainWindow):
                                  if item["field_path"] == context.field_path), None)
             definition = self._catalog().field(context.field_path)
             if definition:
-                self.quick_training.begin(context, definition, existing); self.quick_training.show()
+                self.quick_training.begin(context, definition, existing, self._catalog()); self.quick_training.show()
                 self.root_splitter.setSizes((220, 560, 430, 330))
         if context.page_number:
             self.go_to_page(int(context.page_number) - 1)

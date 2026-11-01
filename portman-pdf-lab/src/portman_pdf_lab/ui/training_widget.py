@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from portman_pdf_lab.storage import ReferenceRepository
+from portman_pdf_lab.field_descriptions import resolve_description
 from portman_pdf_lab.training import AnnotationKind, Decision, TrainingContext, TrainingService
 from portman_pdf_lab.ui.result_view import (
     DisplayRow, RecognitionStatus, _is_missing, enrich_rows, flatten_result, scalar_text,
@@ -140,8 +141,8 @@ class TrainingWidget(QWidget):
         self.field_filter.addItems(("Alle Felder", "Nur erkannte", "Nur fehlende", "Nur zu prüfende"))
         self.field_stats = QLabel("Erkannt 0 · Fehlend 0 · Prüfen 0 · N/A 0")
         field_bar.addWidget(self.field_filter); field_bar.addWidget(self.field_stats); field_bar.addStretch()
-        self.fields = CopyableTable(0, 9)
-        self.fields.setHorizontalHeaderLabels(("Feldpfad", "STANDARD", "EXTENDED", "Referenzwert", "Einheit/Währung", "Quelle", "Fundstelle", "Status", "Regel-ID"))
+        self.fields = CopyableTable(0, 10)
+        self.fields.setHorizontalHeaderLabels(("Feldpfad", "Beschreibung", "STANDARD", "EXTENDED", "Referenzwert", "Einheit/Währung", "Quelle", "Fundstelle", "Status", "Regel-ID"))
         self.fields.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed | QAbstractItemView.SelectedClicked)
         self.fields.itemSelectionChanged.connect(self._select_field)
         self.fields.itemChanged.connect(self._field_item_changed)
@@ -256,16 +257,17 @@ class TrainingWidget(QWidget):
                                      display.source, display.page, display.evidence, display.data_type,
                                      display.requirement)
                 self._display_rows.append(display)
-                cells = (display.path, standard, extended, "", display.unit, display.source, display.page,
+                cells = (display.path, resolve_description(display.path, catalog).description,
+                         standard, extended, "", display.unit, display.source, display.page,
                          status.value, rule_id)
                 for column, cell in enumerate(cells):
                     item = QTableWidgetItem(str(cell)); item.setToolTip(str(cell))
                     background = QColor(colors[status]); background.setAlpha(42); item.setBackground(background)
-                    if column == 7:
+                    if column == 8:
                         item.setForeground(colors[status]); item.setData(Qt.UserRole + 1, status.value)
                     if column == 0:
                         item.setData(Qt.UserRole, display)
-                    if column != 3:
+                    if column != 4:
                         item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                     self.fields.setItem(row, column, item)
 
@@ -446,7 +448,7 @@ class TrainingWidget(QWidget):
         wanted = {"Nur erkannte": RecognitionStatus.RECOGNIZED.value, "Nur fehlende": RecognitionStatus.MISSING.value,
                   "Nur zu prüfende": RecognitionStatus.REVIEW.value}.get(self.field_filter.currentText())
         for row in range(self.fields.rowCount()):
-            item = self.fields.item(row, 7)
+            item = self.fields.item(row, 8)
             status = item.text() if item is not None else ""
             self.fields.setRowHidden(row, wanted is not None and status != wanted)
 
@@ -471,8 +473,8 @@ class TrainingWidget(QWidget):
             return
         display = self._display_at(row)
         path = display.path if display is not None else self._cell_text(self.fields, row, 0)
-        standard = self._cell_text(self.fields, row, 1)
-        reference = self._cell_text(self.fields, row, 3)
+        standard = self._cell_text(self.fields, row, 2)
+        reference = self._cell_text(self.fields, row, 4)
         self.field_path.setText(path)
         selected = reference
         if selected in {"", "null"}:

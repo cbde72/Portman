@@ -175,6 +175,12 @@ class CatalogStore:
     def __init__(self, root: str | Path):
         self.root = Path(root); self.root.mkdir(parents=True, exist_ok=True)
 
+    def import_factual_catalog(self, source: str | Path, audit_path: str | Path | None = None):
+        """Import the curated global catalog without changing runtime profiles."""
+        from .field_catalog_adapter import import_factual_catalog
+        destination = self.root / "field-descriptions.v1.json"
+        return import_factual_catalog(source, destination, audit_path)
+
     @staticmethod
     def _stem(bank, parser_id, document_type, layout):
         clean = lambda value: re.sub(r"[^a-zA-Z0-9_.-]", "_", value or "all").strip("._") or "all"

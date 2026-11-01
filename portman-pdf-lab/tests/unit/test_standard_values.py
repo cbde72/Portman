@@ -47,7 +47,7 @@ def test_missing_evidence_remains_visible_as_review_and_catalog_description_is_u
     rows = build_standard_value_rows(report)
     assert len(rows) == 1
     assert rows[0].status == "Evidence fehlt / Prüfen"
-    assert rows[0].description == "Zusätzlicher Wert des zugehörigen Objekts"
+    assert rows[0].description == "Eigentlicher Nutzwert eines FieldValue-DTOs"
 
 
 def test_dialog_search_details_and_count():
@@ -97,3 +97,22 @@ def test_derived_description_is_persisted_and_reused(tmp_path):
     assert reused.description == entry.description
     assert reused.source == "dto_context_derived"
     assert reused.status == "AUTO_DERIVED"
+
+
+def test_context_distinguishes_equal_dto_field_names():
+    cases = {
+        "events[0].cash_movements[0].amount": "Kontobewegung",
+        "events[0].fee_events[0].amount": "Gebührenbetrag",
+        "events[0].tax_events[0].components[0].amount": "Steuerbetrag",
+        "account_balances[0].amount.value": "Kontosaldo",
+        "events[0].trades[0].quantity": "gehandelten Wertpapierstücke",
+        "depot_snapshots[0].positions[0].quantity.value": "im Depot gehaltenen",
+    }
+    for path, expected in cases.items():
+        assert expected in resolve_description(path).description
+
+
+def test_field_value_metadata_has_its_own_description():
+    assert "Herkunft" in resolve_description("accounts[0].bank_name.source").description
+    assert "Prüfstatus" in resolve_description("accounts[0].bank_name.review_status").description
+    assert "Seitenzahl" in resolve_description("accounts[0].bank_name.page_number").description

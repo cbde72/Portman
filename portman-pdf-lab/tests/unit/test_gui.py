@@ -214,14 +214,14 @@ def test_gui_training_table_always_has_all_cells_and_editable_reference(tmp_path
         table = window.training_widget.fields
         assert table.rowCount() > 0
         for row in range(table.rowCount()):
-            for column in range(9):
+            for column in range(10):
                 assert table.item(row, column) is not None
             # Selecting every row, including catalog-only missing fields, must
             # never raise the former NoneType.text AttributeError.
             table.setCurrentCell(row, 0)
             application.processEvents()
-        reference = table.item(0, 3)
-        standard = table.item(0, 1)
+        reference = table.item(0, 4)
+        standard = table.item(0, 2)
         assert reference.flags() & Qt.ItemIsEditable
         assert not (standard.flags() & Qt.ItemIsEditable)
         assert any(display.evidence is None for display in window.training_widget._display_rows)

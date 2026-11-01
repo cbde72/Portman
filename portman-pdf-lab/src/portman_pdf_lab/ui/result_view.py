@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QMenu, QPushButton, QStackedWidget, QTableWidget, QTableWidgetItem, QTextEdit, QToolButton,
     QVBoxLayout, QWidget,
 )
+from portman_pdf_lab.field_descriptions import resolve_description
 
 
 class RecognitionStatus(str, Enum):
@@ -37,6 +38,7 @@ class DisplayRow:
     evidence: Any = None
     data_type: str = ""
     requirement: str = ""
+    description: str = ""
 
 
 def _is_missing(value: Any) -> bool:
@@ -132,7 +134,7 @@ def flatten_result(value: Any, evidence_by_id: dict[str, dict] | None = None,
 
 class ResultTable(QTableWidget):
     fieldActivated = Signal(object)
-    HEADERS = ("Feld", "Wert", "Typ", "Pflichtstatus", "Erkennungsstatus", "Quelle", "PDF-Seite")
+    HEADERS = ("Feld", "Wert", "Beschreibung", "Typ", "Pflichtstatus", "Erkennungsstatus", "Quelle", "PDF-Seite")
     COLORS = {
         RecognitionStatus.RECOGNIZED: QColor("#2e7d32"),
         RecognitionStatus.MISSING: QColor("#c62828"),
@@ -165,12 +167,13 @@ class ResultTable(QTableWidget):
         self.setSortingEnabled(False); self.setRowCount(len(rows))
         for row, data in enumerate(rows):
             value = _scalar_text(data.value) + (f" {data.unit}" if data.unit else "")
-            values = (data.path, value, data.data_type, data.requirement,
+            values = (data.path, value, data.description or resolve_description(data.path).description,
+                      data.data_type, data.requirement,
                       data.status.value, data.source, data.page)
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value); item.setToolTip(value)
                 background = QColor(self.COLORS[data.status]); background.setAlpha(42); item.setBackground(background)
-                if column == 4:
+                if column == 5:
                     item.setForeground(self.COLORS[data.status]); item.setData(Qt.UserRole + 1, data.status.value)
                 if column == 0:
                     item.setData(Qt.UserRole, data)
@@ -248,15 +251,17 @@ def enrich_rows(rows: list[DisplayRow], catalog, value: Any = None) -> list[Disp
                 else:
                     status = RecognitionStatus.REVIEW
             enriched.append(replace(row, name=definition.label, data_type=definition.data_type,
-                                    requirement=definition.requirement, status=status))
+                                    requirement=definition.requirement, status=status,
+                                    description=resolve_description(row.path, catalog).description))
         else:
-            enriched.append(row)
+            enriched.append(replace(row, description=resolve_description(row.path, catalog).description))
     for definition in catalog.visible_fields():
         if definition.path not in present:
             required = definition.requirement == "REQUIRED" or (definition.requirement == "CONDITIONAL" and condition_required(definition))
             status = RecognitionStatus.MISSING if required else RecognitionStatus.NOT_APPLICABLE
             enriched.append(DisplayRow(definition.path, definition.label, None, definition.unit, status,
-                                       "Feldkatalog", "", None, definition.data_type, definition.requirement))
+                                       "Feldkatalog", "", None, definition.data_type, definition.requirement,
+                                       resolve_description(definition.path, catalog).description))
     return enriched
 
 
@@ -319,10 +324,10 @@ class StructuredResultView(QWidget):
         # Sorting may have reordered rows since set_data(), therefore read the
         # status from the row itself instead of zipping self.rows by index.
         for row in range(self.table.rowCount()):
-            item = self.table.item(row, 4)
+            item = self.table.item(row, 5)
             status = item.data(Qt.UserRole + 1) if item else None
             hidden = wanted is not None and status != wanted.value
-            requirement = self.table.item(row, 3).text() if self.table.item(row, 3) else ""
+            requirement = self.table.item(row, 4).text() if self.table.item(row, 4) else ""
             if self.quick_mode and not self.show_all.isChecked():
                 hidden = hidden or requirement == "TECHNICAL" or status == RecognitionStatus.NOT_APPLICABLE.value
             self.table.setRowHidden(row, hidden)

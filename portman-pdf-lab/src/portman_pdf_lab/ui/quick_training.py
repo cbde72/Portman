@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
 )
 
 from .field_mapping import EditorFactory
+from portman_pdf_lab.field_descriptions import resolve_description
 
 
 STEPS = ("Feld auswählen", "PDF markieren", "Bestätigen", "Regel prüfen", "Freigeben", "Aktivieren")
@@ -29,13 +30,15 @@ class QuickTrainingPanel(QScrollArea):
         body = QWidget(); self.setWidget(body); layout = QVBoxLayout(body)
         self.progress = QLabel(); self.progress.setWordWrap(True); layout.addWidget(self.progress)
         group = QGroupBox("Schnelltraining"); form = QFormLayout(group)
-        self.field = QLabel("—"); self.old_value = QLabel("—"); self.pdf_text = QLabel("Noch nichts markiert")
+        self.field = QLabel("—"); self.description = QLabel("—"); self.description.setWordWrap(True)
+        self.old_value = QLabel("—"); self.pdf_text = QLabel("Noch nichts markiert")
         self.pdf_text.setWordWrap(True); self.reference_host = QWidget(); self.reference_layout = QHBoxLayout(self.reference_host)
         self.reference_layout.setContentsMargins(0, 0, 0, 0); self.editor = QLineEdit()
         self.reference_layout.addWidget(self.editor)
         self.current_step = QLabel("Feld auswählen"); self.next_action = QLabel("Feld in der Analyse auswählen")
         self.next_action.setWordWrap(True)
-        for label, widget in (("Ausgewähltes Feld", self.field), ("Bisheriger Parserwert", self.old_value),
+        for label, widget in (("Ausgewähltes Feld", self.field), ("Beschreibung", self.description),
+                              ("Bisheriger Parserwert", self.old_value),
                               ("Markierter PDF-Text", self.pdf_text), ("Neuer Referenzwert", self.reference_host),
                               ("Aktueller Schritt", self.current_step), ("Nächste Aktion", self.next_action)):
             form.addRow(label, widget)
@@ -59,9 +62,10 @@ class QuickTrainingPanel(QScrollArea):
             if item.widget(): item.widget().deleteLater()
         self.editor = EditorFactory.create(definition, value); self.reference_layout.addWidget(self.editor)
 
-    def begin(self, context, definition, existing=None):
+    def begin(self, context, definition, existing=None, catalog=None):
         self.context, self.definition, self.selection, self.active = context, definition, None, True
         self.field.setText(context.field_name); self.old_value.setText(str(context.current_value if context.current_value is not None else "—"))
+        self.description.setText(resolve_description(context.field_path, catalog).description)
         initial = (existing or {}).get("reference_value") if existing else context.reference_value
         self._set_editor(definition, "" if initial is None else str(initial))
         self.pdf_text.setText("Noch nichts markiert"); self.result.setText("")
@@ -105,5 +109,5 @@ class QuickTrainingPanel(QScrollArea):
 
     def reset(self):
         self.context = self.definition = self.selection = None; self.active = False
-        self.field.setText("—"); self.old_value.setText("—"); self.pdf_text.setText("Noch nichts markiert")
+        self.field.setText("—"); self.description.setText("—"); self.old_value.setText("—"); self.pdf_text.setText("Noch nichts markiert")
         self.result.setText(""); self.set_step(0, "Feld in der Analyse auswählen")

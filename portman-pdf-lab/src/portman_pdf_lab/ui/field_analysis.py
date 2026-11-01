@@ -34,7 +34,7 @@ from portman_pdf_lab.ui.result_view import (
 
 
 HEADERS = (
-    "Feldgruppe", "Feldname", "Feldpfad", "Pflichtstatus", "Gefundener Wert",
+    "Feldgruppe", "Feldname", "Feldpfad", "Beschreibung", "Pflichtstatus", "Gefundener Wert",
     "Erkennungsstatus", "PDF-Seite", "Evidence", "Parserregel",
     "Trainingsstatus", "Aktion",
 )
@@ -94,6 +94,7 @@ class FieldAnalysisRow:
     name: str
     path: str
     requirement: str
+    description: str
     value: Any
     status: RecognitionStatus
     status_text: str
@@ -122,7 +123,7 @@ class FieldAnalysisRow:
     def display(self) -> tuple[str, ...]:
         evidence = _evidence_mapping(self.evidence)
         return (
-            self.group, self.name, self.path, self.requirement, _value_text(self.value),
+            self.group, self.name, self.path, self.description, self.requirement, _value_text(self.value),
             self.status_text, self.page or "—", str(evidence.get("excerpt") or "—"),
             self.parser_rule or "—", self.training_status, "Feld trainieren",
         )
@@ -286,6 +287,7 @@ def build_field_analysis_rows(
             name=name,
             path=path,
             requirement=requirement,
+            description=resolve_description(path, catalog).description,
             value=match.value,
             status=status,
             status_text=status_text,
@@ -432,7 +434,7 @@ class FieldAnalysisTable(QTableWidget):
         header = self.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Interactive)
         header.setStretchLastSection(False)
-        for column, width in enumerate((120, 180, 310, 110, 190, 190, 80, 260, 150, 170, 130)):
+        for column, width in enumerate((120, 180, 310, 360, 110, 190, 190, 80, 260, 150, 170, 130)):
             header.resizeSection(column, width)
         self.cellClicked.connect(self._clicked)
         self.cellDoubleClicked.connect(lambda row, _column: self._train(row))
@@ -462,9 +464,9 @@ class FieldAnalysisTable(QTableWidget):
                     color = QColor(STATUS_COLORS.get(data.status, "#707070"))
                     background = QColor(color); background.setAlpha(42)
                     item.setBackground(background)
-                    if column == 5:
+                    if column == 6:
                         item.setForeground(color)
-                    if column == 10:
+                    if column == 11:
                         item.setToolTip("Öffnet das vorhandene Parsertraining mit vorbelegtem Feld")
                     self.setItem(index, column, item)
         finally:
@@ -474,7 +476,7 @@ class FieldAnalysisTable(QTableWidget):
         data = self.row_at(row)
         if data is None:
             return
-        if column == 10:
+        if column == 11:
             self.trainingRequested.emit(data)
         else:
             self.fieldActivated.emit(data)

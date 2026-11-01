@@ -12,9 +12,6 @@ from .field_catalog import FieldCatalog, FieldDefinition, normalize_field_path
 
 
 DESCRIPTION_SCHEMA_VERSION = 1
-_TECHNICAL_SUFFIXES = ("status", "evidence", "confidence", "source")
-
-
 @dataclass(frozen=True)
 class DescriptionEntry:
     normalized_path: str
@@ -54,19 +51,161 @@ _KNOWN: dict[str, str] = {
     "depot_number": "Depotnummer",
     "account_ref": "Referenz auf das zugehörige Konto",
     "custom_reference": "Zusätzlicher Referenzwert des zugehörigen Objekts",
+    "result_id": "Eindeutige Kennung dieses Parserergebnisses",
+    "document_id": "Eindeutige Kennung des ausgewerteten Dokuments",
+    "plugin_id": "Eindeutige Kennung des verwendeten Parser-Plugins",
+    "plugin_version": "Version des verwendeten Parser-Plugins",
+    "handler_id": "Kennung des Parsers für den erkannten Dokumenttyp",
+    "schema_version": "Version des ausgegebenen DTO-Datenschemas",
+    "event_id": "Eindeutige Kennung des wirtschaftlichen Vorgangs",
+    "event_date": "Datum des wirtschaftlichen Vorgangs",
+    "kind": "Fachliche Art des zugehörigen Vorgangs oder Bestandteils",
+    "movement_id": "Eindeutige Kennung der Geld- oder Wertpapierbewegung",
+    "movement_type": "Fachliche Art der Kontobewegung",
+    "side": "Richtung des Wertpapiergeschäfts: Kauf, Verkauf oder Einlösung",
+    "trade_id": "Eindeutige Kennung des Wertpapiergeschäfts",
+    "price_currency": "Währung des ausgewiesenen Wertpapierkurses",
+    "settlement_currency": "Währung des Abrechnungsbetrags",
+    "exchange_rate": "Ausgewiesener Wechselkurs der Abrechnung",
+    "status": "Status des zugehörigen Vorgangs",
+    "tax_event_id": "Eindeutige Kennung des Steuervorgangs",
+    "tax_year": "Steuerjahr, auf das sich die Angabe bezieht",
+    "taxable_basis": "Ausgewiesene steuerliche Bemessungsgrundlage",
+    "assessment_basis": "Bemessungsgrundlage der Vorabpauschale",
+    "advance_before_partial_exemption": "Vorabpauschale vor Anwendung der Teilfreistellung",
+    "taxable_amount": "Nach Teilfreistellung steuerpflichtiger Betrag",
+    "stated_tax_liability": "Im Dokument ausgewiesene Steuerschuld",
+    "actually_withheld_tax": "Tatsächlich einbehaltener Steuerbetrag",
+    "distributions": "Im Berechnungszeitraum berücksichtigte Ausschüttungen",
+    "start_value": "Wert der Fondsanteile zu Beginn des Berechnungszeitraums",
+    "end_value": "Wert der Fondsanteile am Ende des Berechnungszeitraums",
+    "partial_exemption_rate": "Angewendeter Teilfreistellungssatz",
+    "exemption_order_used": "Verbrauchter Betrag des Freistellungsauftrags",
+    "loss_offset_used": "Verrechneter Betrag aus dem Verlusttopf",
+    "acquisition_date": "Anschaffungsdatum der betroffenen Wertpapierposition",
+    "accrual_date": "Steuerlicher Entstehungs- oder Zuflusszeitpunkt",
+    "booking_date": "Datum der Buchung auf dem Konto",
+    "approval_status": "Freigabestatus der steuerlichen Berechnung",
+    "component": "Einzelner Bestandteil des zugehörigen Vorgangs",
+    "category": "Gebührenkategorie",
+    "subcategory": "Unterkategorie der Gebühr",
+    "effect": "Wirtschaftliche Wirkung der Gebühr",
+    "fee_id": "Eindeutige Kennung der Gebührenposition",
+    "cost_event_id": "Eindeutige Kennung der Kosteninformation",
+    "information_type": "Art der MiFID-Kosteninformation",
+    "informational": "Kennzeichen, dass die Angabe nur informatorisch und kein Cashflow ist",
+    "external_reference": "Vom Dokument übernommene externe Referenz",
+    "reversal_of_event_id": "Kennung des wirtschaftlichen Vorgangs, der storniert wird",
+    "reverses_fee_id": "Kennung der Gebührenposition, die storniert wird",
+    "linked_cash_movement_id": "Kennung der zugehörigen Geldbewegung",
+    "linked_security_movement_id": "Kennung der zugehörigen Wertpapierbewegung",
+    "cash_movement_id": "Kennung der zugeordneten Geldbewegung",
+    "transaction_id": "Kennung der zugeordneten Transaktion",
+    "transfer_id": "Gemeinsame Kennung zusammengehöriger Umbuchungen",
+    "counterpart_movement_id": "Kennung der Gegenbuchung einer Umbuchung",
+    "bank_id": "Kennung der Bank im Parser-Datenmodell",
+    "holder_name": "Name des Konto- oder Depotinhabers",
+    "account_type": "Art des Bankkontos",
+    "functions": "Fachliche Funktionen des Bankkontos",
+    "depot_name": "Bezeichnung des Wertpapierdepots",
+    "base_currency": "Basiswährung des Depots",
+    "depot_type": "Art des Wertpapierdepots",
+    "snapshot_id": "Eindeutige Kennung des Bestandsstichtags",
+    "position_id": "Eindeutige Kennung der Depotposition",
+    "as_of": "Stichtag, für den der Bestand oder Saldo gilt",
+    "total_value": "Ausgewiesener Gesamtwert des Depots zum Stichtag",
+    "price_date": "Stichtag des ausgewiesenen Wertpapierkurses",
+    "balance_id": "Eindeutige Kennung des Kontosaldos",
+    "balance_type": "Art des ausgewiesenen Kontosaldos",
+    "link_id": "Eindeutige Kennung der Konto-Depot-Zuordnung",
+    "role": "Funktion des Kontos für das zugeordnete Depot",
+    "valid_from": "Beginn der Gültigkeit der Konto-Depot-Zuordnung",
+    "valid_until": "Ende der Gültigkeit der Konto-Depot-Zuordnung",
+    "is_default": "Kennzeichen für die standardmäßig verwendete Konto-Depot-Zuordnung",
+    "evidence_id": "Eindeutige Kennung der PDF-Fundstelle",
+    "evidence_ids": "Kennungen der PDF-Fundstellen, die diesen Wert belegen",
+    "page_number": "Seitenzahl der PDF-Fundstelle",
+    "field": "Feldpfad, den diese PDF-Fundstelle belegt",
+    "excerpt": "Textausschnitt aus dem PDF als Beleg",
+    "source_ref": "Technische Referenz auf die Quelle der Fundstelle",
+    "document_hash": "Prüfsumme des ausgewerteten Dokuments",
+    "parser_id": "Kennung des Parsers, der die Fundstelle erzeugt hat",
+    "parser_version": "Version des Parsers, der die Fundstelle erzeugt hat",
+    "review_status": "Prüfstatus des extrahierten Werts oder der Fundstelle",
+    "source": "Herkunft des Feldwerts: PDF, manuell, abgeleitet oder nicht angegeben",
+    "issue_id": "Eindeutige Kennung des Prüfhinweises",
+    "code": "Maschinenlesbarer Code des Prüfhinweises",
+    "severity": "Schweregrad des Prüfhinweises",
+    "message": "Verständliche Meldung des Prüfhinweises",
+    "nature": "Fachliche Kategorie des Prüfhinweises",
+    "attributes": "Vom Parser ausgegebene zusätzliche Schlüssel-Wert-Angaben",
+    "events": "Vom Dokument erkannte wirtschaftliche Vorgänge",
+    "cash_movements": "Geldbewegungen des wirtschaftlichen Vorgangs",
+    "security_movements": "Bestandsveränderungen von Wertpapieren des wirtschaftlichen Vorgangs",
+    "trades": "Wertpapiergeschäfte des wirtschaftlichen Vorgangs",
+    "tax_events": "Steuerliche Angaben des wirtschaftlichen Vorgangs",
+    "fee_events": "Gebührenpositionen des wirtschaftlichen Vorgangs",
+    "cost_events": "Kosteninformationen des wirtschaftlichen Vorgangs",
+    "components": "Einzelne Steuerbestandteile des Steuervorgangs",
+    "allocations": "Zuordnungen einer Gebühr zu anderen Vorgängen",
+    "target_type": "Art des Objekts, dem die Gebühr zugeordnet ist",
+    "target_id": "Kennung des Objekts, dem die Gebühr zugeordnet ist",
+    "fee_ids": "Kennungen der Gebührenpositionen, auf die sich die Kosteninformation bezieht",
+    "snapshots": "Aus dem Dokument erkannte Bestandsaufnahmen im älteren Snapshot-DTO",
+    "depots": "Aus dem Dokument erkannte Wertpapierdepots",
+    "accounts": "Aus dem Dokument erkannte Bankkonten",
+    "depot_snapshots": "Depotbestände zu einem bestimmten Stichtag",
+    "account_balances": "Kontosalden zu einem bestimmten Stichtag",
+    "depot_account_links": "Explizite Zuordnungen zwischen Depots und Bankkonten",
+    "tax_calculations": "Berechnete und prüfpflichtige Ergebnisse zur Vorabpauschale",
+    "tax_carryforwards": "Fortgeschriebene bereits besteuerte Vorabpauschalen",
+    "positions": "Wertpapierpositionen innerhalb der Bestandsaufnahme",
+    "expected_components": "Nach dem Steuermodell erwartete Steuerbestandteile",
+    "differences": "Benannte Abweichungen zwischen ausgewiesenen und berechneten Steuerwerten",
+    "base_yield": "Basisertrag der Vorabpauschalenberechnung",
+    "appreciation_cap": "Begrenzung des Basisertrags auf die tatsächliche Wertsteigerung",
+    "assessed_tax_liability": "Nach dem Steuermodell berechnete Steuerschuld",
+    "pro_rata_factor": "Zeitanteil für nicht während des ganzen Jahres gehaltene Anteile",
+    "rule_source_reference": "Quellenangabe für die verwendete steuerliche Rechenregel",
+    "carryforward_id": "Eindeutige Kennung der steuerlichen Vorabpauschalen-Fortschreibung",
+    "taxed_advance_amount": "Bereits besteuerter und für spätere Veräußerungen fortgeschriebener Vorabpauschalenbetrag",
+    "base_rate": "Gesetzlicher Basiszinssatz für das betreffende Steuerjahr",
+    "rate": "Wert des gesetzlichen Basiszinssatzes",
+    "base_yield_factor": "Gesetzlicher Faktor zur Ermittlung des Basisertrags",
+    "capital_gains_tax_rate": "Verwendeter Kapitalertragsteuersatz",
+    "solidarity_rate": "Verwendeter Solidaritätszuschlagssatz",
+    "church_tax_rate": "Verwendeter Kirchensteuersatz, sofern bekannt",
+    "source_reference": "Nachvollziehbare Quellenangabe für den gesetzlichen Wert",
+    "published_on": "Datum der Veröffentlichung des gesetzlichen Werts",
+    "jurisdiction": "Staatlicher Geltungsbereich der steuerlichen Regel",
+    "value": "Eigentlicher Nutzwert eines FieldValue-DTOs",
+    "evidence": "PDF-Fundstellen, mit denen Parserwerte belegt werden",
+    "issues": "Bei Erkennung oder Validierung erzeugte Prüfhinweise",
+    "pages": "Extrahierte Seiten des PDF-Dokuments",
+    "number": "Seitennummer innerhalb des PDF-Dokuments",
+    "text": "Aus der PDF-Seite extrahierter Text",
+    "filename": "Dateiname des ausgewerteten PDF-Dokuments",
+    "source_hash": "Prüfsumme der ursprünglichen Dokumentquelle",
+    "metadata": "Technische Metadaten des PDF-Dokuments",
+    "extraction_method": "Verfahren, mit dem der Seitentext gewonnen wurde",
+    "confidence": "Vom Extraktionsverfahren angegebene Sicherheit zwischen 0 und 1",
+    "document_type": "Vom Parser erkannter fachlicher Dokumenttyp",
+    "reason": "Begründung für die Dokumenterkennung",
 }
 
 
 def description_lookup_path(path: str) -> str:
-    """Remove indices and only technical wrappers used by FieldValue DTOs."""
-    normalized = normalize_field_path(path)
-    parts = normalized.split(".") if normalized else []
-    while parts and parts[-1] in _TECHNICAL_SUFFIXES:
-        parts.pop()
-    return ".".join(parts)
+    """Return the stable, index-independent DTO path used by the catalog."""
+    # FieldValue is a transport wrapper, not a separate business field.  Keep
+    # the caller's original path for display, but use the unwrapped path for
+    # description lookup.
+    return normalize_field_path(path)
 
 
 def _context_description(path: str, leaf: str) -> str | None:
+    if leaf == "value" and len(path.split(".")) > 1:
+        parent = path.rsplit(".", 1)[0]
+        return _context_description(parent, parent.rsplit(".", 1)[-1]) or _KNOWN.get(parent.rsplit(".", 1)[-1])
     if leaf == "quantity":
         if ".positions[]" in path or "depot_snapshots[]" in path:
             return "Anzahl der im Depot gehaltenen Wertpapierstücke oder Anteile"
@@ -84,6 +223,24 @@ def _context_description(path: str, leaf: str) -> str | None:
             return "Ausgewiesener Steuerbetrag"
         if ".cash_movements[]" in path:
             return "Ausgewiesener Betrag der Kontobewegung"
+        if "account_balances[]" in path:
+            return "Ausgewiesener Kontosaldo zum Stichtag"
+        if ".cost_events[]" in path:
+            return "Ausgewiesener Betrag der Kosteninformation"
+    if leaf == "currency":
+        if ".fee_events[]" in path:
+            return "Währung des Gebührenbetrags"
+        if ".tax_events[]" in path or ".components[]" in path:
+            return "Währung des Steuerbetrags"
+        if "account_balances[]" in path:
+            return "Währung des Kontosaldos"
+        if "depot_snapshots[]" in path:
+            return "Währung der Depotbewertung"
+    if leaf == "security_id":
+        if ".positions[]" in path:
+            return "Kennung des Wertpapiers dieser Depotposition"
+        if ".security_movements[]" in path:
+            return "Kennung des Wertpapiers dieser Bestandsbewegung"
     if leaf == "custom_reference" and path.startswith("accounts[]"):
         return "Zusätzlicher Referenzwert des Bankkontos"
     return None
@@ -92,22 +249,14 @@ def _context_description(path: str, leaf: str) -> str | None:
 def _neutral_description(path: str) -> str:
     parts = [part for part in description_lookup_path(path).split(".") if part]
     leaf = parts[-1] if parts else "Feld"
-    if leaf == "value":
-        return "Zusätzlicher Wert des zugehörigen Objekts"
     contextual = _context_description(".".join(parts), leaf)
     if contextual:
         return contextual
     if leaf in _KNOWN:
         return _KNOWN[leaf]
-    words = re.sub(r"[_-]+", " ", leaf).strip()
-    context = " des zugehörigen Objekts"
-    if parts and parts[0] == "accounts":
-        context = " des Bankkontos"
-    elif parts and parts[0] in {"trades", "events"}:
-        context = " des Vorgangs"
-    elif parts and parts[0] in {"depots", "depot_snapshots"}:
-        context = " des Depots"
-    return f"Zusätzlicher Wert {words}{context}" if words else "Zusätzlicher Wert des zugehörigen Objekts"
+    if "attributes" in parts:
+        return f"Parser-spezifische Zusatzangabe mit dem Schlüssel „{leaf}“; die fachliche Bedeutung wird durch den Schlüssel festgelegt"
+    return f"DTO-Feld „{leaf}“; im Quellmodell ist keine weitergehende fachliche Bedeutung definiert"
 
 
 class DescriptionCatalog:
