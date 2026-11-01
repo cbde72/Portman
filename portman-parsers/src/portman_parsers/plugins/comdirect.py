@@ -94,8 +94,8 @@ class ComdirectPlugin:
     calculations=(AdvanceTaxCalculation(tax.tax_event_id,MissingValue.UNKNOWN,MissingValue.UNKNOWN,MissingValue.UNKNOWN,tax.advance_before_partial_exemption,tax.taxable_amount,withheld,comps,approval_status=TaxApprovalStatus.SYNTHETIC_ONLY),)
     if depot_id and isin and tax.tax_year and isinstance(tax.taxable_amount,Decimal): carryforwards=(AdvanceTaxCarryforward(stable_id("carryforward",tax.tax_event_id),tax.tax_event_id,depot_id,isin,tax.tax_year,tax.taxable_amount,(eid,)),)
    return self.result(doc,d,evidence,events,depots,tax_calculations=calculations,tax_carryforwards=carryforwards)
-  return self.transaction(doc,d,evidence,ev,depots,depot_id,isin,eid)
- def transaction(self,doc,d,evidence,ev,depots,depot_id,isin,eid):
+  return self.transaction(doc,d,evidence,ev,depots,depot_id,isin,eid,security_name,column_wkn,column_isin)
+ def transaction(self,doc,d,evidence,ev,depots,depot_id,isin,eid,security_name=None,column_wkn=None,column_isin=None):
   text=doc.text; h=d.handler_id; kind="BUY" if h=="wertpapierkauf" else "SELL" if h=="wertpapierverkauf" else "REDEMPTION" if h=="einloesung" else "DIVIDEND"
   q=QTY.search(text); qty=dec(q.group(1)) if q else None; settlement=SETTLE.search(text); valuta=VALUTA.search(text); event_id=stable_id("event",doc.document_id,h,isin,settlement.group("a") if settlement else "")
   issues=[]
