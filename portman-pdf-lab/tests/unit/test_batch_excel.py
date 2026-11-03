@@ -122,6 +122,31 @@ def test_financial_report_writes_one_row_per_booking(tmp_path):
     assert [row[8] for row in rows[1:]] == ["-1.10", "-2.10", "-3.10"]
 
 
+def test_non_financial_reports_write_one_row_per_event(tmp_path):
+    """Auch außerhalb von Finanzreports wird jedes Finanzereignis exportiert."""
+    report = {
+        "source": str(tmp_path / "dividenden.pdf"),
+        "detection": {"document_type": "comdirect Dividendengutschrift",
+                      "handler_id": "dividendengutschrift"},
+        "result": {"events": [
+            {"security_name": "SAP SE", "security_isin": "DE0007164600",
+             "security_wkn": "716460",
+             "cash_movements": [{"amount": "1.61", "currency": "EUR", "status": "ACTUAL"}]},
+            {"security_name": "Beispiel AG", "security_isin": "DE0000000001",
+             "security_wkn": "000001",
+             "cash_movements": [{"amount": "2.22", "currency": "EUR", "status": "ACTUAL"}]},
+        ]},
+    }
+    result = export_batch_excel([report], tmp_path)
+    rows = read_sheet(result["path"], "Dividendengutschrift")
+    headers = list(rows[0])
+    assert len(rows) == 3  # Kopfzeile + zwei Ereignisse
+    amounts = [row[headers.index("Bruttobetrag")] for row in rows[1:]]
+    assert amounts == ["1.61", "2.22"]
+    assert [row[headers.index("ISIN")] for row in rows[1:]] == [
+        "DE0007164600", "DE0000000001"]
+
+
 def test_valid_zero_is_exported_and_missing_values_stay_empty(tmp_path):
     reports = [dividend_report(tmp_path)]
     result = export_batch_excel(reports, tmp_path)

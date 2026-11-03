@@ -20,114 +20,112 @@ EXCEL_PREFIX = "Portman_Parser_Kompakt"
 MAX_SHEET_NAME_LENGTH = 31
 _INVALID_SHEET_CHARS = re.compile(r"[\[\]\:\*\?\/\\]")
 
-# Fachliche Spalten je Dokumenttyp: (deutsche Überschrift, DTO-Pfade).
-# Die Pfade sind relativ zum Parserergebnis; die erste Auflösung gewinnt.
-_BASE_COLUMNS = (("Datei", ("source",)), ("Dokumenttyp", ("detection.document_type",)))
+# Fachliche Spalten je Dokumenttyp: (deutsche Überschrift, DTO-Pfade relativ
+# zum einzelnen FinancialEvent).  Jedes Ereignis wird zu einer eigenen Zeile;
+# die erste gültige Pfadauflösung gewinnt.
+_BASE_HEADERS = ("Datei", "Dokumenttyp")
 
 _SECURITY_COLUMNS = (
-    ("Wertpapiername", ("events[0].security_name",)),
-    ("ISIN", ("events[0].security_isin", "events[0].trades[0].isin")),
-    ("WKN", ("events[0].security_wkn", "events[0].trades[0].wkn")),
+    ("Wertpapiername", ("security_name",)),
+    ("ISIN", ("security_isin", "trades[0].isin")),
+    ("WKN", ("security_wkn", "trades[0].wkn")),
 )
 
 _TYPE_COLUMNS: dict[str, tuple[tuple[str, tuple[str, ...]], ...]] = {
+    "Finanzreport": (
+        ("Buchungsdatum", ("event_date",)),
+        ("Vorgangsart", ("kind",)),
+        ("Wertpapiername", ("security_name",)),
+        ("ISIN", ("security_isin",)),
+        ("WKN", ("security_wkn",)),
+        ("Stückzahl", ("trades[0].quantity",)),
+        ("Buchungsbetrag", ("cash_movements[0].amount",)),
+        ("Währung", ("cash_movements[0].currency",)),
+        ("Cashflowstatus", ("cash_movements[0].status",)),
+        ("Buchungsart", ("cash_movements[0].movement_type",)),
+        ("Einbehaltene Steuer", ("tax_events[0].actually_withheld_tax",)),
+        ("Gebührenbetrag", ("fee_events[0].amount",)),
+    ),
     "Wertpapierkauf": _SECURITY_COLUMNS + (
-        ("Stückzahl", ("events[0].trades[0].quantity",)),
-        ("Geschäftsdatum", ("events[0].trades[0].trade_date",)),
-        ("Valuta", ("events[0].trades[0].value_date",)),
-        ("Kurs", ("events[0].trades[0].price",)),
-        ("Kurswert", ("events[0].trades[0].market_value",)),
-        ("Bruttobetrag", ("events[0].trades[0].gross_amount",)),
-        ("Belastung/Belastungsbetrag", ("events[0].cash_movements[0].amount",)),
-        ("Währung", ("events[0].cash_movements[0].currency",)),
-        ("Cashflowstatus", ("events[0].cash_movements[0].status",)),
-        ("Gebührenbetrag", ("events[0].fee_events[0].amount",)),
-        ("Einbehaltene Steuer", ("events[0].tax_events[0].actually_withheld_tax",)),
+        ("Stückzahl", ("trades[0].quantity",)),
+        ("Geschäftsdatum", ("trades[0].trade_date",)),
+        ("Valuta", ("trades[0].value_date",)),
+        ("Kurs", ("trades[0].price",)),
+        ("Kurswert", ("trades[0].market_value",)),
+        ("Bruttobetrag", ("trades[0].gross_amount",)),
+        ("Belastung/Belastungsbetrag", ("cash_movements[0].amount",)),
+        ("Währung", ("cash_movements[0].currency",)),
+        ("Cashflowstatus", ("cash_movements[0].status",)),
+        ("Gebührenbetrag", ("fee_events[0].amount",)),
+        ("Einbehaltene Steuer", ("tax_events[0].actually_withheld_tax",)),
     ),
     "Wertpapierverkauf": _SECURITY_COLUMNS + (
-        ("Stückzahl", ("events[0].trades[0].quantity",)),
-        ("Geschäftsdatum", ("events[0].trades[0].trade_date",)),
-        ("Valuta", ("events[0].trades[0].value_date",)),
-        ("Kurs", ("events[0].trades[0].price",)),
-        ("Kurswert", ("events[0].trades[0].market_value",)),
-        ("Gutschriftsbetrag", ("events[0].cash_movements[0].amount",)),
-        ("Währung", ("events[0].cash_movements[0].currency",)),
-        ("Cashflowstatus", ("events[0].cash_movements[0].status",)),
-        ("Gebührenbetrag", ("events[0].fee_events[0].amount",)),
-        ("Einbehaltene Steuer", ("events[0].tax_events[0].actually_withheld_tax",)),
+        ("Stückzahl", ("trades[0].quantity",)),
+        ("Geschäftsdatum", ("trades[0].trade_date",)),
+        ("Valuta", ("trades[0].value_date",)),
+        ("Kurs", ("trades[0].price",)),
+        ("Kurswert", ("trades[0].market_value",)),
+        ("Gutschriftsbetrag", ("cash_movements[0].amount",)),
+        ("Währung", ("cash_movements[0].currency",)),
+        ("Cashflowstatus", ("cash_movements[0].status",)),
+        ("Gebührenbetrag", ("fee_events[0].amount",)),
+        ("Einbehaltene Steuer", ("tax_events[0].actually_withheld_tax",)),
     ),
     "Ertragsgutschrift": _SECURITY_COLUMNS + (
-        ("Stückzahl", ("events[0].trades[0].quantity", "events[0].security_movements[0].quantity")),
-        ("Buchungsdatum", ("events[0].event_date",)),
-        ("Bruttobetrag", ("events[0].cash_movements[0].amount",)),
-        ("Währung", ("events[0].cash_movements[0].currency",)),
-        ("Cashflowstatus", ("events[0].cash_movements[0].status",)),
-        ("Bemessungsgrundlage", ("events[0].tax_events[0].assessment_basis",)),
-        ("Einbehaltene Steuer", ("events[0].tax_events[0].actually_withheld_tax",)),
+        ("Stückzahl", ("trades[0].quantity", "security_movements[0].quantity")),
+        ("Buchungsdatum", ("event_date",)),
+        ("Bruttobetrag", ("cash_movements[0].amount",)),
+        ("Währung", ("cash_movements[0].currency",)),
+        ("Cashflowstatus", ("cash_movements[0].status",)),
+        ("Bemessungsgrundlage", ("tax_events[0].assessment_basis",)),
+        ("Einbehaltene Steuer", ("tax_events[0].actually_withheld_tax",)),
     ),
     "Dividendengutschrift": _SECURITY_COLUMNS + (
-        ("Stückzahl", ("events[0].trades[0].quantity", "events[0].security_movements[0].quantity")),
-        ("Buchungsdatum", ("events[0].event_date",)),
-        ("Bruttobetrag", ("events[0].cash_movements[0].amount",)),
-        ("Währung", ("events[0].cash_movements[0].currency",)),
-        ("Cashflowstatus", ("events[0].cash_movements[0].status",)),
-        ("Bemessungsgrundlage", ("events[0].tax_events[0].assessment_basis",)),
-        ("Einbehaltene Steuer", ("events[0].tax_events[0].actually_withheld_tax",)),
+        ("Stückzahl", ("trades[0].quantity", "security_movements[0].quantity")),
+        ("Buchungsdatum", ("event_date",)),
+        ("Bruttobetrag", ("cash_movements[0].amount",)),
+        ("Währung", ("cash_movements[0].currency",)),
+        ("Cashflowstatus", ("cash_movements[0].status",)),
+        ("Bemessungsgrundlage", ("tax_events[0].assessment_basis",)),
+        ("Einbehaltene Steuer", ("tax_events[0].actually_withheld_tax",)),
     ),
     "Investment-Ausschüttung": _SECURITY_COLUMNS + (
-        ("Stückzahl", ("events[0].trades[0].quantity", "events[0].security_movements[0].quantity")),
-        ("Buchungsdatum", ("events[0].event_date",)),
-        ("Bruttobetrag", ("events[0].cash_movements[0].amount",)),
-        ("Währung", ("events[0].cash_movements[0].currency",)),
-        ("Cashflowstatus", ("events[0].cash_movements[0].status",)),
-        ("Bemessungsgrundlage", ("events[0].tax_events[0].assessment_basis",)),
-        ("Einbehaltene Steuer", ("events[0].tax_events[0].actually_withheld_tax",)),
+        ("Stückzahl", ("trades[0].quantity", "security_movements[0].quantity")),
+        ("Buchungsdatum", ("event_date",)),
+        ("Bruttobetrag", ("cash_movements[0].amount",)),
+        ("Währung", ("cash_movements[0].currency",)),
+        ("Cashflowstatus", ("cash_movements[0].status",)),
+        ("Bemessungsgrundlage", ("tax_events[0].assessment_basis",)),
+        ("Einbehaltene Steuer", ("tax_events[0].actually_withheld_tax",)),
     ),
     "Vorabpauschale": _SECURITY_COLUMNS + (
-        ("Buchungsdatum", ("events[0].event_date",)),
-        ("Steuerjahr", ("events[0].tax_events[0].tax_year",)),
-        ("Bemessungsgrundlage", ("events[0].tax_events[0].assessment_basis",)),
-        ("Steuer vor Teilfreistellung", ("events[0].tax_events[0].advance_before_partial_exemption",)),
-        ("Einbehaltene Steuer", ("events[0].tax_events[0].actually_withheld_tax",)),
-        ("Währung", ("events[0].tax_events[0].currency",)),
+        ("Buchungsdatum", ("event_date",)),
+        ("Steuerjahr", ("tax_events[0].tax_year",)),
+        ("Bemessungsgrundlage", ("tax_events[0].assessment_basis",)),
+        ("Steuer vor Teilfreistellung", ("tax_events[0].advance_before_partial_exemption",)),
+        ("Einbehaltene Steuer", ("tax_events[0].actually_withheld_tax",)),
+        ("Währung", ("tax_events[0].currency",)),
     ),
     "Steuerinformationen": (
-        ("Buchungsdatum", ("events[0].event_date",)),
-        ("Vorgangsart", ("events[0].kind",)),
-        ("Steuerart", ("events[0].tax_events[0].kind",)),
-        ("Steuerjahr", ("events[0].tax_events[0].tax_year",)),
-        ("Bemessungsgrundlage", ("events[0].tax_events[0].assessment_basis",)),
-        ("Steuerpflichtiger Betrag", ("events[0].tax_events[0].taxable_amount",)),
-        ("Angegebene Steuerschuld", ("events[0].tax_events[0].stated_tax_liability",)),
-        ("Einbehaltene Steuer", ("events[0].tax_events[0].actually_withheld_tax",)),
-        ("Währung", ("events[0].tax_events[0].currency",)),
+        ("Buchungsdatum", ("event_date",)),
+        ("Vorgangsart", ("kind",)),
+        ("Steuerart", ("tax_events[0].kind",)),
+        ("Steuerjahr", ("tax_events[0].tax_year",)),
+        ("Bemessungsgrundlage", ("tax_events[0].assessment_basis",)),
+        ("Steuerpflichtiger Betrag", ("tax_events[0].taxable_amount",)),
+        ("Angegebene Steuerschuld", ("tax_events[0].stated_tax_liability",)),
+        ("Einbehaltene Steuer", ("tax_events[0].actually_withheld_tax",)),
+        ("Währung", ("tax_events[0].currency",)),
     ),
     "MiFID-II-Kosteninformation": (
-        ("Buchungsdatum", ("events[0].event_date",)),
-        ("Kosteninformationstyp", ("events[0].cost_events[0].information_type",)),
-        ("Kostenkategorie", ("events[0].cost_events[0].kind",)),
-        ("Informationsbetrag", ("events[0].cost_events[0].amount",)),
-        ("Währung", ("events[0].cost_events[0].currency",)),
-        ("Nur informativ", ("events[0].cost_events[0].informational",)),
+        ("Buchungsdatum", ("event_date",)),
+        ("Kosteninformationstyp", ("cost_events[0].information_type",)),
+        ("Kostenkategorie", ("cost_events[0].kind",)),
+        ("Informationsbetrag", ("cost_events[0].amount",)),
+        ("Währung", ("cost_events[0].currency",)),
+        ("Nur informativ", ("cost_events[0].informational",)),
     ),
 }
-
-# Finanzreports enthalten beliebig viele Buchungen: jede Buchung (jedes
-# FinancialEvent) erhält eine eigene Zeile; die Pfade sind relativ zum Event.
-_FINANZREPORT_COLUMNS = (
-    ("Buchungsdatum", ("event_date",)),
-    ("Vorgangsart", ("kind",)),
-    ("Wertpapiername", ("security_name",)),
-    ("ISIN", ("security_isin",)),
-    ("WKN", ("security_wkn",)),
-    ("Stückzahl", ("trades[0].quantity",)),
-    ("Buchungsbetrag", ("cash_movements[0].amount",)),
-    ("Währung", ("cash_movements[0].currency",)),
-    ("Cashflowstatus", ("cash_movements[0].status",)),
-    ("Buchungsart", ("cash_movements[0].movement_type",)),
-    ("Einbehaltene Steuer", ("tax_events[0].actually_withheld_tax",)),
-    ("Gebührenbetrag", ("fee_events[0].amount",)),
-)
 
 _UNRECOGNIZED_COLUMNS = (
     ("Datei", ("source",)),
@@ -225,7 +223,12 @@ def next_excel_path(folder: str | Path) -> Path:
 
 
 def _sheet_rows(report: Mapping[str, Any], sheet: str):
-    """Liefert (Spaltenüberschriften, Zeilenwerte) für ein Tabellenblatt."""
+    """Liefert (Spaltenüberschriften, Zeilenwerte) für ein Tabellenblatt.
+
+    Jedes FinancialEvent erzeugt eine Zeile; Dokumentangaben (Datei,
+    Dokumenttyp) werden je Zeile wiederholt.  Ein Bericht ohne Ereignisse
+    erhält eine Zeile mit leeren fachlichen Zellen.
+    """
     result = report.get("result") if isinstance(report.get("result"), Mapping) else {}
     if sheet == "Nicht erkannt":
         headers = [header for header, _ in _UNRECOGNIZED_COLUMNS]
@@ -234,33 +237,25 @@ def _sheet_rows(report: Mapping[str, Any], sheet: str):
                str(_dig(report, "message") or ""),
                _issue_codes(report)]
         return headers, [row]
-    if sheet == "Finanzreport":
-        headers = ["Datei", "Dokumenttyp", *(header for header, _ in _FINANZREPORT_COLUMNS)]
-        events = result.get("events") if isinstance(result.get("events"), list) else []
-        if not events:
-            events = [None]
-        rows = []
-        for event in events:
-            scope = event if isinstance(event, Mapping) else {}
-            rows.append([str(_dig(report, "source") or ""),
-                         str((report.get("detection") or {}).get("document_type") or ""),
-                         *[_cell_text(scope, paths) for _, paths in _FINANZREPORT_COLUMNS]])
-        return headers, rows
     columns = _TYPE_COLUMNS.get(sheet)
     if columns is None:
         # Unbekannter, aber erkannter Dokumenttyp: dynamische, evidenzgestützte
         # Spalten wie im CSV-Export plus Datei und Dokumenttyp.
         values = flatten_evidence_values(result)
-        headers = ["Datei", "Dokumenttyp", *values.keys()]
+        headers = [*_BASE_HEADERS, *values.keys()]
         rows = [[str(_dig(report, "source") or ""),
                  str((report.get("detection") or {}).get("document_type") or ""),
                  *values.values()]]
         return headers, rows
-    headers = [header for header, _ in _BASE_COLUMNS] + [header for header, _ in columns]
-    row = [str(_dig(report, "source") or ""),
-           str((report.get("detection") or {}).get("document_type") or ""),
-           *[_cell_text(result, paths) for _, paths in columns]]
-    return headers, [row]
+    headers = [*_BASE_HEADERS, *(header for header, _ in columns)]
+    events = result.get("events") if isinstance(result.get("events"), list) else []
+    rows = []
+    for event in events or [{}]:
+        scope = event if isinstance(event, Mapping) else {}
+        rows.append([str(_dig(report, "source") or ""),
+                     str((report.get("detection") or {}).get("document_type") or ""),
+                     *[_cell_text(scope, paths) for _, paths in columns]])
+    return headers, rows
 
 
 def _style_sheet(worksheet) -> None:
