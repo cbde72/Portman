@@ -135,6 +135,12 @@ def test_cipher_page_is_rejected_when_quantity_times_price_mismatches():
  assert trade.price is MissingValue.NOT_FOUND and trade.market_value is MissingValue.NOT_FOUND
  assert trade.quantity==Decimal("0.642")
 
+def test_cipher_page_does_not_guess_unknown_thousands_separator():
+ # Ohne Datums-Anker ist der Punkt-Code unbekannt und passt rechnerisch als Ziffer 0 (10111,11 x 2 = 20222,22).
+ # Das ist kein gültiges Zahlenformat; belegt ist nur 1.111,11 (über die Belastung ohne Entgelte).
+ trade=parse_text(cipher_buy("z","fndfgdhfhm","pggohhoi","h","gdgggbgg","hdhhhbhh","kein Datum","91182283","2","2.222,22")).events[0].trades[0]
+ assert (trade.quantity,trade.price,trade.market_value)==(Decimal("2"),Decimal("1111.11"),Decimal("2222.22"))
+
 def raw_cipher_buy(sp,colon,dot,eur,day,number,qty,price,market,plain_day,plain_number,plain_qty,plain_market,kurs="Kurs",head="",tail=""):
  return f"""comdirect
 Wertpapierkauf

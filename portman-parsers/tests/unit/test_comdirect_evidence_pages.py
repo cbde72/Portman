@@ -11,8 +11,9 @@ from decimal import Decimal
 
 import pytest
 
-from portman_parsers.api import (Account, Evidence,
-                                 FieldValue, ParsedDocument, PdfDocument, PdfPage)
+from portman_parsers.api import (Account, AccountBalance, CashMovement, CashMovementType, CashStatus,
+                                 DepotAccountLink, DepotPosition, DepotSnapshot, Depot, Evidence,
+                                 FieldValue, FinancialEvent, ParsedDocument, PdfDocument, PdfPage)
 from portman_parsers.plugins.comdirect import (ComdirectFinanzreportPlugin, ComdirectPlugin,
                                                evidence_page, evidence_recorder, _page_for_offset)
 
@@ -289,7 +290,10 @@ def test_kaufabrechnung_gebuehren_und_steuern_volstaendig():
     result = plugin.parse(dokument, plugin.detect(dokument)[0])
     event = result.events[0]
     assert [(fee.subcategory, fee.amount) for fee in event.fee_events] == [("provision", Decimal("1.50"))]
-    assert not event.tax_events
+    components = {component.kind: component.amount for component in event.tax_events[0].components}
+    assert components == {"CAPITAL_GAINS_TAX": Decimal("2.00"),
+                          "SOLIDARITY_SURCHARGE": Decimal("0.11"),
+                          "CHURCH_TAX": Decimal("1.00")}
     assert event.cash_movements[0].amount == Decimal("-126.50")
     assert event.cash_movements[0].currency == "EUR"
 

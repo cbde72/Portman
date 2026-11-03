@@ -117,7 +117,7 @@ def test_batch_analyses_20_pdfs_exports_csv_and_never_writes_sqlite(
         assert not database.exists(), "batch mode must not create/write SQLite"
 
         with csv_path.open(newline="", encoding="utf-8-sig") as handle:
-            reader = csv.DictReader(handle, delimiter=";")
+            reader = csv.DictReader(handle)
             rows = list(reader)
             fields = reader.fieldnames
         assert len(rows) == 20
@@ -175,7 +175,7 @@ def test_run_on_folder_automatically_exports_versioned_excel(
 
         # Der CSV-Export bleibt unverändert erhalten.
         with csv_path.open(newline="", encoding="utf-8-sig") as handle:
-            rows = list(csv.DictReader(handle, delimiter=";"))
+            rows = list(csv.DictReader(handle))
         assert len(rows) == 3
 
         # Kein Schreibzugriff auf die Trainings-/Referenzdatenbank.
@@ -211,7 +211,7 @@ def test_batch_analyses_many_pdfium_fallback_pdfs_without_native_crash(
         wait_for(application, lambda: window.workers == set(), timeout=30)
 
         with csv_path.open(newline="", encoding="utf-8-sig") as handle:
-            rows = list(csv.DictReader(handle, delimiter=";"))
+            rows = list(csv.DictReader(handle))
         assert len(rows) == len(paths)
         assert all(row["status"] == "OK" for row in rows)
         assert all("pdfium" in report["text_preparation"]["extractors"]
@@ -276,7 +276,7 @@ def test_cancelled_batch_still_exports_partial_csv_and_keeps_gui_alive(tmp_path,
         wait_for(application, lambda: window.workers == set(), timeout=10)
         assert csv_path.exists()
         with csv_path.open(newline="", encoding="utf-8-sig") as handle:
-            rows = list(csv.DictReader(handle, delimiter=";"))
+            rows = list(csv.DictReader(handle))
         assert 1 <= len(rows) <= len(paths)
         assert all(isinstance(value, dict) for value in window.documents.values())
     finally:
@@ -437,7 +437,7 @@ def test_batch_csv_appends_optional_training_columns_and_keeps_sqlite_unchanged(
         assert hashlib.sha256(database.read_bytes()).hexdigest() == before
 
         with csv_path.open(newline="", encoding="utf-8-sig") as handle:
-            reader = csv.DictReader(handle, delimiter=";")
+            reader = csv.DictReader(handle)
             row = next(reader); fields = reader.fieldnames
         training = [field for field in fields if field.startswith("training[")]
         assert training

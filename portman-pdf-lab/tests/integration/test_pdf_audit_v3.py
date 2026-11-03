@@ -58,8 +58,7 @@ def run(root, output, *extra, expect=0):
 
 def read_csv(path: Path):
     with path.open(encoding="utf-8-sig", newline="") as handle:
-        delimiter = ";" if path.name in {"files.csv", "findings.csv", "transactions.csv", "delta.csv",
-                                         "parser_fields.csv", "fields_description.csv"} else ","
+        delimiter = ";" if path.name in {"files.csv", "findings.csv", "transactions.csv", "delta.csv"} else ","
         return list(csv.DictReader(handle, delimiter=delimiter))
 
 

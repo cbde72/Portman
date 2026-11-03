@@ -39,6 +39,7 @@ FEE=(("provision",r"Provision\s*:?\s*(?:EUR)?\s*-?("+A+r")"),("foreign_expenses"
 CIPHER_TRADE=re.compile(r"Nennwert\s*Zum\s*(?:Misch)?[Kk]urs\s*von\s*\n\s*St\S(?P<sp>\S)(?P=sp)*(?P<qty>(?:(?!(?P=sp))\S)+)(?P=sp)+\SUR(?P=sp)+(?P<price>\S+?)(?P=sp)*\n"
                         r"(?P=sp)*Kurswert(?P=sp)+\S(?P=sp)\SUR(?P=sp)+(?P<market>\S+?)(?P=sp)*\n")
 CIPHER_ACCOUNT=re.compile(r"Steuern\s*\nDE(?P<iban>\S+?)(?P<sp>\S)\SUR(?P=sp)+(?P<valuta>\S{10})")
+NUMBER_TEXT=re.compile(r"\d{1,3}(?:\.\d{3})*(?:,\d+)?")
 CIPHER_DATE=re.compile(r"ftstag(\S)\1*\S\1(\S{10})"); CIPHER_NUMBER=re.compile(r"nummer(\S)\1*\S\1((?:(?!\1)\S)+)\1((?:(?!\1)\S)+)")
 
 
@@ -56,11 +57,10 @@ def _cipher_trade(head,tail):
   day=re.search(r"\bvom\s*("+D+r")",tail); number=re.search(r"\bNr\.\s*(\d{6,})",tail)
   coded_day=CIPHER_DATE.search(head); coded_number=CIPHER_NUMBER.search(head)
   account=re.search(r"Valuta\s*("+D+r")\s*auf\s*Konto\s*EUR\s*mit\s*der\s*IBAN\s*DE(\d[\d ]*\d)",tail); coded_account=CIPHER_ACCOUNT.search(head)
-  plain_qty=line and line.group("qty"); coded_qty=trade["qty"]
-  # Der Steuerabschnitt ergänzt Nachkommanullen ("2,230" statt "2,23") oder kürzt auf ganze Stück ("1" statt "1,003").
-  while plain_qty and len(plain_qty)>len(coded_qty) and "," in plain_qty and plain_qty.endswith("0"): plain_qty=plain_qty[:-1]
-  if plain_qty and "," not in plain_qty and len(plain_qty)<len(coded_qty): coded_qty=coded_qty[:len(plain_qty)]
-  pairs=((coded_qty,plain_qty),(coded_day and coded_day.group(2),day and day.group(1)),
+  plain_qty=line and line.group("qty")
+  # Der Steuerabschnitt ergänzt Nachkommanullen ("2,230" statt "2,23"); auf ganze Stück gekürzte Werte sind kein belegter Anker.
+  while plain_qty and len(plain_qty)>len(trade["qty"]) and "," in plain_qty and plain_qty.endswith("0"): plain_qty=plain_qty[:-1]
+  pairs=((trade["qty"],plain_qty),(coded_day and coded_day.group(2),day and day.group(1)),
          (coded_number and coded_number.group(2)+coded_number.group(3),number and number.group(1)),
          (coded_account and coded_account["iban"].replace(coded_account["sp"],"")+coded_account["valuta"],
           account and account.group(2).replace(" ","")+account.group(1)))
@@ -69,27 +69,37 @@ def _cipher_trade(head,tail):
    if coded and plain and len(coded)==len(plain):
     for c,p in zip(coded,plain):
      if key.setdefault(c,p)!=p: return None
-  # Die Belastung entspricht dem Kurswert nur ohne Entgelte; daher nur als Hinweis ohne Widerspruch nutzen.
-  if settle and len(settle.group(1))==len(trade["market"]):
+
+  def solve(key):
+   # Der Kurswert hat immer zwei Nachkommastellen; damit ist das Komma-Zeichen bekannt.
+   key=dict(key)
+   if len(trade["market"])>3 and key.setdefault(trade["market"][-3],",")!=",": return []
+   if len(set(key.values()))!=len(key): return []
+   known={int(p):c for c,p in key.items() if p.isdigit()}
+   unknown=sorted({c for name in ("qty","price","market") for c in trade[name]}-set(key))
+   def candidates(code):
+    return [str(d) for d in range(10) if d not in known
+            and all(c<code for k,c in known.items() if k<d) and all(c>code for k,c in known.items() if k>d)]
+   solutions=[]
+   for digits in product(*(candidates(code) for code in unknown)) if len(unknown)<=2 else ():
+    if len(set(digits))<len(digits): continue
+    trial={**key,**dict(zip(unknown,digits))}
+    try:
+     texts=["".join(trial[c] for c in trade[name]) for name in ("qty","price","market")]
+     # dec() entfernt Punkte; ein als Ziffer geratener Tausenderpunkt darf deshalb nicht durchrutschen.
+     if not all(NUMBER_TEXT.fullmatch(t) for t in texts): continue
+     qty,price,market=(dec(t) for t in texts)
+    except (KeyError,ArithmeticError,ValueError):
+     continue
+    if qty>0 and (qty*price).quantize(Decimal("0.01"),ROUND_HALF_UP)==market: solutions.append((qty,price,market))
+   return solutions
+
+  solutions=solve(key)
+  # Die Belastung entspricht dem Kurswert nur ohne Entgelte; sie gilt daher nur, wenn der entschlüsselte Kurswert ihr exakt entspricht.
+  if len(solutions)!=1 and settle and len(settle.group(1))==len(trade["market"]):
    hint=dict(zip(trade["market"],settle.group(1)))
-   if all(key.get(c,p)==p for c,p in hint.items()) and len(hint)==len(set(hint.values())): key={**hint,**key}
-  # Der Kurswert hat immer zwei Nachkommastellen; damit ist das Komma-Zeichen bekannt.
-  if len(trade["market"])>3 and key.setdefault(trade["market"][-3],",")!=",": return None
-  if len(set(key.values()))!=len(key): return None
-  known={int(p):c for c,p in key.items() if p.isdigit()}
-  unknown=sorted({c for name in ("qty","price","market") for c in trade[name]}-set(key))
-  def candidates(code):
-   return [str(d) for d in range(10) if d not in known
-           and all(c<code for k,c in known.items() if k<d) and all(c>code for k,c in known.items() if k>d)]
-  solutions=[]
-  for digits in product(*(candidates(code) for code in unknown)) if len(unknown)<=2 else ():
-   trial={**key,**dict(zip(unknown,digits))}
-   if len(set(digits))<len(digits): continue
-   try:
-    qty,price,market=(dec("".join(trial[c] for c in trade[name])) for name in ("qty","price","market"))
-   except (KeyError,ArithmeticError,ValueError):
-    continue
-   if qty>0 and (qty*price).quantize(Decimal("0.01"),ROUND_HALF_UP)==market: solutions.append((qty,price,market))
+   if all(key.get(c,p)==p for c,p in hint.items()):
+    solutions=[x for x in solve({**hint,**key}) if x[2]==dec(settle.group(1))]
   return solutions[0] if len(solutions)==1 else None
 
 
@@ -432,8 +442,8 @@ class ComdirectPlugin:
   # position change.  Never synthesize a SecurityMovement for it.
   security=() if kind not in {"BUY", "SELL", "REDEMPTION"} or not(qty and isin) else (SecurityMovement(stable_id("security",event_id),event_id,isin,qty if kind=="BUY" else -qty,(event_ev,),depot_id),)
   fees=tuple(FeeEvent(stable_id("fee",event_id,k),"trading",k,dec(m.group(1)),"EUR",date(valuta.group(1)) if valuta else date("01.01.1970"),FeeEffect.INCLUDED_IN_SETTLEMENT,doc.document_id,"comdirect",depot_id=depot_id,account_id=account_id,security_id=isin,transaction_id=event_id,evidence_ids=(event_ev,)) for k,p in FEE for m in [re.search(p,text,re.I)] if m)
-  # Beim Kauf wird keine Steuer einbehalten; die "Steuerliche Behandlung" wirkt nur auf den Verrechnungstopf.
-  comps=() if kind=="BUY" else tuple(TaxComponent(k,dec(m.group(1)),"EUR") for k,p in TAX for m in [re.search(p,text,re.I)] if m); taxes=(TaxEvent(stable_id("tax",event_id),event_id,"WITHHOLDING",comps,evidence_ids=(event_ev,),depot_id=depot_id,isin=isin,bank_id="comdirect",account_id=account_id),) if comps else ()
+  # Die "Steuerliche Behandlung" eines Kaufs wirkt nur auf den Verrechnungstopf; ihre 0,00-Zeilen sind keine einbehaltene Steuer.
+  comps=tuple(TaxComponent(k,dec(m.group(1)),"EUR") for k,p in TAX for m in [re.search(p,text,re.I)] if m and (kind!="BUY" or dec(m.group(1))>0)); taxes=(TaxEvent(stable_id("tax",event_id),event_id,"WITHHOLDING",comps,evidence_ids=(event_ev,),depot_id=depot_id,isin=isin,bank_id="comdirect",account_id=account_id),) if comps else ()
   trades=()
   if kind in {"BUY","SELL","REDEMPTION"}:
    pm=PRICE.search(head); mm=MARKET_VALUE.search(head); gm=GROSS.search(head); fx=FX.search(head); nm=NAME.search(text); tm=TRADE_DATE.search(text); xm=EXECUTION_DATE.search(text); dm=TRADE_DAY.search(text)

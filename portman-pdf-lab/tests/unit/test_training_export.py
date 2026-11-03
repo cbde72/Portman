@@ -62,8 +62,8 @@ def test_csv_appends_indexed_training_columns_and_warns_for_missing_database(tmp
          "timings": {"total_ns": 2}},
     ]}
     export_batch_csv(report, output, database)
-    with output.open(newline="", encoding="utf-8-sig") as handle:
-        rows = list(csv.DictReader(handle, delimiter=";"))
+    with output.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
     assert rows[0]["training[0].field_path"] == "events[0].amount"
     assert rows[0]["training[1].corrected_value"] == "125"
     assert rows[1]["training[0].field_path"] == ""
