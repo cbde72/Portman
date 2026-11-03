@@ -19,7 +19,7 @@ IDENTITY_HEADER=re.compile(r"Wertpapier\s*-?\s*Bezeichnung.*?(?:WKN|WPKNR)\s*/\s
 IDENTITY_ROW_STOP=re.compile(r"^(?:Emissionsland|zahlbar|Abrechnung|Bruttobetrag|Zu\s+Ihren|Verrechnung|Information|Ihre\s+comdirect|Gesch(?:ä|ae)ftstag|Schlusstag|Ausf(?:ü|ue)hrungstag|Ausf(?:ü|ue)hrung|Depot|IBAN|Valuta|Kurs|Kurswert|Provision|Steuer|Referenz|F(?:ä|ae)lligkeit|Nennwert|Gesch(?:ä|ae)ftsnummer|Rechnungsnummer|Kundennr|BLZ|Telefon)\b",re.I)
 IDENTITY_ROW_PREFIX=re.compile(r"^\s*(?:per\s+\d{2}\.\d{2}\.\d{4}|(?:STK|Stk)\.?\s*-?\s*[\d.,]+)\s*",re.I)
 IDENTITY_REASON={"PARTIAL":"nur WKN oder Name erkannt","AMBIGUOUS":"mehrere Kennungen im selben Wertpapierblock","INVALID":"ISIN-Prüfziffer oder ISIN-Format ungültig"}
-QTY=re.compile(r"(?:Stk\.?|STK)\s*("+A+r")",re.I); VALUTA=re.compile(r"(?:Valuta|zahlbar\s+ab)\s*("+D+r")",re.I)
+QTY=re.compile(r"(?:Stk\.?|STK)\s*("+A+r")",re.I); NENNWERT_QTY=re.compile(r"Nennwert\s*Zum\s*(?:Misch)?Kurs\s*von\s*(?:St\.?|Stk\.?)\s*("+A+r")",re.I); VALUTA=re.compile(r"(?:Valuta|zahlbar\s+ab)\s*("+D+r")",re.I)
 WKN=re.compile(r"\bWKN\s*:?[ \t]*([A-Z0-9]{6})\b",re.I)
 BANK_REFERENCE=re.compile(r"\bReferenz(?:\s*[- ]?\s*(?:Nr\.?|nummer))?\s*:?\s*([A-Z0-9][A-Z0-9\s]*?)(?=\s*(?:Referenz|Depotnummer|Depotnr|Kundennummer|comdirect)|[^A-Z0-9\s]|\n\s*\n|$)",re.I)
 TRADE_LINE=re.compile(r"Stk\.?\s*(?P<qty>\d[\d.]*(?:,\d+)?)\s+(?P<name>.+?)\s*,?\s*WKN\s*/\s*ISIN\s*:\s*(?P<wkn>[A-Z0-9]{6})\s*/\s*(?P<isin>[A-Z]{2}[A-Z0-9]{9}\d)",re.I)
@@ -332,14 +332,16 @@ class ComdirectPlugin:
   return self.transaction(doc,d,evidence,ev,fv,depots,depot_id,isin,eid,security_name,column_wkn,column_isin,identity)
  def transaction(self,doc,d,evidence,ev,fv,depots,depot_id,isin,eid,security_name=None,column_wkn=None,column_isin=None,identity=None):
   text=doc.text; h=d.handler_id; kind="BUY" if h=="wertpapierkauf" else "SELL" if h=="wertpapierverkauf" else "REDEMPTION" if h=="einloesung" else "DIVIDEND"
-  q=QTY.search(text); qty=dec(q.group(1)) if q else None
+  quantity_match=NENNWERT_QTY.search(text) or QTY.search(text)
+  qty=dec(quantity_match.group(1)) if quantity_match and dec(quantity_match.group(1))>0 else None
   line_match=TRADE_LINE.search(text)
   exec_match=TRADE_EXECUTION.search(text)
-  if qty is None and line_match is not None:
+  if quantity_match is None and line_match is not None:
    candidate=dec(line_match.group("qty"))
    if candidate>0: qty=candidate
-  if qty is None and exec_match is not None and exec_match.group("qty"):
-   qty=dec(exec_match.group("qty"))
+  if quantity_match is None and qty is None and exec_match is not None and exec_match.group("qty"):
+   candidate=dec(exec_match.group("qty"))
+   if candidate>0: qty=candidate
   settlement=SETTLE.search(text); valuta=VALUTA.search(text); event_id=stable_id("event",doc.document_id,h,isin,settlement.group("a") if settlement else "")
   issues=[]
   identity = identity or _SecurityIdentity()
