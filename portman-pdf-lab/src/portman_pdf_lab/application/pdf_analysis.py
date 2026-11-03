@@ -2,7 +2,6 @@
 
 from pathlib import Path
 from time import perf_counter_ns
-import csv
 import hashlib
 import json
 
@@ -15,12 +14,10 @@ from portman_parsers.rules import ProfileStore, RuleEngine, RuleMode
 
 from portman_pdf_lab.analysis.fee_views import fee_cost_view
 from portman_pdf_lab.analysis.master_data_views import account_view, depot_account_link_view
+from portman_pdf_lab.application.batch_csv import export_batch_csv
 from portman_pdf_lab.application.comdirect_comparison import compare_comdirect_parsers
-from portman_pdf_lab.application.training_export import (
-    TrainingExportReader,
-    training_columns,
-    training_values,
-)
+
+__all__ = ["analyse_pdf", "analyse_directory", "export_batch_csv"]
 
 
 def analyse_pdf(path: str | Path, rule_mode: RuleMode | str = RuleMode.STANDARD,
@@ -123,31 +120,3 @@ def analyse_directory(path: str | Path, progress=None, cancelled=None,
             progress(index, len(files), item)
     return {"root": str(root), "files": results, "count": len(results),
             "discovered": len(files), "cancelled": len(results) < len(files)}
-
-
-def export_batch_csv(report: dict[str, object], path: str | Path,
-                     training_database: str | Path | None = None) -> Path:
-    target = Path(path)
-    files = list(report.get("files", []))
-    with TrainingExportReader(training_database) as reader:
-        training_by_index = [reader.for_report(item) for item in files]
-        base_fields = ("source", "source_hash", "plugin_id", "handler_id", "status", "runtime_ns")
-        # The union is calculated before writing, so training columns are always
-        # at the far right and documents without training stay empty.
-        max_items = max((len(items) for items in training_by_index), default=0)
-        training_fields = training_columns([{} for _ in range(max_items)])
-        fields = (*base_fields, *training_fields)
-        with target.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fields)
-            writer.writeheader()
-            for item, training in zip(files, training_by_index):
-                detection = item.get("detection", {}) if isinstance(item.get("detection"), dict) else {}
-                values = {"source": item.get("source", ""), "source_hash": item.get("source_hash", ""),
-                          "plugin_id": detection.get("plugin_id", ""), "handler_id": detection.get("handler_id", ""),
-                          "status": "DUPLICATE" if item.get("duplicate_of") else "ERROR" if item.get("error") else "OK",
-                          "runtime_ns": item.get("timings", {}).get("total_ns", "")}
-                values.update(training_values(training))
-                writer.writerow(values)
-        if reader.warning:
-            report.setdefault("warnings", []).append(reader.warning)
-    return target
