@@ -305,6 +305,30 @@ def realized_profit(repo,start,end,account=None):
                 if not matching:
                     uncertain.add((t['depot'],t['security'],'EUR'))
                 continue
+            if t['kind'] in ('SPINOFF','RIGHTS'):
+                ratio=Decimal(t['ratio']); allocation=Decimal(t['cost_ratio'])
+                if not matching:
+                    uncertain.add((t['depot'],t['target'],'EUR'))
+                for key in matching:
+                    target=(t['target_depot'] or t['depot'],t['target'],key[2])
+                    created=[]
+                    for lot in lots[key]:
+                        created.append([lot[0]*ratio,lot[1]*allocation/ratio,lot[2],
+                            lot[3]*allocation/ratio if lot[3] is not None else None])
+                        lot[1]*=(1-allocation)
+                        if lot[3] is not None: lot[3]*=(1-allocation)
+                    lots[target].extend(created); lots[target].sort(key=lambda lot:lot[2])
+                    if key in uncertain: uncertain.add(target)
+                continue
+            if t['kind']=='CAPITAL_REPAYMENT':
+                for key in matching:
+                    if key[2] != (t.get('cost_currency') or 'EUR'): continue
+                    quantity=sum((lot[0] for lot in lots[key]),ZERO); reduction=Decimal(t['cost_amount'])
+                    total=sum((lot[0]*lot[1] for lot in lots[key]),ZERO)
+                    if not quantity or reduction > total: uncertain.add(key); continue
+                    per_unit=reduction/quantity
+                    for lot in lots[key]: lot[1]-=per_unit
+                continue
             target_depot=t['target_depot'] or t['depot']; target_security=t['target'] or t['security']
             if not matching:
                 uncertain.add((target_depot,target_security,'EUR'))

@@ -1,0 +1,927 @@
+{
+  "catalog": "data\\Portman_PDF_Lab_Feldkatalog_v1.0.0.yaml",
+  "catalog_version": "1.0.0",
+  "schema_version": "1.0",
+  "mapped": [
+    {
+      "catalog_path": "accounts[].bank_name",
+      "dto_path": "accounts[].bank_name",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "accounts[].account_id",
+      "dto_path": "accounts[].account_id",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "accounts[].account_number",
+      "dto_path": "accounts[].account_number",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "accounts[].iban",
+      "dto_path": "accounts[].iban",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "accounts[].bic",
+      "dto_path": "accounts[].bic",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "accounts[].account_name",
+      "dto_path": "accounts[].account_name",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "accounts[].account_type",
+      "dto_path": "accounts[].account_type",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "accounts[].currency",
+      "dto_path": "accounts[].currency",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "accounts[].account_holder",
+      "dto_path": "accounts[].holder_name",
+      "status": "aliased"
+    },
+    {
+      "catalog_path": "depots[].depot_id",
+      "dto_path": "depots[].depot_id",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "depots[].depot_number",
+      "dto_path": "depots[].depot_number",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "depots[].bank_name",
+      "dto_path": "depots[].bank_name",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "depots[].depot_name",
+      "dto_path": "depots[].depot_name",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "depots[].owner_name",
+      "dto_path": "depots[].holder_name",
+      "status": "aliased"
+    },
+    {
+      "catalog_path": "depots[].currency",
+      "dto_path": "depots[].base_currency",
+      "status": "aliased"
+    },
+    {
+      "catalog_path": "depot_account_links[].depot_id",
+      "dto_path": "depot_account_links[].depot_id",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "depot_account_links[].account_id",
+      "dto_path": "depot_account_links[].account_id",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "depot_account_links[].relation_type",
+      "dto_path": "depot_account_links[].role",
+      "status": "aliased"
+    },
+    {
+      "catalog_path": "trades[].trade_id",
+      "dto_path": "events[].trades[].trade_id",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "trades[].security_name",
+      "dto_path": "events[].trades[].security_name",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "trades[].isin",
+      "dto_path": "events[].trades[].isin",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "trades[].wkn",
+      "dto_path": "events[].trades[].wkn",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "trades[].trade_date",
+      "dto_path": "events[].trades[].trade_date",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "trades[].value_date",
+      "dto_path": "events[].trades[].value_date",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "trades[].quantity",
+      "dto_path": "events[].trades[].quantity",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "trades[].price",
+      "dto_path": "events[].trades[].price",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "trades[].price_currency",
+      "dto_path": "events[].trades[].price_currency",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "trades[].gross_amount",
+      "dto_path": "events[].trades[].gross_amount",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "trades[].net_amount",
+      "dto_path": "events[].trades[].settlement_amount",
+      "status": "aliased"
+    },
+    {
+      "catalog_path": "trades[].amount_currency",
+      "dto_path": "events[].trades[].settlement_currency",
+      "status": "aliased"
+    },
+    {
+      "catalog_path": "trades[].exchange_rate",
+      "dto_path": "events[].trades[].exchange_rate",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "trades[].depot_id",
+      "dto_path": "events[].trades[].depot_id",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "trades[].account_id",
+      "dto_path": "events[].trades[].account_id",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "cash_movements[].movement_id",
+      "dto_path": "events[].cash_movements[].movement_id",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "cash_movements[].account_id",
+      "dto_path": "events[].cash_movements[].account_id",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "cash_movements[].amount",
+      "dto_path": "events[].cash_movements[].amount",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "cash_movements[].currency",
+      "dto_path": "events[].cash_movements[].currency",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "cash_movements[].movement_type",
+      "dto_path": "events[].cash_movements[].movement_type",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "cash_movements[].status",
+      "dto_path": "events[].cash_movements[].status",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "tax_events[].value_date",
+      "dto_path": "events[].tax_events[].value_date",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "tax_events[].isin",
+      "dto_path": "events[].tax_events[].isin",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "tax_events[].taxable_amount",
+      "dto_path": "events[].tax_events[].taxable_amount",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "tax_events[].withholding_tax",
+      "dto_path": "events[].tax_events[].actually_withheld_tax",
+      "status": "aliased"
+    },
+    {
+      "catalog_path": "tax_events[].tax_year",
+      "dto_path": "events[].tax_events[].tax_year",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "tax_events[].currency",
+      "dto_path": "events[].tax_events[].currency",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "tax_events[].account_id",
+      "dto_path": "events[].tax_events[].account_id",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "fee_events[].category",
+      "dto_path": "events[].fee_events[].category",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "fee_events[].subcategory",
+      "dto_path": "events[].fee_events[].subcategory",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "fee_events[].amount",
+      "dto_path": "events[].fee_events[].amount",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "fee_events[].currency",
+      "dto_path": "events[].fee_events[].currency",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "fee_events[].fee_date",
+      "dto_path": "events[].fee_events[].fee_date",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "fee_events[].account_id",
+      "dto_path": "events[].fee_events[].account_id",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "positions[].security_id",
+      "dto_path": "depot_snapshots[].positions[].security_id",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "positions[].security_name",
+      "dto_path": "depot_snapshots[].positions[].security_name",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "positions[].quantity",
+      "dto_path": "depot_snapshots[].positions[].quantity",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "positions[].price",
+      "dto_path": "depot_snapshots[].positions[].price",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "positions[].market_value",
+      "dto_path": "depot_snapshots[].positions[].market_value",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "positions[].valuation_date",
+      "dto_path": "depot_snapshots[].positions[].price_date",
+      "status": "aliased"
+    },
+    {
+      "catalog_path": "depot_snapshots[].depot_id",
+      "dto_path": "depot_snapshots[].depot_id",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "depot_snapshots[].total_value",
+      "dto_path": "depot_snapshots[].total_value",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "parser.parser_id",
+      "dto_path": "plugin_id",
+      "status": "aliased"
+    },
+    {
+      "catalog_path": "parser.handler_id",
+      "dto_path": "handler_id",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "parser.version",
+      "dto_path": "plugin_version",
+      "status": "aliased"
+    },
+    {
+      "catalog_path": "parser.document_hash",
+      "dto_path": "document_hash",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "issues[].code",
+      "dto_path": "issues[].code",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "issues[].message",
+      "dto_path": "issues[].message",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "issues[].severity",
+      "dto_path": "issues[].severity",
+      "status": "exact"
+    },
+    {
+      "catalog_path": "evidence[].page",
+      "dto_path": "evidence[].page_number",
+      "status": "aliased"
+    },
+    {
+      "catalog_path": "evidence[].text",
+      "dto_path": "evidence[].excerpt",
+      "status": "aliased"
+    }
+  ],
+  "unknown_paths": [
+    {
+      "catalog_path": "document.document_type",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "document.bank_name",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "document.document_date",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "document.document_number",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "document.reference_number",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "document.page_count",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "document.language",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "document.currency",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "document.tax_year",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "document.statement_period_start",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "document.statement_period_end",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "document.layout_id",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "accounts[].blz",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "accounts[].opening_balance",
+      "dto_path": null,
+      "status": "no_dto_member"
+    },
+    {
+      "catalog_path": "accounts[].closing_balance",
+      "dto_path": null,
+      "status": "no_dto_member"
+    },
+    {
+      "catalog_path": "accounts[].balance_date",
+      "dto_path": null,
+      "status": "no_dto_member"
+    },
+    {
+      "catalog_path": "accounts[].interest_rate",
+      "dto_path": null,
+      "status": "no_dto_member"
+    },
+    {
+      "catalog_path": "depots[].valuation_date",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "depots[].total_value",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "securities[].security_id",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "securities[].name",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "securities[].security_name",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "securities[].isin",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "securities[].wkn",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "securities[].ticker",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "securities[].security_type",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "securities[].currency",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "securities[].country",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "securities[].issuer",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "securities[].fund_name",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "securities[].share_class",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "trades[].transaction_type",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "trades[].security_id",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "trades[].execution_time",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "trades[].unit",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "trades[].venue",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "trades[].order_id",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "trades[].execution_id",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "trades[].exchange_rate_pair",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "trade.venue",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "income_events[].event_type",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "income_events[].security_id",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "income_events[].security_name",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "income_events[].isin",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "income_events[].wkn",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "income_events[].quantity",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "income_events[].record_date",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "income_events[].ex_date",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "income_events[].payment_date",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "income_events[].value_date",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "income_events[].dividend_per_share",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "income_events[].distribution_per_share",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "income_events[].gross_amount",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "income_events[].net_amount",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "income_events[].amount_before_taxes",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "income_events[].currency",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "income_events[].fiscal_year_start",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "income_events[].fiscal_year_end",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "income_events[].reference_number",
+      "dto_path": null,
+      "status": "unknown_collection"
+    },
+    {
+      "catalog_path": "cash_movements[].booking_date",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "cash_movements[].value_date",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "cash_movements[].direction",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "cash_movements[].purpose",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "cash_movements[].reference",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "cash_movements[].counterparty_name",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "cash_movements[].counterparty_iban",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "cash_movements[].related_trade_id",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "tax_events[].tax_type",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "tax_events[].tax_date",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "tax_events[].security_id",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "tax_events[].tax_amount",
+      "dto_path": null,
+      "status": "no_dto_member"
+    },
+    {
+      "catalog_path": "tax_events[].capital_gains_tax",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "tax_events[].solidarity_surcharge",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "tax_events[].church_tax",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "tax_events[].foreign_withholding_tax",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "tax_events[].credited_foreign_tax",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "tax_events[].exemption_used",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "tax_events[].exemption_remaining",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "tax_events[].loss_offset",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "tax_events[].advance_lump_sum",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "tax_events[].reference_number",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "fee_events[].fee_type",
+      "dto_path": null,
+      "status": "no_dto_member"
+    },
+    {
+      "catalog_path": "fee_events[].trade_id",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "fee_events[].is_informational",
+      "dto_path": null,
+      "status": "no_dto_member"
+    },
+    {
+      "catalog_path": "fee_events[].cost_period_start",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "fee_events[].cost_period_end",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "fee_events[].percentage",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "positions[].isin",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "positions[].wkn",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "positions[].unit",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "positions[].price_currency",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "positions[].depot_id",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "positions[].cost_basis",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "depot_snapshots[].snapshot_date",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "parser.mode",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "parser.run_id",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "parser.extraction_engine",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "parser.extraction_quality",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "parser.catalog_version",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "parser.rule_profile_version",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    },
+    {
+      "catalog_path": "evidence[].confidence",
+      "dto_path": null,
+      "status": "unknown_dto_member"
+    }
+  ],
+  "deviating_paths": [
+    {
+      "catalog_path": "accounts[].account_holder",
+      "dto_path": "accounts[].holder_name",
+      "status": "aliased"
+    },
+    {
+      "catalog_path": "depots[].owner_name",
+      "dto_path": "depots[].holder_name",
+      "status": "aliased"
+    },
+    {
+      "catalog_path": "depots[].currency",
+      "dto_path": "depots[].base_currency",
+      "status": "aliased"
+    },
+    {
+      "catalog_path": "depot_account_links[].relation_type",
+      "dto_path": "depot_account_links[].role",
+      "status": "aliased"
+    },
+    {
+      "catalog_path": "trades[].net_amount",
+      "dto_path": "events[].trades[].settlement_amount",
+      "status": "aliased"
+    },
+    {
+      "catalog_path": "trades[].amount_currency",
+      "dto_path": "events[].trades[].settlement_currency",
+      "status": "aliased"
+    },
+    {
+      "catalog_path": "tax_events[].withholding_tax",
+      "dto_path": "events[].tax_events[].actually_withheld_tax",
+      "status": "aliased"
+    },
+    {
+      "catalog_path": "positions[].valuation_date",
+      "dto_path": "depot_snapshots[].positions[].price_date",
+      "status": "aliased"
+    },
+    {
+      "catalog_path": "parser.parser_id",
+      "dto_path": "plugin_id",
+      "status": "aliased"
+    },
+    {
+      "catalog_path": "parser.version",
+      "dto_path": "plugin_version",
+      "status": "aliased"
+    },
+    {
+      "catalog_path": "evidence[].page",
+      "dto_path": "evidence[].page_number",
+      "status": "aliased"
+    },
+    {
+      "catalog_path": "evidence[].text",
+      "dto_path": "evidence[].excerpt",
+      "status": "aliased"
+    }
+  ],
+  "summary": {
+    "total": 170,
+    "mapped": 69,
+    "unknown": 101,
+    "deviating": 12
+  }
+}

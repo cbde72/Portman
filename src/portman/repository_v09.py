@@ -1089,6 +1089,22 @@ class RepositoryV09(RepositoryV07):
                 result.append(dict(row) | {'out_transaction': out_tx, 'in_transaction': in_tx})
         return result
 
+    def security_transfer_candidates(self):
+        paired={pair[key] for pair in self.security_transfer_pairs() for key in ('out_ref','in_ref')}
+        txs=[t for t in self.transactions() if reference(t) not in paired and t['kind'] in ('TRANSFER_OUT','TRANSFER_IN')]
+        result=[]
+        for out_tx in (t for t in txs if t['kind']=='TRANSFER_OUT'):
+            matches=[]
+            for in_tx in (t for t in txs if t['kind']=='TRANSFER_IN'):
+                if (out_tx.get('security') == in_tx.get('security') and out_tx.get('quantity') is not None
+                        and in_tx.get('quantity') is not None
+                        and abs(Decimal(out_tx['quantity'])) == abs(Decimal(in_tx['quantity']))
+                        and account_key(out_tx['depot']) != account_key(in_tx['depot'])
+                        and abs((date.fromisoformat(out_tx['date'])-date.fromisoformat(in_tx['date'])).days) <= 7):
+                    matches.append(in_tx)
+            result.append({'out':out_tx,'matches':matches,'unambiguous':len(matches)==1})
+        return result
+
     def confirm_security_transfer(self, out_ref, in_ref, note):
         """Confirm two imported security movements; no cash booking is created."""
         active = {reference(t): t for t in self.transactions()}
@@ -1109,9 +1125,19 @@ class RepositoryV09(RepositoryV07):
             self.db.execute('INSERT INTO security_transfer_pairs(out_ref,in_ref,note) VALUES(?,?,?)',
                             (out_ref, in_ref, note.strip()))
 
-    def add_action(self, day, depot, security, kind, source, target='', target_depot='', ratio='1', units=None, sequence=0):
+    def revoke_security_transfer(self, identifier, reason):
+        if not reason.strip(): raise ValueError('Begründung fehlt.')
+        row=self.db.execute('SELECT * FROM security_transfer_pairs WHERE id=?',(identifier,)).fetchone()
+        if not row: raise ValueError('Zuordnung nicht mehr aktiv.')
+        with self.db:
+            self.db.execute("INSERT INTO change_log(entity,operation,old_data,new_data) VALUES('security_transfer_pairs','REVOKE',?,?)",
+                (json.dumps(dict(row),ensure_ascii=False),json.dumps({'reason':reason.strip()},ensure_ascii=False)))
+            self.db.execute('DELETE FROM security_transfer_pairs WHERE id=?',(identifier,))
+
+    def add_action(self, day, depot, security, kind, source, target='', target_depot='', ratio='1', units=None, sequence=0,
+                   cost_ratio=None, cost_amount=None, cost_currency='EUR'):
         date.fromisoformat(day)
-        if kind not in ('SPLIT', 'MERGER', 'TRANSFER') or not source.strip() or not depot or not security: raise ValueError('Art, Depot, Wertpapier und Belegquelle angeben.')
+        if kind not in ('SPLIT', 'MERGER', 'TRANSFER', 'SPINOFF', 'RIGHTS', 'CAPITAL_REPAYMENT') or not source.strip() or not depot or not security: raise ValueError('Art, Depot, Wertpapier und Belegquelle angeben.')
         factor = Decimal(str(ratio))
         if not factor.is_finite() or factor <= 0: raise ValueError('Verhältnis muss positiv sein.')
         if kind == 'MERGER' and (not target or target == security): raise ValueError('Abweichende Zielkennung angeben.')
@@ -1120,9 +1146,24 @@ class RepositoryV09(RepositoryV07):
             if not target_depot or target_depot == depot or not qty.is_finite() or qty <= 0: raise ValueError('Anderes Zieldepot und positive Stückzahl angeben.')
             if any(t['date'] == day and t.get('depot') == depot and t.get('security') == security and t['kind'] == 'TRANSFER_OUT' for t in self.transactions()):
                 raise ValueError('An diesem Tag liegt bereits eine ausgehende Transferbuchung vor; Doppelzählung vermeiden.')
+        allocation=None
+        if kind in ('SPINOFF','RIGHTS'):
+            if not target or target == security: raise ValueError('Abweichende Zielkennung angeben.')
+            if cost_ratio in (None,''): raise ValueError('Belegte Kostenaufteilung ist erforderlich; 0 nur mit Beleg eingeben.')
+            allocation=Decimal(str(cost_ratio))
+            if not allocation.is_finite() or allocation < 0 or allocation > 1: raise ValueError('Kostenanteil muss zwischen 0 und 1 liegen.')
+        reduction=None
+        if kind == 'CAPITAL_REPAYMENT':
+            if cost_amount in (None,''): raise ValueError('Belegten Kostenminderungsbetrag angeben.')
+            reduction=Decimal(str(cost_amount))
+            if not reduction.is_finite() or reduction <= 0: raise ValueError('Kostenminderung muss positiv sein.')
+            cost_currency=cost_currency.strip().upper()
+            if len(cost_currency)!=3: raise ValueError('ISO-Währung der Kostenminderung angeben.')
         with self.db:
-            self.db.execute('INSERT INTO corporate_actions(day,depot,security,kind,target,target_depot,ratio,units,sequence,source) VALUES(?,?,?,?,?,?,?,?,?,?)',
-                (day,depot,security,kind,target,target_depot,str(factor),str(units) if units is not None else None,int(sequence),source.strip()))
+            self.db.execute('''INSERT INTO corporate_actions(day,depot,security,kind,target,target_depot,ratio,units,sequence,source,cost_ratio,cost_amount,cost_currency)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                (day,depot,security,kind,target,target_depot,str(factor),str(units) if units is not None else None,int(sequence),source.strip(),
+                 str(allocation) if allocation is not None else None,str(reduction) if reduction is not None else None,cost_currency))
 
     def actions(self, start, end):
         rows = [dict(r) for r in self.db.execute('SELECT * FROM corporate_actions WHERE active=1 AND day>? AND day<=? ORDER BY day,sequence,id', (start,end))]

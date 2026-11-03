@@ -110,7 +110,8 @@ class PortfolioRepository:
                         amount='0', currency='', source=action['source'], target=action['target'],
                         target_depot=action['target_depot'],
                         target_account=accounts.get(account_key(action['target_depot'])) if action['target_depot'] else source_account,
-                        units=action['units'],
+                        units=action['units'], cost_ratio=action.get('cost_ratio'),
+                        cost_amount=action.get('cost_amount'), cost_currency=action.get('cost_currency'),
                         external_id='action-' + str(action['id']), sequence=action['sequence']))
         result = apply_daily_values(self.db, advance_holdings(rows, snapshots, movements, as_of))
         return [p for p in result if not account or account_key(p['account']) == account_key(account)]

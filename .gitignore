@@ -101,6 +101,8 @@ tools/*.pdf
 # --- Persoenliche Kontodaten in Reports (Repo ist oeffentlich!) ---
 test_reports/comdirect_importtest_*.csv
 test_reports/pdf_parser_audit/*_recheck*/
+# PDF-Lab-Audit V3 enthaelt echte Parserwerte/Kontodaten
+test_reports/pdf_lab_audit_v3/
 
 # --- Sonstiges ----------------------------------------------
 *.bak

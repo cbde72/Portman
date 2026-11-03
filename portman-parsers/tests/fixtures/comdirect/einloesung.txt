@@ -1,0 +1,7 @@
+comdirect
+Abrechnung Einlösung
+Depotnummer: 123456
+Stk. 1,000 Anleihe DE0008474511
+Gutschrift EUR 100,00
+Valuta 30.06.2026
+DE00 0000 0000 0000 0000 01

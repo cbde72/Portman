@@ -100,6 +100,11 @@ def _ensure_booking_reconciliation(db):
             in_ref TEXT UNIQUE NOT NULL,
             note TEXT NOT NULL,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP)''')
+        action_columns = {row[1] for row in db.execute('PRAGMA table_info(corporate_actions)')}
+        for name, definition in (
+                ('cost_ratio', 'TEXT'), ('cost_amount', 'TEXT'), ('cost_currency', 'TEXT')):
+            if name not in action_columns:
+                db.execute(f'ALTER TABLE corporate_actions ADD COLUMN {name} {definition}')
         if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='v09_revision'").fetchone():
             for operation in ('INSERT', 'UPDATE', 'DELETE'):
                 db.execute(f'''CREATE TRIGGER IF NOT EXISTS revision09_transaction_reconciliations_{operation}

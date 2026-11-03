@@ -1,0 +1,9 @@
+comdirect
+Abrechnung Ertragsgutschrift
+Depotnummer: 123456
+Stk. 2,500 Fondsname DE0008474511
+Kapitalertragsteuer EUR 2,50
+Solidaritätszuschlag EUR 0,14
+Gutschrift EUR 97,36
+Valuta 15.06.2026
+DE00 0000 0000 0000 0000 01

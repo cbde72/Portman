@@ -33,7 +33,7 @@ def advance_holdings(rows, snapshots, transactions, as_of):
     for key in positions:
         split_groups[key[:2]].add(key)
     for tx in sorted(transactions, key=lambda t: (t['date'], t.get('sequence', 1000000), execution_order(t))):
-        if tx['kind'] not in ('BUY', 'SELL', 'SPLIT', 'MERGER', 'TRANSFER') or tx['date'] > as_of:
+        if tx['kind'] not in ('BUY', 'SELL', 'SPLIT', 'MERGER', 'TRANSFER', 'SPINOFF', 'RIGHTS', 'CAPITAL_REPAYMENT') or tx['date'] > as_of:
             continue
         if tx['kind'] == 'SPLIT':
             for key in tuple(split_groups.get((account_key(tx['depot']), tx['security']), ())):
@@ -46,6 +46,23 @@ def advance_holdings(rows, snapshots, transactions, as_of):
                     p.update(quantity=str(Decimal(p['quantity']) * Decimal(tx['quantity'])),
                              as_of=tx['date'], period=tx['date'][:7], date_basis='transactions',
                              quantity_source=tx['source'])
+            continue
+        if tx['kind'] in ('SPINOFF','RIGHTS'):
+            source_depot=account_key(tx['depot']); target_depot=account_key(tx.get('target_depot') or tx['depot'])
+            ratio=Decimal(tx['quantity'])
+            for key in tuple(split_groups.get((source_depot,tx['security']),())):
+                p=positions.get(key)
+                if p is None or p.get('quantity') is None: continue
+                target_key=(target_depot,tx['target'],key[2]); target=positions.get(target_key)
+                received=Decimal(p['quantity'])*ratio
+                if target is None:
+                    target=dict(p); target.update(key=tx['target'],isin=tx['target'].removeprefix('ISIN:'),
+                        depot=tx.get('target_depot') or tx['depot'],quantity='0',cost=None)
+                    positions[target_key]=target; split_groups[target_key[:2]].add(target_key)
+                target['quantity']=str(Decimal(target['quantity'])+received)
+                for item in (p,target): item.update(as_of=tx['date'],period=tx['date'][:7],quantity_source=tx['source'],date_basis='transactions')
+            continue
+        if tx['kind']=='CAPITAL_REPAYMENT':
             continue
         if tx['kind'] in ('MERGER', 'TRANSFER'):
             source_depot = account_key(tx['depot'])
@@ -131,7 +148,7 @@ def advance_holdings(rows, snapshots, transactions, as_of):
 
 
 def apply_costs(positions, snapshots, transactions, as_of):
-    trades = [t for t in transactions if t['kind'] in ('BUY', 'SELL', 'SPLIT', 'MERGER', 'TRANSFER') and t['date'] <= as_of]
+    trades = [t for t in transactions if t['kind'] in ('BUY', 'SELL', 'SPLIT', 'MERGER', 'TRANSFER', 'SPINOFF', 'RIGHTS', 'CAPITAL_REPAYMENT') and t['date'] <= as_of]
     depots = {account_key(p['depot']) for p in positions}
     day_groups = defaultdict(list)
     for t in trades:
@@ -172,6 +189,25 @@ def apply_costs(positions, snapshots, transactions, as_of):
                         lot[0] *= ratio
                         if lot[1] is not None:
                             lot[1] /= ratio
+            continue
+        if event['kind'] in ('SPINOFF','RIGHTS'):
+            ratio=Decimal(event['quantity']); allocation=Decimal(event['cost_ratio'])
+            target_depot=account_key(event.get('target_depot') or event['depot'])
+            for key in [k for k in lots if k[:2]==(depot,event['security'])]:
+                created=[]
+                for lot in lots[key]:
+                    created.append([lot[0]*ratio,lot[1]*allocation/ratio if lot[1] is not None else None,lot[2]])
+                    if lot[1] is not None: lot[1]*=(1-allocation)
+                target=(target_depot,event['target'],key[2]); lots.setdefault(target,[]).extend(created); lots[target].sort(key=lambda lot:lot[2])
+            continue
+        if event['kind']=='CAPITAL_REPAYMENT':
+            for key in [k for k in lots if k[:2]==(depot,event['security']) and k[2]==event.get('cost_currency','EUR')]:
+                known=[lot for lot in lots[key] if lot[1] is not None]; quantity=sum((lot[0] for lot in known),Decimal(0))
+                reduction=Decimal(event['cost_amount']); total=sum((lot[0]*lot[1] for lot in known),Decimal(0))
+                if quantity and reduction<=total:
+                    for lot in known: lot[1]-=reduction/quantity
+                else:
+                    for lot in lots[key]: lot[1]=None
             continue
         if event['kind'] in ('MERGER', 'TRANSFER'):
             ratio = Decimal(event['quantity'])
