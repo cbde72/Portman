@@ -1,6 +1,6 @@
 from decimal import Decimal
 from pathlib import Path
-from portman_parsers.api import PdfDocument, PdfPage
+from portman_parsers.api import MissingValue, PdfDocument, PdfPage
 from portman_parsers.plugins import ComdirectFinanzreportPlugin, ComdirectPlugin
 
 CASES={"dividendengutschrift":"Abrechnung Dividendengutschrift","ertragsgutschrift":"Abrechnung Ertragsgutschrift","einloesung":"Abrechnung Einlösung","kosteninformation_mifid_ii":"Kosteninformation zum Wertpapiergeschäft 10,00 EUR","investment_ausschuettung":"Steuerliche Behandlung: Ausländische Investment-Ausschüttung","dividende_steuer_inland":"Steuerliche Behandlung: Inländische Dividende","vorabpauschale":"Steuerliche Behandlung: Vorabpauschale Vorabpauschale EUR 10,00","wertpapierkauf":"Wertpapierkauf","wertpapierverkauf":"Wertpapierverkauf"}
@@ -247,3 +247,78 @@ Abrechnung Dividendengutschrift"""
  plugin=ComdirectPlugin(); source=PdfDocument("no-security-movement","c"*64,(PdfPage(1,text),))
  event=plugin.parse(source,plugin.detect(source)[0]).events[0]
  assert event.kind=="DIVIDEND" and not event.security_movements and not event.trades
+
+
+PURCHASE_CASES=(
+ ("07.01.2026","0,006","4.152,91","24,92","spaced"),
+ ("09.02.2026","0,006","3.982,51","23,90","spaced"),
+ ("09.03.2026","0,006","3.843,17","23,06","spaced"),
+ ("07.04.2026","0,006","3.996,05","23,98","spaced"),
+ ("07.05.2026","0,006","3.648,63","21,89","joined"),
+ ("01.06.2026","0,006","3.662,71","21,98","joined"),
+ ("01.07.2026","0,007","3.471,31","24,30","joined"),
+)
+
+
+def purchase_document(date_value,quantity,price,market,layout="spaced",tax_quantity="0"):
+ settlement=(f"Nennwert Zum Kurs von\nSt. {quantity} EUR {price}\nKurswert : EUR {market}"
+             if layout=="spaced" else
+             f"Nennwert ZumKursvonSt.{quantity} EUR{price}Kurswert :EUR {market}")
+ text=f"""comdirect
+Wertpapierkauf
+Depotnummer: 123456
+WKN: LS9AVX
+ISIN: DE000LS9AVX3
+{settlement}
+Valuta {date_value}
+Zu Ihren Lasten EUR {market}
+Steuerliche Behandlung: Wertpapierkauf Nr. 91182283 vom {date_value}
+Stk. {tax_quantity} LANG+SCHWARZ O.E. INDEX , WKN / ISIN: LS9AVX / DE000LS9AVX3"""
+ return PdfDocument("doc-"+date_value,"a"*64,(PdfPage(1,text),))
+
+
+def test_all_seven_comdirect_purchase_quantities_are_exact():
+ plugin=ComdirectPlugin()
+ for date_value,quantity,price,market,layout in PURCHASE_CASES:
+  source=purchase_document(date_value,quantity,price,market,layout); result=plugin.parse(source,plugin.detect(source)[0])
+  event=result.events[0]; trade=event.trades[0]; expected=Decimal(quantity.replace(",",".")); amount=Decimal(market.replace(",","."))
+  assert event.kind=="BUY"
+  assert trade.quantity==expected and event.security_movements[0].quantity==expected
+  assert trade.market_value==amount==trade.settlement_amount and event.cash_movements[0].amount==-amount
+  assert (trade.isin,event.security_isin)==("DE000LS9AVX3","DE000LS9AVX3")
+  assert (trade.wkn,event.security_wkn)==("LS9AVX","LS9AVX")
+  assert "COMDIRECT_QUANTITY_MISSING" not in {issue.code for issue in result.issues}
+
+
+def test_decimal_zero_tax_quantity_does_not_override_purchase_quantity():
+ source=purchase_document("07.01.2026","0,006","4.152,91","24,92","spaced","0,000")
+ event=ComdirectPlugin().parse(source,ComdirectPlugin().detect(source)[0]).events[0]
+ assert event.trades[0].quantity==Decimal("0.006") and event.security_movements[0].quantity==Decimal("0.006")
+
+
+def test_quantity_without_nennwert_still_uses_stk_line():
+ text="""comdirect
+Wertpapierkauf
+Stk. 0,125
+WKN: ABC123
+ISIN: DE0008474511
+Valuta 01.07.2026
+Zu Ihren Lasten EUR 126,50"""
+ source=PdfDocument("fallback-quantity","b"*64,(PdfPage(1,text),)); plugin=ComdirectPlugin()
+ event=plugin.parse(source,plugin.detect(source)[0]).events[0]
+ assert event.trades[0].quantity==Decimal("0.125") and event.security_movements[0].quantity==Decimal("0.125")
+
+
+def test_tax_line_zero_alone_is_not_a_purchase_quantity():
+ for tax_line in ("Stk. 0 LANG+SCHWARZ O.E. INDEX","Stk. 0,000 LANG+SCHWARZ O.E. INDEX"):
+  text=f"""comdirect
+Wertpapierkauf
+WKN: LS9AVX
+ISIN: DE000LS9AVX3
+{tax_line}
+Valuta 07.01.2026
+Zu Ihren Lasten EUR 24,92"""
+  source=PdfDocument("zero-tax-quantity","c"*64,(PdfPage(1,text),)); plugin=ComdirectPlugin()
+  result=plugin.parse(source,plugin.detect(source)[0]); event=result.events[0]
+  assert event.trades[0].quantity is MissingValue.NOT_FOUND and not event.security_movements
+  assert "COMDIRECT_QUANTITY_MISSING" in {issue.code for issue in result.issues}

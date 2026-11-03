@@ -10,7 +10,7 @@ from portman_parsers.utilities import stable_id
 A=r"\d[\d.]*,\d+"; D=r"\d{2}\.\d{2}\.\d{4}"
 TITLES=(("kosteninformation_mifid_ii",r"Kosteninformation\s+zum\s+Wertpapiergesch"),("vorabpauschale",r"Steuerliche\s+Behandlung:\s*Vorabpauschale"),("investment_ausschuettung",r"Steuerliche\s*Behandlung:.*Investment-Aussch"),("dividende_steuer_inland",r"Steuerliche\s*Behandlung:.*Dividende"),("dividendengutschrift",r"Abrechnung\s*Dividendengutschrift"),("ertragsgutschrift",r"Abrechnung\s*Ertragsgutschrift"),("einloesung",r"Abrechnung\s*Einl[öo]sung"),("wertpapierkauf",r"Wertpapierkauf"),("wertpapierverkauf",r"Wertpapierverkauf"))
 ISIN=re.compile(r"\b[A-Z]{2}[A-Z0-9]{9}\d\b"); IBAN=re.compile(r"DE(?:\s*\d){20}"); DEPOT=re.compile(r"Depot(?:nummer|nr\.)\s*:?\s*(\d+(?:\s+\d+)?)",re.I)
-QTY=re.compile(r"(?:Stk\.?|STK)\s*("+A+r")",re.I); VALUTA=re.compile(r"(?:Valuta|zahlbar\s+ab)\s*("+D+r")",re.I)
+QTY=re.compile(r"(?:Stk\.?|STK)\s*("+A+r")",re.I); NENNWERT_QTY=re.compile(r"Nennwert\s*Zum\s*(?:Misch)?Kurs\s*von\s*(?:St\.?|Stk\.?)\s*("+A+r")",re.I); VALUTA=re.compile(r"(?:Valuta|zahlbar\s+ab)\s*("+D+r")",re.I)
 WKN=re.compile(r"\bWKN\s*:?[ \t]*([A-Z0-9]{6})\b",re.I)
 BANK_REFERENCE=re.compile(r"\bReferenz(?:\s*[- ]?\s*(?:Nr\.?|nummer))\s*:?\s*([A-Z0-9]+)\b",re.I)
 TRADE_DATE=re.compile(r"(?:Geschäftstag|Schlusstag)\s*:?[ \t]*("+D+r")",re.I)
@@ -184,7 +184,7 @@ class ComdirectPlugin:
   return self.transaction(doc,d,evidence,ev,depots,depot_id,isin,eid,security_name,column_wkn,column_isin,identity)
  def transaction(self,doc,d,evidence,ev,depots,depot_id,isin,eid,security_name=None,column_wkn=None,column_isin=None,identity=None):
   text=doc.text; h=d.handler_id; kind="BUY" if h=="wertpapierkauf" else "SELL" if h=="wertpapierverkauf" else "REDEMPTION" if h=="einloesung" else "DIVIDEND"
-  q=QTY.search(text); qty=dec(q.group(1)) if q else None; settlement=SETTLE.search(text); valuta=VALUTA.search(text); event_id=stable_id("event",doc.document_id,h,isin,settlement.group("a") if settlement else "")
+  qm=NENNWERT_QTY.search(text) or QTY.search(text); qty=dec(qm.group(1)) if qm and dec(qm.group(1))>0 else None; settlement=SETTLE.search(text); valuta=VALUTA.search(text); event_id=stable_id("event",doc.document_id,h,isin,settlement.group("a") if settlement else "")
   issues=[]
   identity = identity or _SecurityIdentity()
   if identity.status in {"AMBIGUOUS", "INVALID"}:
