@@ -160,6 +160,39 @@ def test_valid_zero_is_exported_and_missing_values_stay_empty(tmp_path):
     assert "None" not in values and "NOT_FOUND" not in values
 
 
+def test_file_name_hyperlink_path_and_layout(tmp_path):
+    """Dateiname als Hyperlink, Pfad am Ende, zentrierte Zellen und Köpfe."""
+    report = purchase_report(tmp_path)
+    result = export_batch_excel([report], tmp_path)
+    source = tmp_path / "kauf.pdf"
+    workbook = load_workbook(result["path"])
+    try:
+        worksheet = workbook["Wertpapierkauf"]
+        headers = [cell.value for cell in worksheet[1]]
+        assert headers[0] == "Datei" and headers[-1] == "Pfad"
+        assert not any(str(value).lower().startswith(("evidence", "training"))
+                       for value in headers)
+        file_cell = worksheet.cell(row=2, column=1)
+        assert file_cell.value == "kauf.pdf"
+        assert worksheet.cell(row=2, column=len(headers)).value == str(source)
+        assert file_cell.hyperlink is not None
+        assert file_cell.hyperlink.target == source.resolve().as_uri()
+        # Gestaltung: Autofilter, fixierte Kopfzeile, fette umbrechende Köpfe,
+        # zentrierte Zellen, gesetzte Breiten und Höhen.
+        assert worksheet.freeze_panes == "A2"
+        assert worksheet.auto_filter.ref is not None
+        assert worksheet.cell(row=1, column=1).font.bold is True
+        assert worksheet.cell(row=1, column=1).alignment.wrap_text is True
+        assert file_cell.alignment.horizontal == "center"
+        assert worksheet.cell(row=2, column=2).alignment.horizontal == "center"
+        assert worksheet.column_dimensions["A"].width is not None
+        assert worksheet.row_dimensions[1].height is not None
+        # Der lange Pfad wird umgebrochen, daher ist die Datenzeile höher.
+        assert worksheet.row_dimensions[2].height > 18
+    finally:
+        workbook.close()
+
+
 def test_version_number_increments_and_never_overwrites(tmp_path):
     first = export_batch_excel([purchase_report(tmp_path)], tmp_path)["path"]
     assert first.name == f"{EXCEL_PREFIX}_v01.xlsx"

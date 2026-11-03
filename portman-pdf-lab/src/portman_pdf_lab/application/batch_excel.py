@@ -1,14 +1,17 @@
 """Automatischer, versionierter Excel-Export für „Run On Folder“-Batchläufe.
 
 Der Export liest ausschließlich die vorhandenen Batch-Berichte (DTO-Dicts) und
-schreibt je erkanntem Dokumenttyp ein eigenes Tabellenblatt.  Fehlende Werte
-bleiben leere Zellen; Platzhalter wie ``None``, ``NOT_FOUND`` oder ``0`` werden
-nicht erzeugt.  Es gibt keine erneute PDF-Analyse, keine Zwischen-CSV und keine
-Schreibzugriffe auf SQLite, Referenzwerte oder Trainingsdaten.
+schreibt je erkanntem Dokumenttyp ein eigenes Tabellenblatt.  Die Spalte „Datei“
+enthält nur den Dateinamen als Hyperlink; der vollständige Pfad steht in der
+letzten Spalte „Pfad“.  Fehlende Werte bleiben leere Zellen; Platzhalter wie
+``None``, ``NOT_FOUND`` oder ``0`` werden nicht erzeugt.  Es gibt keine erneute
+PDF-Analyse, keine Zwischen-CSV und keine Schreibzugriffe auf SQLite,
+Referenzwerte oder Trainingsdaten.
 """
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -207,6 +210,26 @@ def _issue_codes(report: Mapping[str, Any]) -> str:
     return "; ".join(str(item.get("code") or "") for item in issues if isinstance(item, Mapping))
 
 
+def _source_parts(report: Mapping[str, Any]) -> tuple[str, str]:
+    """Liefert (Dateiname, vollständiger Pfad) des Quelldokuments."""
+    raw = _dig(report, "source")
+    if raw is None or _is_missing(raw):
+        return "", ""
+    text = str(raw)
+    return Path(text).name, text
+
+
+def _file_uri(report: Mapping[str, Any]) -> str | None:
+    """Datei-URI für den Excel-Hyperlink, oder ``None`` ohne Quellpfad."""
+    _, text = _source_parts(report)
+    if not text:
+        return None
+    try:
+        return Path(text).resolve().as_uri()
+    except (OSError, ValueError):
+        return None
+
+
 def next_excel_path(folder: str | Path) -> Path:
     """Nächste freie Versionsnummer; bestehende Dateien werden nie überschrieben."""
     directory = Path(folder)
@@ -230,40 +253,71 @@ def _sheet_rows(report: Mapping[str, Any], sheet: str):
     erhält eine Zeile mit leeren fachlichen Zellen.
     """
     result = report.get("result") if isinstance(report.get("result"), Mapping) else {}
+    filename, source_path = _source_parts(report)
     if sheet == "Nicht erkannt":
-        headers = [header for header, _ in _UNRECOGNIZED_COLUMNS]
-        row = [str(_dig(report, "source") or ""),
+        headers = [header for header, _ in _UNRECOGNIZED_COLUMNS] + ["Pfad"]
+        row = [filename,
                str(_dig(report, "error") or ""),
                str(_dig(report, "message") or ""),
-               _issue_codes(report)]
+               _issue_codes(report),
+               source_path]
         return headers, [row]
     columns = _TYPE_COLUMNS.get(sheet)
     if columns is None:
         # Unbekannter, aber erkannter Dokumenttyp: dynamische, evidenzgestützte
         # Spalten wie im CSV-Export plus Datei und Dokumenttyp.
         values = flatten_evidence_values(result)
-        headers = [*_BASE_HEADERS, *values.keys()]
-        rows = [[str(_dig(report, "source") or ""),
+        headers = [*_BASE_HEADERS, *values.keys(), "Pfad"]
+        rows = [[filename,
                  str((report.get("detection") or {}).get("document_type") or ""),
-                 *values.values()]]
+                 *values.values(),
+                 source_path]]
         return headers, rows
-    headers = [*_BASE_HEADERS, *(header for header, _ in columns)]
+    headers = [*_BASE_HEADERS, *(header for header, _ in columns), "Pfad"]
     events = result.get("events") if isinstance(result.get("events"), list) else []
     rows = []
     for event in events or [{}]:
         scope = event if isinstance(event, Mapping) else {}
-        rows.append([str(_dig(report, "source") or ""),
+        rows.append([filename,
                      str((report.get("detection") or {}).get("document_type") or ""),
-                     *[_cell_text(scope, paths) for _, paths in columns]])
+                     *[_cell_text(scope, paths) for _, paths in columns],
+                     source_path])
     return headers, rows
 
 
 def _style_sheet(worksheet) -> None:
+    """Zentriert alle Zellen, formatiert den Kopf und optimiert die Größen."""
+    from openpyxl.styles import Alignment, Font
+
+    alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    for cell in worksheet[1]:
+        cell.font = Font(bold=True)
+        cell.alignment = alignment
+    for row in worksheet.iter_rows(min_row=2):
+        for cell in row:
+            cell.alignment = alignment
+
+    # Spaltenbreite: längster Zellinhalt, begrenzt, damit lange Pfade umbrechen.
+    for column_cells in worksheet.columns:
+        longest = max((len(str(cell.value or "")) for cell in column_cells), default=0)
+        width = min(max(10, longest + 2), 40)
+        worksheet.column_dimensions[column_cells[0].column_letter].width = width
+
+    # Zeilenhöhe: Anzahl der durch den Umbruch entstehenden Zeilen.
+    for row_index, row in enumerate(worksheet.iter_rows(), start=1):
+        lines = 1
+        for cell in row:
+            text = str(cell.value or "")
+            if not text:
+                continue
+            width = worksheet.column_dimensions[cell.column_letter].width or 10
+            wrapped = sum(max(1, math.ceil(len(part) / max(1, width - 1)))
+                          for part in text.split("\n"))
+            lines = max(lines, wrapped)
+        worksheet.row_dimensions[row_index].height = 15 * lines + 3
+
     worksheet.auto_filter.ref = worksheet.dimensions
     worksheet.freeze_panes = "A2"
-    for column_cells in worksheet.columns:
-        length = max(len(str(cell.value or "")) for cell in column_cells)
-        worksheet.column_dimensions[column_cells[0].column_letter].width = max(12, min(60, length + 2))
 
 
 def export_batch_excel(reports: Sequence[Mapping[str, Any]], folder: str | Path) -> dict[str, Any]:
@@ -292,6 +346,7 @@ def export_batch_excel(reports: Sequence[Mapping[str, Any]], folder: str | Path)
                 worksheet = workbook.create_sheet(sheet[:MAX_SHEET_NAME_LENGTH])
                 headers: list[str] = []
                 rows: list[list[Any]] = []
+                row_reports: list[Mapping[str, Any]] = []
                 for report in grouped[sheet]:
                     try:
                         sheet_headers, sheet_rows = _sheet_rows(report, sheet)
@@ -301,11 +356,17 @@ def export_batch_excel(reports: Sequence[Mapping[str, Any]], folder: str | Path)
                     if not headers:
                         headers = sheet_headers
                     rows.extend(sheet_rows)
+                    row_reports.extend([report] * len(sheet_rows))
                 if not headers:
                     continue
                 worksheet.append(headers)
-                for row in rows:
-                    worksheet.append([value if value not in {None} else "" for value in row])
+                for report, row in zip(row_reports, rows):
+                    worksheet.append([value if value is not None else "" for value in row])
+                    cell = worksheet.cell(row=worksheet.max_row, column=1)
+                    uri = _file_uri(report)
+                    if uri:
+                        cell.hyperlink = uri
+                        cell.style = "Hyperlink"
                 _style_sheet(worksheet)
             path.parent.mkdir(parents=True, exist_ok=True)
             workbook.save(path)
