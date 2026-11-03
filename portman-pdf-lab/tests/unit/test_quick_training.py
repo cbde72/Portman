@@ -42,7 +42,10 @@ def test_complete_quick_training_stays_in_field_analysis_and_separates_release(t
     application = app(); window, repository, pdf = prepared(tmp_path)
     try:
         assert window.ui_mode.currentText() == "Schnell"
-        venue = window.field_analysis.row_for_path("events[0].trades[0].security_name")
+        # A field the parser genuinely cannot extract: annotations must not
+        # turn it into a recognised value on their own.
+        venue = window.field_analysis.row_for_path("events[0].trades[0].gross_amount")
+        assert venue.status.value != "ERKANNT"
         window._start_field_training(venue)
         assert window.tabs.currentWidget() is window.field_analysis and not window.quick_training.isHidden()
         assert window.quick_training.context.parser_id == "user.comdirect-ertraege"

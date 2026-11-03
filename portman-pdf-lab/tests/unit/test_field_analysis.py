@@ -32,6 +32,7 @@ Valuta 04.02.2026
 Zu Ihren Lasten EUR 126,50"""
 
 VENUE_PATH = "events[0].trades[0].gross_amount"
+MISSING_PATH = "events[0].trades[0].trade_date"
 
 
 def app():
@@ -155,11 +156,11 @@ def test_annotation_and_candidate_never_change_parser_recognition(tmp_path):
 
     absent = repository.create_annotation(
         document_id, "user.comdirect-ertraege", "wertpapierkauf", 1, "",
-        "events[0].trades[0].security_name", None, "MISSING", "MISSING",
+        MISSING_PATH, None, "MISSING", "MISSING",
         "APPROVED", "tester")
     rows = build_field_analysis_rows(
         report, catalog, repository.annotations_for_document(document_id))
-    missing = row_for(rows, "events[0].trades[0].security_name")
+    missing = row_for(rows, MISSING_PATH)
     assert missing.annotation_id == absent
     assert missing.status == RecognitionStatus.MISSING
     assert missing.status_text == "Nachweislich nicht im PDF vorhanden"
