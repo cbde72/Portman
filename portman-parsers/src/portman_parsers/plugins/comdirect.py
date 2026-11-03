@@ -10,6 +10,15 @@ from portman_parsers.utilities import stable_id
 A=r"\d[\d.]*,\d+"; D=r"\d{2}\.\d{2}\.\d{4}"
 TITLES=(("kosteninformation_mifid_ii",r"Kosteninformation\s+zum\s+Wertpapiergesch"),("vorabpauschale",r"Steuerliche\s+Behandlung:\s*Vorabpauschale"),("investment_ausschuettung",r"Steuerliche\s*Behandlung:.*Investment-Aussch"),("dividende_steuer_inland",r"Steuerliche\s*Behandlung:.*Dividende"),("dividendengutschrift",r"Abrechnung\s*Dividendengutschrift"),("ertragsgutschrift",r"Abrechnung\s*Ertragsgutschrift"),("einloesung",r"Abrechnung\s*Einl[öo]sung"),("wertpapierkauf",r"Wertpapierkauf"),("wertpapierverkauf",r"Wertpapierverkauf"))
 ISIN=re.compile(r"\b[A-Z]{2}[A-Z0-9]{9}\d\b"); IBAN=re.compile(r"DE(?:\s*\d){20}"); DEPOT=re.compile(r"Depot(?:nummer|nr\.)\s*:?\s*(\d+(?:\s+\d+)?)",re.I)
+# comdirect klebt Kennungen und Namen ohne Trennzeichen aneinander, z. B.
+# "A0H074iSh.DJ ..." oder "DE0007164600Inhaber-Aktien".  Deshalb werden
+# Kandidaten ohne nachlaufende Wortgrenze gesucht und anschließend validiert.
+ISIN_CANDIDATE=re.compile(r"[A-Z]{2}[A-Z0-9]{9}[0-9]")
+WKN_CANDIDATE=re.compile(r"(?<![A-Z0-9])[A-Z0-9]{6}")
+IDENTITY_HEADER=re.compile(r"Wertpapier\s*-?\s*Bezeichnung.*?(?:WKN|WPKNR)\s*/\s*ISIN",re.I)
+IDENTITY_ROW_STOP=re.compile(r"^(?:Emissionsland|zahlbar|Abrechnung|Bruttobetrag|Zu\s+Ihren|Verrechnung|Information|Ihre\s+comdirect|Gesch(?:ä|ae)ftstag|Schlusstag|Ausf(?:ü|ue)hrungstag|Ausf(?:ü|ue)hrung|Depot|IBAN|Valuta|Kurs|Kurswert|Provision|Steuer|Referenz|F(?:ä|ae)lligkeit|Nennwert|Gesch(?:ä|ae)ftsnummer|Rechnungsnummer|Kundennr|BLZ|Telefon)\b",re.I)
+IDENTITY_ROW_PREFIX=re.compile(r"^\s*(?:per\s+\d{2}\.\d{2}\.\d{4}|(?:STK|Stk)\.?\s*-?\s*[\d.,]+)\s*",re.I)
+IDENTITY_REASON={"PARTIAL":"nur WKN oder Name erkannt","AMBIGUOUS":"mehrere Kennungen im selben Wertpapierblock","INVALID":"ISIN-Prüfziffer oder ISIN-Format ungültig"}
 QTY=re.compile(r"(?:Stk\.?|STK)\s*("+A+r")",re.I); VALUTA=re.compile(r"(?:Valuta|zahlbar\s+ab)\s*("+D+r")",re.I)
 WKN=re.compile(r"\bWKN\s*:?[ \t]*([A-Z0-9]{6})\b",re.I)
 BANK_REFERENCE=re.compile(r"\bReferenz(?:\s*[- ]?\s*(?:Nr\.?|nummer))?\s*:?\s*([A-Z0-9][A-Z0-9\s]*?)(?=\s*(?:Referenz|Depotnummer|Depotnr|Kundennummer|comdirect)|[^A-Z0-9\s]|\n\s*\n|$)",re.I)
@@ -31,9 +40,10 @@ class _SecurityIdentity:
   name: str | None = None
   wkn: str | None = None
   isin: str | None = None
-  status: str = "MISSING"
+  status: str = "NOT_FOUND"
   reason: str = ""
   name_rows: tuple[str, ...] = ()
+  name_source: str | None = None
 
 
 def _valid_isin(value):
@@ -60,59 +70,130 @@ def _join_spaced_letters(value):
   return value
 
 
-def _identity_name(line, marker, row_index):
-  before = line[:marker].strip()
-  parts = [part.strip() for part in re.split(r"\s{2,}", before) if part.strip()]
-  if len(parts) > 1:
-   value = parts[-1]
-  else:
-   value = before
-   if row_index == 0:
-    value = re.sub(r"^per\s+\d{2}\.\d{2}\.\d{4}\s+", "", value, flags=re.I)
-   else:
-    value = re.sub(r"^STK\.?\s*[\d.,]+\s+", "", value, flags=re.I)
-  return _join_spaced_letters(value)
+def _isin_candidates(value):
+  """Return ISIN candidates with offsets, tolerating glued surrounding text.
+
+  A candidate must not be embedded in a longer digit run.  Checksum validity
+  is returned separately so invalid identifiers can be reported as INVALID
+  instead of silently disappearing.
+  """
+  result = []
+  for match in ISIN_CANDIDATE.finditer(value):
+    start, end = match.span()
+    if start and value[start - 1].isdigit():
+     continue
+    if end < len(value) and value[end].isdigit():
+     continue
+    candidate = match.group(0).upper()
+    result.append((candidate, start, end, _valid_isin(candidate)))
+  return result
+
+
+def _wkn_candidates(value, isin_spans):
+  """Find WKN candidates without reusing characters of an ISIN.
+
+  A WKN is six alphanumeric characters and always contains at least one digit.
+  The missing trailing word boundary is intentional: comdirect writes
+  ``716460SAP SE`` and ``A0H074iSh.DJ ...``.
+  """
+  result = []
+  for match in WKN_CANDIDATE.finditer(value):
+    candidate = match.group(0).upper()
+    if not any(char.isdigit() for char in candidate):
+     continue
+    if match.end() < len(value) and value[match.end()].isdigit():
+     continue
+    if any(match.start() < end and start < match.end() for start, end in isin_spans):
+     continue
+    result.append((candidate, match.start(), match.end()))
+  return result
+
+
+def _identity_fragments(row, isins, wkns):
+  """Split an identity row into name fragments around all identifiers."""
+  spans = sorted({(start, end) for _, start, end, _ in isins} |
+                 {(start, end) for _, start, end in wkns})
+  parts = []
+  cursor = 0
+  for start, end in spans:
+   if cursor < start:
+    parts.append(row[cursor:start])
+   cursor = max(cursor, end)
+  if cursor < len(row):
+   parts.append(row[cursor:])
+  fragments = []
+  for part in parts:
+   part = IDENTITY_ROW_PREFIX.sub("", part).strip(" \t,;")
+   if part and re.search(r"[A-Za-zÄÖÜäöüß]", part):
+    fragments.append(part)
+  return fragments
+
+
+def _strip_country_artifact(fragment, country):
+  """Drop the country prefix that comdirect places before the ISIN row.
+
+  Only a standalone trailing token equal to the ISIN country is removed.
+  Legal suffixes such as ``SE`` are never treated as artefacts.
+  """
+  if country and country != "SE" and re.search(rf"\s{re.escape(country)}$", fragment):
+   return re.sub(rf"\s{re.escape(country)}$", "", fragment).strip()
+  return fragment
 
 
 def _extract_comdirect_security_identity(text, layout_text=None):
-  """Extract one identity block, validating both the column and ISIN."""
+  """Extract one validated identity block, including glued identifiers."""
   source = layout_text or text
   lines = source.splitlines()
   for index, header in enumerate(lines):
-   if not re.search(r"Wertpapier\s*-?\s*Bezeichnung", header, re.I) or not re.search(r"WKN\s*/\s*ISIN", header, re.I):
+   if not IDENTITY_HEADER.search(header):
     continue
    rows = []
-   for line in lines[index + 1:index + 8]:
-    if not line.strip() or re.search(r"(?:Abrechnung|zahlbar|Zu Ihren|Gutschrift)", line, re.I):
+   for line in lines[index + 1:index + 6]:
+    if not line.strip() or IDENTITY_ROW_STOP.match(line.strip()):
      break
     rows.append(line)
-    if len(rows) == 2:
+    if len(rows) == 4:
      break
-   wkn_hits = []
-   isin_hits = []
-   for row_index, line in enumerate(rows):
-    for match in re.finditer(r"(?<![A-Z0-9])([A-Z0-9]{6})(?![A-Z0-9])", line):
-     wkn_hits.append((match.group(1).upper(), line, match.start(), row_index))
-    for match in re.finditer(r"(?<![A-Z0-9])([A-Z]{2}[A-Z0-9]{9}\d)(?![A-Z0-9])", line, re.I):
-     value = match.group(1).upper()
-     isin_hits.append((value, line, match.start(), row_index, _valid_isin(value)))
-   valid_isins = [item for item in isin_hits if item[4]]
-   invalid_isins = [item for item in isin_hits if not item[4]]
-   if len(wkn_hits) > 1 or len(valid_isins) > 1:
-    return _SecurityIdentity(status="AMBIGUOUS", reason="mehrere Kennungen im selben Wertpapierblock")
-   if invalid_isins and not valid_isins:
-    return _SecurityIdentity(status="INVALID", reason="ISIN-Prüfziffer oder ISIN-Format ungültig")
-   if not wkn_hits and not valid_isins:
+   if not rows:
     continue
-   wkn = wkn_hits[0][0] if wkn_hits else None
-   isin = valid_isins[0][0] if valid_isins else None
-   name_rows = []
-   if wkn_hits:
-    name_rows.append(_identity_name(wkn_hits[0][1], wkn_hits[0][2], wkn_hits[0][3]))
-   if valid_isins:
-    name_rows.append(_identity_name(valid_isins[0][1], valid_isins[0][2], valid_isins[0][3]))
-   name_rows = tuple(item for item in name_rows if item)
-   return _SecurityIdentity(" ".join(dict.fromkeys(name_rows)) or None, wkn, isin, "RECOGNIZED", "", name_rows)
+   parsed = []
+   for row in rows:
+    isins = _isin_candidates(row)
+    raw_isin_spans = [match.span() for match in ISIN_CANDIDATE.finditer(row)]
+    wkns = _wkn_candidates(row, raw_isin_spans)
+    parsed.append((row, isins, wkns))
+   identifier_rows = [position for position, (_, isins, wkns) in enumerate(parsed) if isins or wkns]
+   if not identifier_rows:
+    continue
+   valid_isins = [item for _, isins, _ in parsed for item in isins if item[3]]
+   invalid_isins = [item for _, isins, _ in parsed for item in isins if not item[3]]
+   distinct_isins = tuple(dict.fromkeys(item[0] for item in valid_isins))
+   distinct_wkns = tuple(dict.fromkeys(item[0] for _, _, wkns in parsed for item in wkns))
+   if len(distinct_wkns) > 1 or len(distinct_isins) > 1:
+    return _SecurityIdentity(status="AMBIGUOUS", reason=IDENTITY_REASON["AMBIGUOUS"])
+   if invalid_isins and not valid_isins:
+    return _SecurityIdentity(status="INVALID", reason=IDENTITY_REASON["INVALID"])
+   wkn = distinct_wkns[0] if distinct_wkns else None
+   isin = distinct_isins[0] if distinct_isins else None
+   country = isin[:2] if isin else None
+   fragments = []
+   first_identifier, last_identifier = identifier_rows[0], identifier_rows[-1]
+   for position, (row, isins, wkns) in enumerate(parsed):
+    if isins or wkns:
+     fragments.extend(_identity_fragments(row, isins, wkns))
+    elif position < first_identifier or first_identifier < position < last_identifier:
+     # Namensfortsetzung ohne eigene Kennung, aber keine Fremdzeile danach.
+     continuation = IDENTITY_ROW_PREFIX.sub("", row).strip()
+     if continuation:
+      fragments.append(continuation)
+   name_rows = tuple(dict.fromkeys(
+     cleaned for cleaned in (_join_spaced_letters(_strip_country_artifact(fragment, country))
+                             for fragment in fragments if fragment) if cleaned))
+   name = " ".join(name_rows) or None
+   status = "RECOGNIZED" if isin else "PARTIAL" if (wkn or name) else "NOT_FOUND"
+   reason = IDENTITY_REASON.get(status, "")
+   name_source = rows[identifier_rows[0]] if identifier_rows else None
+   return _SecurityIdentity(name, wkn, isin, status, reason, name_rows, name_source)
   return _SecurityIdentity()
 
 
@@ -202,14 +283,24 @@ class ComdirectPlugin:
   line_name = line_match.group("name").strip() if line_match else None
   line_wkn = line_match.group("wkn").upper() if line_match else None
   line_isin = line_match.group("isin").upper() if line_match and _valid_isin(line_match.group("isin")) else None
-  if not security_name and line_name:
+  identity_conflict = bool(column_isin and line_isin and column_isin != line_isin)
+  if identity_conflict:
+   identity = _SecurityIdentity(identity.name, identity.wkn, None, "AMBIGUOUS", "unterschiedliche ISINs im Dokument", identity.name_rows, identity.name_source)
+  elif line_match and identity.status not in {"AMBIGUOUS", "INVALID"}:
+   # Die Steuerzeile "Stk. n NAME , WKN / ISIN: W / I" ist bei
+   # Sparplan-Abrechnungen vollständiger als ein defekter Tabellenkopf.
+   column_wkn = line_wkn or column_wkn
+   column_isin = line_isin or column_isin
+   status = "RECOGNIZED" if column_isin else "PARTIAL" if (column_wkn or security_name) else "NOT_FOUND"
+   identity = _SecurityIdentity(security_name, column_wkn, column_isin, status, IDENTITY_REASON.get(status, ""), identity.name_rows, identity.name_source)
+  if line_name:
    security_name = line_name
   global_isins = [match.group(0).upper() for match in ISIN.finditer(text) if _valid_isin(match.group(0))]
   other_isins = {value for value in global_isins if value != column_isin and value != line_isin}
   if (column_isin or line_isin) and other_isins:
-   identity = _SecurityIdentity(identity.name, identity.wkn or line_wkn, None, "AMBIGUOUS", "unterschiedliche ISINs im Dokument", identity.name_rows)
-  isin = (column_isin or line_isin) if not other_isins else None
-  if not isin and identity.status == "MISSING" and len(set(global_isins)) == 1:
+   identity = _SecurityIdentity(identity.name, identity.wkn or line_wkn, None, "AMBIGUOUS", "unterschiedliche ISINs im Dokument", identity.name_rows, identity.name_source)
+  isin = None if other_isins or identity.status == "AMBIGUOUS" else (column_isin or line_isin)
+  if not isin and identity.status in {"NOT_FOUND", "MISSING"} and len(set(global_isins)) == 1:
    isin = global_isins[0]
   depot_m=DEPOT.search(text); depot_id=None; depots=()
   if depot_m:
@@ -252,12 +343,16 @@ class ComdirectPlugin:
   settlement=SETTLE.search(text); valuta=VALUTA.search(text); event_id=stable_id("event",doc.document_id,h,isin,settlement.group("a") if settlement else "")
   issues=[]
   identity = identity or _SecurityIdentity()
+  labelled_wkn = next((match.group(1).upper() for match in WKN.finditer(text)), None)
+  if labelled_wkn and not re.fullmatch(r"[A-Z0-9]{6}", labelled_wkn):
+   labelled_wkn = None
+  resolved_wkn = column_wkn or labelled_wkn or (line_match.group("wkn").upper() if line_match else None)
   if identity.status in {"AMBIGUOUS", "INVALID"}:
    issues.append(Issue(stable_id("issue", event_id, "security-identity", identity.status),
                        "COMDIRECT_SECURITY_" + identity.status, IssueSeverity.WARNING,
                        identity.reason or "Wertpapieridentität muss manuell geprüft werden.",
                        event_id=event_id, nature=IssueNature.UNSECURED_ASSIGNMENT))
-  for code,missing,message in (("COMDIRECT_SECURITY_MISSING",not isin,"Wertpapieridentität fehlt."),("COMDIRECT_QUANTITY_MISSING",qty is None,"Stückzahl fehlt."),("COMDIRECT_SETTLEMENT_MISSING",settlement is None,"Settlementbetrag fehlt.")):
+  for code,missing,message in (("COMDIRECT_SECURITY_MISSING",not (isin or resolved_wkn),"Wertpapieridentität fehlt."),("COMDIRECT_QUANTITY_MISSING",qty is None,"Stückzahl fehlt."),("COMDIRECT_SETTLEMENT_MISSING",settlement is None,"Settlementbetrag fehlt.")):
    if missing: issues.append(Issue(stable_id("issue",event_id,code),code,IssueSeverity.WARNING,message,event_id=event_id,nature=IssueNature.MISSING_INFORMATION))
   event_ev=ev("economic_event",settlement if settlement else re.search(next(p for x,p in TITLES if x==h),text,re.I|re.S)); iban=IBAN.search(text); account_id=None; accounts=()
   if iban:
@@ -276,18 +371,16 @@ class ComdirectPlugin:
   comps=tuple(TaxComponent(k,dec(m.group(1)),"EUR") for k,p in TAX for m in [re.search(p,text,re.I)] if m); taxes=(TaxEvent(stable_id("tax",event_id),event_id,"WITHHOLDING",comps,evidence_ids=(event_ev,),depot_id=depot_id,isin=isin,bank_id="comdirect",account_id=account_id),) if comps else ()
   trades=()
   if kind in {"BUY","SELL","REDEMPTION"}:
-   pm=PRICE.search(text); mm=MARKET_VALUE.search(text); gm=GROSS.search(text); fx=FX.search(text); wm=WKN.search(text); nm=NAME.search(text); tm=TRADE_DATE.search(text); xm=EXECUTION_DATE.search(text); dm=TRADE_DAY.search(text)
+   pm=PRICE.search(text); mm=MARKET_VALUE.search(text); gm=GROSS.search(text); fx=FX.search(text); nm=NAME.search(text); tm=TRADE_DATE.search(text); xm=EXECUTION_DATE.search(text); dm=TRADE_DAY.search(text)
    name_value=nm.group(1).strip() if nm else None
    if name_value and not re.sub(r"[/\s]|WPKNR|WKN|ISIN","",name_value,flags=re.I): name_value=None
    if not name_value: name_value=security_name
    price=dec(pm.group("a")) if pm else (dec(exec_match.group("price")) if exec_match else None)
    market=dec(mm.group("a")) if mm else (dec(exec_match.group("market")) if exec_match else None)
-   trades=(SecurityTrade(stable_id("trade",event_id),event_id,kind,name_value or MissingValue.NOT_FOUND,isin or MissingValue.NOT_FOUND,wm.group(1).upper() if wm else MissingValue.NOT_FOUND,qty if qty is not None else MissingValue.NOT_FOUND,date(tm.group(1)) if tm else (date(dm.group(1)) if dm else MissingValue.NOT_FOUND),date(xm.group(1)) if xm else MissingValue.NOT_FOUND,date(valuta.group(1)) if valuta else MissingValue.NOT_FOUND,price if price is not None else MissingValue.NOT_FOUND,(pm.group("cur1") or pm.group("cur2")) if pm and (pm.group("cur1") or pm.group("cur2")) else ("EUR" if price is not None and not pm else MissingValue.NOT_FOUND),market if market is not None else MissingValue.NOT_FOUND,dec(gm.group("a")) if gm else MissingValue.NOT_FOUND,dec(fx.group(1)) if fx else MissingValue.NOT_FOUND,dec(settlement.group("a")) if settlement else MissingValue.NOT_FOUND,settlement.group("cur") if settlement else MissingValue.NOT_FOUND,depot_id,account_id,(event_ev,)),)
-  labelled_wkn = next((match.group(1).upper() for match in WKN.finditer(text)), None)
-  if labelled_wkn and not re.fullmatch(r"[A-Z0-9]{6}", labelled_wkn):
-   labelled_wkn = None
-  resolved_wkn = column_wkn or labelled_wkn or (line_match.group("wkn").upper() if line_match else None)
-  identity_evidence=tuple(ev(label,value,*(identity.name_rows if label=="security_name" else ())) for label,value in (("security_wkn",resolved_wkn),("security_isin",isin),("security_name",security_name)) if value)
+   trades=(SecurityTrade(stable_id("trade",event_id),event_id,kind,name_value or MissingValue.NOT_FOUND,isin or MissingValue.NOT_FOUND,resolved_wkn or MissingValue.NOT_FOUND,qty if qty is not None else MissingValue.NOT_FOUND,date(tm.group(1)) if tm else (date(dm.group(1)) if dm else MissingValue.NOT_FOUND),date(xm.group(1)) if xm else MissingValue.NOT_FOUND,date(valuta.group(1)) if valuta else MissingValue.NOT_FOUND,price if price is not None else MissingValue.NOT_FOUND,(pm.group("cur1") or pm.group("cur2")) if pm and (pm.group("cur1") or pm.group("cur2")) else ("EUR" if price is not None and not pm else MissingValue.NOT_FOUND),market if market is not None else MissingValue.NOT_FOUND,dec(gm.group("a")) if gm else MissingValue.NOT_FOUND,dec(fx.group(1)) if fx else MissingValue.NOT_FOUND,dec(settlement.group("a")) if settlement else MissingValue.NOT_FOUND,settlement.group("cur") if settlement else MissingValue.NOT_FOUND,depot_id,account_id,(event_ev,)),)
+  identity_evidence=tuple(ev(label,(identity.name_source or value) if label=="security_name" else value,
+                             *(identity.name_rows if label=="security_name" else ()))
+                          for label,value in (("security_wkn",resolved_wkn),("security_isin",isin),("security_name",security_name)) if value)
   reference_matches=tuple(BANK_REFERENCE.finditer(text))
   reference_values=tuple(re.sub(r"\s+","",match.group(1)) for match in reference_matches)
   valid_references=tuple(value for value in reference_values if 8 <= len(value) <= 40)
