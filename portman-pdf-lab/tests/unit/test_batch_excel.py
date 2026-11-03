@@ -177,18 +177,18 @@ def test_file_name_hyperlink_path_and_layout(tmp_path):
         assert worksheet.cell(row=2, column=len(headers)).value == str(source)
         assert file_cell.hyperlink is not None
         assert file_cell.hyperlink.target == source.resolve().as_uri()
-        # Gestaltung: Autofilter, fixierte Kopfzeile, fette umbrechende Köpfe,
-        # zentrierte Zellen, gesetzte Breiten und Höhen.
+        # Gestaltung: Autofilter, fixierte Kopfzeile, fette Köpfe ohne
+        # Zeilenumbruch, zentrierte Zellen, gesetzte Breiten und Höhen.
         assert worksheet.freeze_panes == "A2"
         assert worksheet.auto_filter.ref is not None
         assert worksheet.cell(row=1, column=1).font.bold is True
-        assert worksheet.cell(row=1, column=1).alignment.wrap_text is True
+        assert not worksheet.cell(row=1, column=1).alignment.wrap_text
+        assert not file_cell.alignment.wrap_text
         assert file_cell.alignment.horizontal == "center"
         assert worksheet.cell(row=2, column=2).alignment.horizontal == "center"
         assert worksheet.column_dimensions["A"].width is not None
-        assert worksheet.row_dimensions[1].height is not None
-        # Der lange Pfad wird umgebrochen, daher ist die Datenzeile höher.
-        assert worksheet.row_dimensions[2].height > 18
+        assert worksheet.row_dimensions[1].height == 15
+        assert worksheet.row_dimensions[2].height == 15
     finally:
         workbook.close()
 

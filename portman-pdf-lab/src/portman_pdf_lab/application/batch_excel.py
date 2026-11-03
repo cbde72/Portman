@@ -11,7 +11,6 @@ Referenzwerte oder Trainingsdaten.
 
 from __future__ import annotations
 
-import math
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -289,7 +288,7 @@ def _style_sheet(worksheet) -> None:
     """Zentriert alle Zellen, formatiert den Kopf und optimiert die Größen."""
     from openpyxl.styles import Alignment, Font
 
-    alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    alignment = Alignment(horizontal="center", vertical="center")
     for cell in worksheet[1]:
         cell.font = Font(bold=True)
         cell.alignment = alignment
@@ -297,24 +296,14 @@ def _style_sheet(worksheet) -> None:
         for cell in row:
             cell.alignment = alignment
 
-    # Spaltenbreite: längster Zellinhalt, begrenzt, damit lange Pfade umbrechen.
+    # Spaltenbreite am längsten Zellinhalt ausrichten (ohne Textumbruch).
     for column_cells in worksheet.columns:
         longest = max((len(str(cell.value or "")) for cell in column_cells), default=0)
-        width = min(max(10, longest + 2), 40)
-        worksheet.column_dimensions[column_cells[0].column_letter].width = width
+        worksheet.column_dimensions[column_cells[0].column_letter].width = min(max(10, longest + 2), 80)
 
-    # Zeilenhöhe: Anzahl der durch den Umbruch entstehenden Zeilen.
-    for row_index, row in enumerate(worksheet.iter_rows(), start=1):
-        lines = 1
-        for cell in row:
-            text = str(cell.value or "")
-            if not text:
-                continue
-            width = worksheet.column_dimensions[cell.column_letter].width or 10
-            wrapped = sum(max(1, math.ceil(len(part) / max(1, width - 1)))
-                          for part in text.split("\n"))
-            lines = max(lines, wrapped)
-        worksheet.row_dimensions[row_index].height = 15 * lines + 3
+    # Ohne Zeilenumbrüche bleibt jede Zeile einzeilig.
+    for row_index in range(1, worksheet.max_row + 1):
+        worksheet.row_dimensions[row_index].height = 15
 
     worksheet.auto_filter.ref = worksheet.dimensions
     worksheet.freeze_panes = "A2"
