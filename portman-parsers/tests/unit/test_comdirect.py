@@ -57,6 +57,123 @@ def test_buy_and_sell_goldens_preserve_direction_fees_and_tax():
  assert sell.cash_movements[0].amount==Decimal("121.00"); assert sell.security_movements[0].quantity==Decimal("-0.125")
  assert sell.tax_events[0].components[0].amount==Decimal("2.50")
 
+def test_buy_tax_treatment_section_creates_no_withholding():
+ text="""comdirect
+Wertpapierkauf
+Zu Ihren Lasten vor Steuern
+EUR 24,92
+Steuerliche Behandlung: Wertpapierkauf Nr. 1 vom 07.01.2026
+Stk. 0,006 TEST INDEX , WKN / ISIN: LS9AVX / DE000LS9AVX3
+Steuerbemessungsgrundlage EUR 0,00
+Kapitalertragsteuer EUR 0,00
+Solidaritätszuschlag EUR 0,00
+Kirchensteuer EUR 0,00
+abgeführte Steuern EUR 0,00
+Zu Ihren Lasten nach Steuern: EUR -24,92"""
+ source=PdfDocument("buy-tax","f"*64,(PdfPage(1,text),)); plugin=ComdirectPlugin(); event=plugin.parse(source,plugin.detect(source)[0]).events[0]
+ assert event.kind=="BUY"; assert not event.tax_events
+ assert event.cash_movements[0].amount==Decimal("-24.92")
+
+def test_tax_section_does_not_override_quantity_and_market_value():
+ text="""comdirect
+Wertpapierkauf
+Nennwert Zum Kurs von St. 0,006 EUR 3.662,70 Kurswert : EUR 21,98
+Zu Ihren Lasten vor Steuern EUR 21,98
+Steuerliche Behandlung: Wertpapierkauf Nr. 1 vom 07.01.2026
+Stk. 0,010 TEST INDEX , WKN / ISIN: LS9AVX / DE000LS9AVX3
+Kurswert : EUR 99,99
+Zu Ihren Lasten nach Steuern: EUR -21,98"""
+ source=PdfDocument("buy-qty","1"*64,(PdfPage(1,text),)); plugin=ComdirectPlugin(); event=plugin.parse(source,plugin.detect(source)[0]).events[0]
+ assert event.trades[0].quantity==Decimal("0.006"); assert event.security_movements[0].quantity==Decimal("0.006")
+ assert event.trades[0].market_value==Decimal("21.98"); assert event.trades[0].price==Decimal("3662.70")
+
+def test_tax_section_quantity_is_fallback_when_trade_part_is_unreadable():
+ text="""comdirect
+Wertpapierkauf
+Nennwert Zum Kurs von
+��� EUR ���
+Steuerliche Behandlung: Wertpapierkauf Nr. 1 vom 07.01.2026
+Stk. 0,212 TEST FONDS , WKN / ISIN: A2H57N / DE0008474511
+Zu Ihren Lasten vor Steuern: EUR -49,89"""
+ source=PdfDocument("buy-fallback","2"*64,(PdfPage(1,text),)); plugin=ComdirectPlugin(); event=plugin.parse(source,plugin.detect(source)[0]).events[0]
+ assert event.trades[0].quantity==Decimal("0.212"); assert event.trades[0].market_value is MissingValue.NOT_FOUND
+
+# Seite 1 mit Schrift ohne Unicode-Zuordnung (Zeichenfolgen aus echten Abrechnungen, ohne Personendaten)
+CIPHER_GLYPHS={"z":("r","d"),"ü":("v","g")}
+def cipher_buy(sp,day,number,qty,price,market,plain_day,plain_number,plain_qty,plain_market):
+ colon,dot=CIPHER_GLYPHS[sp]
+ return f"""comdirect
+Wertpapierkauf
+Geschäftsnummer{sp*3}{colon}{sp}{number[:2]}{sp}{number[2:]}
+Geschäftstag{sp*6}{colon}{sp}{day}{sp*8}
+Nennwert Zum Kurs von
+St{dot}{sp}{qty}{sp*17}EUR{sp*2}{price}{sp*12}
+{sp*26}Kurswert{sp*20}{colon}{sp}EUR{sp*15}{market}{sp*8}
+Steuerliche Behandlung: Wertpapierkauf Nr. {plain_number} vom {plain_day}
+Stk. {plain_qty} TEST WERTPAPIER , WKN / ISIN: LYX05A / LU2090063673
+Zu Ihren Lasten vor Steuern: EUR -{plain_market}"""
+
+def parse_text(text):
+ source=PdfDocument("cipher-"+str(abs(hash(text))),"3"*64,(PdfPage(1,text),)); plugin=ComdirectPlugin(); return plugin.parse(source,plugin.detect(source)[0])
+
+def test_cipher_page_z_variant_with_truncated_tax_quantity():
+ result=parse_text(cipher_buy("z","fndfgdhfhm","pggohhoi","fbffm","kdglhbpg","hkbph","07.01.2026","91182283","0","24,92"))
+ trade=result.events[0].trades[0]
+ assert (trade.quantity,trade.price,trade.market_value)==(Decimal("0.006"),Decimal("4152.91"),Decimal("24.92"))
+ assert "COMDIRECT_QUANTITY_MISSING" not in {i.code for i in result.issues}
+
+def test_cipher_page_resolves_two_missing_digits_only_when_unique():
+ trade=parse_text(cipher_buy("z","fpdfhdhfhm","pghfighh","fbffm","idpohblg","hibpf","09.02.2026","91203122","0","23,90")).events[0].trades[0]
+ assert (trade.quantity,trade.price,trade.market_value)==(Decimal("0.006"),Decimal("3982.51"),Decimal("23.90"))
+
+def test_cipher_page_u_variant():
+ trade=parse_text(cipher_buy("ü","imgimgmimr","ulmrrsru","ierom","ssetr","oueuu","02.02.2026","91266769","0,642","49,99")).events[0].trades[0]
+ assert (trade.quantity,trade.price,trade.market_value)==(Decimal("0.642"),Decimal("77.86"),Decimal("49.99"))
+
+def test_cipher_page_is_rejected_when_quantity_times_price_mismatches():
+ trade=parse_text(cipher_buy("ü","imgimgmimr","ulmrrsru","ierom","sseur","oueuu","02.02.2026","91266769","0,642","49,99")).events[0].trades[0]
+ assert trade.price is MissingValue.NOT_FOUND and trade.market_value is MissingValue.NOT_FOUND
+ assert trade.quantity==Decimal("0.642")
+
+def raw_cipher_buy(sp,colon,dot,eur,day,number,qty,price,market,plain_day,plain_number,plain_qty,plain_market,kurs="Kurs",head="",tail=""):
+ return f"""comdirect
+Wertpapierkauf
+Geschäftsnummer{sp*3}{colon}{sp}{number[:2]}{sp}{number[2:]}
+Geschäftstag{sp*6}{colon}{sp}{day}{sp*8}
+Nennwert Zum {kurs} von
+St{dot}{sp*2}{qty}{sp*17}{eur}UR{sp*2}{price}{sp*12}
+{sp*26}Kurswert{sp*20}{colon}{sp}{eur}UR{sp*15}{market}{sp*8}
+{head}Steuerliche Behandlung: Wertpapierkauf Nr. {plain_number} vom {plain_day}
+Stk. {plain_qty} TEST WERTPAPIER , WKN / ISIN: A0LEW8 / IE00B1FZS350
+Zu Ihren Lasten vor Steuern: EUR -{plain_market}
+{tail}"""
+
+def cipher_values(text):
+ trade=parse_text(text).events[0].trades[0]; return trade.quantity,trade.price,trade.market_value
+
+def test_cipher_page_with_fees_ignores_settlement_as_key():
+ text=raw_cipher_buy("�","u","f","E","hlfhoflhlm","tihssnil","idnns","psdhi","tsdns","02.05.2023","91088412","1,448","99,96")
+ assert cipher_values(text)==(Decimal("1.448"),Decimal("68.01"),Decimal("98.48"))
+
+def test_cipher_page_quantity_beats_whole_number_tax_quantity():
+ text=raw_cipher_buy("�","u","g","E","ikgipglill","tkilosrl","keiim","lneomo","lnepk","01.06.2022","91025872","1","24,98")
+ assert cipher_values(text)==(Decimal("1.003"),Decimal("24.535"),Decimal("24.61"))
+
+def test_cipher_page_uses_valuta_to_resolve_ambiguous_digit():
+ args=("�","u","g","E","ikgkkgliln","tkilnrsk","lelm","llenko","ntett","01.11.2024","91024781","2,230","49,99")
+ sp="�"; iban=sp.join(("DEii","iiii","iiii","iiii","iiii","ii"))
+ head=f"IBAN Valuta Zu Ihren Lasten vor Steuern\n{iban}{sp*3}EUR{sp*5}iogkkgliln{sp*8}EUR{sp*15}ntett\n"
+ tail="Die Belastung erfolgt mit Valuta 05.11.2024 auf Konto EUR mit der IBAN DE00 0000 0000 0000 0000 00"
+ # Ohne Valuta passen 22,415 und 22,416 gleichermaßen.
+ assert cipher_values(raw_cipher_buy(*args))[1] is MissingValue.NOT_FOUND
+ assert cipher_values(raw_cipher_buy(*args,head=head,tail=tail))==(Decimal("2.23"),Decimal("22.415"),Decimal("49.99"))
+
+def test_cipher_page_with_coded_currency_and_mischkurs():
+ sap=raw_cipher_buy("T","�","l","E","noloolpnps","zoppnvsw","nioor","pouisn","psist","01.11.2024","91220748","0,113","24,82",kurs="Mischkurs")
+ assert cipher_values(sap)==(Decimal("0.113"),Decimal("216.40"),Decimal("24.45"))
+ spdr=raw_cipher_buy("w","p","c","�","elcefcgegh","ofeeekfk","ge","loanf","fcholage","06.01.2023","91000515","20","1.411,50")
+ assert cipher_values(spdr)==(Decimal("20"),Decimal("69.81"),Decimal("1396.20"))
+
 def test_incomplete_trade_is_explicit_review_case():
  source=PdfDocument("broken","e"*64,(PdfPage(1,"comdirect\nWertpapierkauf"),)); plugin=ComdirectPlugin(); result=plugin.parse(source,plugin.detect(source)[0])
  assert {i.code for i in result.issues}=={"COMDIRECT_SECURITY_MISSING","COMDIRECT_QUANTITY_MISSING","COMDIRECT_SETTLEMENT_MISSING"}
