@@ -34,7 +34,9 @@ _SKIP_ROOTS = frozenset({"evidence", "issues"})
 # whose final segment matches is never exported as a "detected PDF value", even
 # when it inherits the evidence ids of its parent container.  Real detected
 # identifiers (iban, bic, account_number, security_isin, security_wkn, ...) do
-# not end in ``_id`` and stay exported.
+# not end in ``_id`` and stay exported.  The same applies to ``FieldValue``
+# wrappers such as ``security_id`` (the printed WKN of a depot position): their
+# content comes from the PDF, so the generic ``_id`` suffix does not filter them.
 _TECHNICAL_LEAVES = frozenset({
     "schema_version", "plugin_version", "evidence_ids", "review_status",
     "page_number", "source_ref", "confidence", "bank_reference_status",
@@ -63,9 +65,13 @@ def _leaf_name(path: str) -> str:
     return path.rsplit(".", 1)[-1].rsplit("[", 1)[0]
 
 
-def _is_technical_leaf(path: str) -> bool:
+def _is_technical_leaf(path: str, detected: bool = False) -> bool:
     name = _leaf_name(path)
-    return name in _TECHNICAL_LEAVES or name.endswith("_id")
+    if name in _TECHNICAL_LEAVES:
+        return True
+    # ``detected`` markiert FieldValue-Blätter: ihr Inhalt stammt aus dem PDF,
+    # das generische ``_id``-Suffix (interne Verknüpfungs-IDs) trifft sie nicht.
+    return not detected and name.endswith("_id")
 
 
 def _scalar_text(value: Any) -> str:
@@ -109,7 +115,7 @@ def flatten_evidence_values(result: Mapping[str, Any]) -> dict[str, str]:
         ids = own or inherited
         if _is_field_value(current):
             inner = current.get("value")
-            if backed(ids) and not _is_missing(inner) and not _is_technical_leaf(path):
+            if backed(ids) and not _is_missing(inner) and not _is_technical_leaf(path, detected=True):
                 values[path or "$"] = _scalar_text(inner)
             return
         if isinstance(current, Mapping) and current and not _is_missing(current):
@@ -140,7 +146,9 @@ def _atomic_write_csv(target: Path, fieldnames: list[str], rows: Iterable[Mappin
     fd, tmp_name = tempfile.mkstemp(prefix=".batch-", suffix=".tmp", dir=str(target.parent))
     try:
         with os.fdopen(fd, "w", encoding="utf-8-sig", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=fieldnames, restval="")
+            # Semikolon + UTF-8-BOM: entspricht den Audit-CSVs und öffnet
+            # direkt korrekt in deutschem Excel.
+            writer = csv.DictWriter(handle, fieldnames=fieldnames, restval="", delimiter=";")
             writer.writeheader()
             for row in rows:
                 writer.writerow(row)

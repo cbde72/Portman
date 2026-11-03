@@ -174,6 +174,12 @@ def _coordinate_quads(coordinates: Any) -> tuple[tuple[tuple[float, float], ...]
     return tuple(result)
 
 
+# Nach Normalisierung zulässige Dezimal-Schreibweisen (Punkt als Dezimaltrenner,
+# optionaler Exponent).  Ungültige Kandidaten werden vorab erkannt, statt die
+# Konvertierungsausnahme als Kontrollfluss zu missbrauchen.
+_DECIMAL_RE = re.compile(r"^[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?$")
+
+
 def _number(text: str) -> Decimal | None:
     candidate = str(text).strip().replace(" ", "")
     if not candidate:
@@ -182,14 +188,24 @@ def _number(text: str) -> Decimal | None:
         candidate = candidate.replace(".", "").replace(",", ".")
     else:
         candidate = candidate.replace(",", ".")
+    if not _DECIMAL_RE.match(candidate):
+        return None
     try:
         return Decimal(candidate)
     except (InvalidOperation, ValueError):
         return None
 
 
+# Vorab-Filter für Datums-Kandidaten (Trennzeichen . / - konsistent, 1-4 Ziffern
+# je Block).  Reine IDs wie "event-415843..." werden erkannt, ohne strptime fünf
+# Formate gegen ungültige Eingaben werfen zu lassen.
+_DATE_RE = re.compile(r"^\d{1,4}([./-])\d{1,2}\1\d{1,4}$")
+
+
 def _date(text: str) -> date | None:
     value = str(text).strip()
+    if not _DATE_RE.match(value):
+        return None
     for pattern in ("%Y-%m-%d", "%d.%m.%Y", "%d.%m.%y", "%d/%m/%Y", "%d-%m-%Y"):
         try:
             return datetime.strptime(value, pattern).date()
