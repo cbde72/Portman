@@ -3,6 +3,7 @@
 from collections.abc import Callable, Mapping
 import json
 import logging
+import os.path
 from pathlib import Path
 import sys
 
@@ -21,6 +22,7 @@ from portman_parsers.extraction import extract_pdf
 from portman_parsers.registry import default_registry
 from pypdf import PdfReader
 from portman_pdf_lab.application.pdf_analysis import analyse_pdf, export_batch_csv
+from portman_pdf_lab.application.batch_excel import export_batch_excel
 from portman_pdf_lab.application.reference_service import analyse_and_store
 from portman_pdf_lab.reviews.models import ReviewStatus
 from portman_pdf_lab.storage import ReferenceRepository
@@ -148,6 +150,7 @@ class MainWindow(QMainWindow):
         self._batch_reports: dict[str, dict] = {}
         self._batch_csv_path: Path | None = None
         self._batch_training_database: Path | None = None
+        self._batch_folder: Path | None = None
         self._selecting_document = False
         self.settings = settings or QSettings("Portman", "PDFLab")
         self.page_texts: dict[int, str] = {}
@@ -392,6 +395,7 @@ class MainWindow(QMainWindow):
         self._batch_reports = {}
         self._batch_csv_path = Path(csv_path)
         self._batch_training_database = Path(training_database) if training_database else None
+        self._batch_folder = self._batch_output_folder(order)
         self.progress.setRange(0, len(order)); self.progress.setValue(0)
         self.progress.setVisible(bool(order))
         if not order:
@@ -504,6 +508,16 @@ class MainWindow(QMainWindow):
         else:
             self._select_document(key)
 
+    @staticmethod
+    def _batch_output_folder(order: list[str]) -> Path | None:
+        """Gemeinsamer Ausgabeordner des Batch-Laufs (Ordner der PDFs)."""
+        if not order:
+            return None
+        try:
+            return Path(os.path.commonpath([str(Path(key).resolve()) for key in order]))
+        except ValueError:
+            return Path(order[0]).resolve().parent
+
     def _worker_finished(self, worker=None):
         if worker is not None:
             self.workers.discard(worker)
@@ -524,24 +538,37 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(False)
         target = self._batch_csv_path
         training_database = self._batch_training_database
+        excel_folder = self._batch_folder
         self._batch_csv_path = None
         self._batch_training_database = None
+        self._batch_folder = None
         reports = [self._batch_reports[key] for key in self._batch_order
                    if key in self._batch_reports]
-        if target is None:
-            self.statusBar().showMessage("Batchanalyse abgeschlossen", 5000)
-            return
-        batch = {"files": reports}
-        try:
-            export_batch_csv(batch, target, training_database)
-        except Exception as exc:  # a failed export must never terminate the GUI
-            LOGGER.exception("CSV-Export fehlgeschlagen: %s", target)
-            self.statusBar().showMessage(f"CSV-Export fehlgeschlagen: {exc}", 10000)
-            return
-        message = f"CSV exportiert: {target} ({len(reports)} Dokumente)"
-        if batch.get("warnings"):
-            message += " | Hinweis: " + " | ".join(batch["warnings"])
-        self.statusBar().showMessage(message, 10000)
+        messages: list[str] = []
+        if target is not None:
+            batch = {"files": reports}
+            try:
+                export_batch_csv(batch, target, training_database)
+                messages.append(f"CSV exportiert: {target} ({len(reports)} Dokumente)")
+                if batch.get("warnings"):
+                    messages.append("Hinweis: " + " | ".join(batch["warnings"]))
+            except Exception as exc:  # a failed export must never terminate the GUI
+                LOGGER.exception("CSV-Export fehlgeschlagen: %s", target)
+                messages.append(f"CSV-Export fehlgeschlagen: {exc}")
+        if excel_folder is not None and reports:
+            try:
+                excel = export_batch_excel(reports, excel_folder)
+                if excel.get("path"):
+                    messages.append(f"Excel exportiert: {excel['path']} "
+                                    f"({len(excel['sheets'])} Tabellenblätter)")
+                for error in excel.get("errors", ()):
+                    messages.append(f"Excel: {error}")
+                if not excel.get("path") and not excel.get("errors"):
+                    messages.append("Excel-Export nicht verfügbar")
+            except Exception as exc:  # auch der Excel-Export darf den Batch nie beenden
+                LOGGER.exception("Excel-Export fehlgeschlagen: %s", excel_folder)
+                messages.append(f"Excel-Export fehlgeschlagen: {exc}")
+        self.statusBar().showMessage(" | ".join(messages) or "Batchanalyse abgeschlossen", 10000)
 
     def _filter_documents(self, text: str):
         needle = text.casefold()
