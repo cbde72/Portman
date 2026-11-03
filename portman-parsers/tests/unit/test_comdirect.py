@@ -131,9 +131,14 @@ def test_cipher_page_u_variant():
  assert (trade.quantity,trade.price,trade.market_value)==(Decimal("0.642"),Decimal("77.86"),Decimal("49.99"))
 
 def test_cipher_page_is_rejected_when_quantity_times_price_mismatches():
- trade=parse_text(cipher_buy("ü","imgimgmimr","ulmrrsru","ierom","sseur","oueuu","02.02.2026","91266769","0,642","49,99")).events[0].trades[0]
+ result=parse_text(cipher_buy("ü","imgimgmimr","ulmrrsru","ierom","sseur","oueuu","02.02.2026","91266769","0,642","49,99")); trade=result.events[0].trades[0]
  assert trade.price is MissingValue.NOT_FOUND and trade.market_value is MissingValue.NOT_FOUND
  assert trade.quantity==Decimal("0.642")
+ assert "COMDIRECT_TRADE_VALUES_UNRESOLVED" in {i.code for i in result.issues}
+
+def test_resolved_cipher_page_has_no_unresolved_issue():
+ result=parse_text(cipher_buy("ü","imgimgmimr","ulmrrsru","ierom","ssetr","oueuu","02.02.2026","91266769","0,642","49,99"))
+ assert "COMDIRECT_TRADE_VALUES_UNRESOLVED" not in {i.code for i in result.issues}
 
 def test_cipher_page_does_not_guess_unknown_thousands_separator():
  # Ohne Datums-Anker ist der Punkt-Code unbekannt und passt rechnerisch als Ziffer 0 (10111,11 x 2 = 20222,22).

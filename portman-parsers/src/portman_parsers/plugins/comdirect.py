@@ -428,6 +428,10 @@ class ComdirectPlugin:
                        event_id=event_id, nature=IssueNature.UNSECURED_ASSIGNMENT))
   for code,missing,message in (("COMDIRECT_SECURITY_MISSING",not (isin or resolved_wkn),"Wertpapieridentität fehlt."),("COMDIRECT_QUANTITY_MISSING",qty is None,"Stückzahl fehlt."),("COMDIRECT_SETTLEMENT_MISSING",settlement is None,"Settlementbetrag fehlt.")):
    if missing: issues.append(Issue(stable_id("issue",event_id,code),code,IssueSeverity.WARNING,message,event_id=event_id,nature=IssueNature.MISSING_INFORMATION))
+  if kind in {"BUY","SELL","REDEMPTION"} and exec_match is None and cipher is None and CIPHER_TRADE.search(head) and not (PRICE.search(head) and MARKET_VALUE.search(head)):
+   issues.append(Issue(stable_id("issue",event_id,"COMDIRECT_TRADE_VALUES_UNRESOLVED"),"COMDIRECT_TRADE_VALUES_UNRESOLVED",IssueSeverity.WARNING,
+                       "Kurs und Kurswert stehen in einer defekten eingebetteten Schrift und sind nicht eindeutig entschlüsselbar; sie bleiben leer.",
+                       event_id=event_id,nature=IssueNature.MISSING_INFORMATION))
   event_ev=ev("economic_event",settlement if settlement else re.search(next(p for x,p in TITLES if x==h),text,re.I|re.S)); iban=IBAN.search(text); account_id=None; accounts=()
   if iban:
    iban_value=re.sub(r"\s","",iban.group(0)); ie=ev("iban",iban); account_id=stable_id("account","comdirect",iban_value); accounts=(Account(account_id,bank_name=fv("comdirect",ie),iban=fv(iban_value,ie),currency=fv("EUR",ie)),)
