@@ -134,6 +134,63 @@ def test_batch_analyses_20_pdfs_exports_csv_and_never_writes_sqlite(
         window.thread_pool.waitForDone(); window.close(); application.processEvents()
 
 
+def test_run_on_folder_automatically_exports_versioned_excel(
+        tmp_path, monkeypatch):
+    """Run On Folder erzeugt automatisch einen versionierten Excel-Bericht.
+
+    Der Export passiert nach Abschluss aller Worker im Ausgabeordner (Ordner der
+    PDFs), berührt die CSV nicht und schreibt nie SQLite.  Ein gesperrter oder
+    bereits existierender Name führt automatisch zur nächsten Version.
+    """
+    openpyxl = pytest.importorskip("openpyxl")
+    application = app(); window = window_for(tmp_path)
+    paths = make_pdfs(tmp_path, 3)
+    csv_path = tmp_path / "batch.csv"
+    database = tmp_path / "references.sqlite"
+
+    import portman_pdf_lab.ui.main_window as main_window
+    monkeypatch.setattr(main_window, "analyse_and_store",
+                        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                            AssertionError("analyse_and_store must not run in batch mode")))
+    try:
+        window.start_batch(paths, csv_path)
+        assert wait_for(application, lambda: not window._batch_active, timeout=60)
+        wait_for(application, lambda: window.workers == set(), timeout=10)
+
+        excel_path = tmp_path / "Portman_Parser_Kompakt_v01.xlsx"
+        assert excel_path.exists(), "Excel-Bericht fehlt im Ausgabeordner"
+
+        workbook = openpyxl.load_workbook(excel_path, read_only=True)
+        try:
+            names = workbook.sheetnames
+            # Die Demo-PDFs sind Kontoauszüge und gehören laut Blattzuordnung
+            # zu „Finanzreport“; die fachliche Trennung deckt der Unit-Test
+            # mit echten Wertpapierkauf-/Dividendenberichten ab.
+            sheet = workbook["Finanzreport"]
+            header = [cell for cell in next(sheet.iter_rows(values_only=True))]
+        finally:
+            workbook.close()
+        assert "Finanzreport" in names
+        assert header[0] == "Datei" and "Dokumenttyp" in header
+
+        # Der CSV-Export bleibt unverändert erhalten.
+        with csv_path.open(newline="", encoding="utf-8-sig") as handle:
+            rows = list(csv.DictReader(handle))
+        assert len(rows) == 3
+
+        # Kein Schreibzugriff auf die Trainings-/Referenzdatenbank.
+        assert not database.exists(), "batch mode must not create/write SQLite"
+
+        # Ein zweiter Lauf überschreibt die bestehende Datei nie.
+        window.start_batch(paths, csv_path)
+        assert wait_for(application, lambda: not window._batch_active, timeout=60)
+        wait_for(application, lambda: window.workers == set(), timeout=10)
+        assert (tmp_path / "Portman_Parser_Kompakt_v02.xlsx").exists()
+        assert excel_path.exists()
+    finally:
+        window.thread_pool.waitForDone(); window.close(); application.processEvents()
+
+
 def test_batch_analyses_many_pdfium_fallback_pdfs_without_native_crash(
         tmp_path):
     """Parallel batch workers must serialise the non-thread-safe PDFium calls.
