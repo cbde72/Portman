@@ -1,7 +1,8 @@
 """Independent comdirect handlers; no V09 compatibility layer."""
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
+from itertools import product
 import re
 from portman_parsers.api import *
 from portman_parsers.registry.allowlist import APPROVED_PLUGINS
@@ -34,7 +35,102 @@ FX=re.compile(r"(?:Devisenkurs|Umrechnungskurs)\s*:?[ \t]*("+A+r")",re.I)
 NAME=re.compile(r"(?:Wertpapierbezeichnung|Bezeichnung)\s*:?[ \t]*(.+)",re.I)
 SETTLE=re.compile(r"(?:Zu\s*Ihren\s*(?P<dir>Lasten|Gunsten)|(?:^|\n)Gutschrift|(?:^|\n)Zahlungsbetrag).{0,80}?(?P<cur>[A-Z]{3})\s*-?\s*(?P<a>"+A+r")",re.I|re.S)
 TAX=(("CAPITAL_GAINS_TAX",r"Kapitalertragsteuer\s*(?:EUR)?\s*-?("+A+r")"),("SOLIDARITY_SURCHARGE",r"Solidarit.tszuschlag\s*(?:EUR)?\s*-?("+A+r")"),("CHURCH_TAX",r"Kirchensteuer\s*(?:EUR)?\s*-?("+A+r")"),("WITHHOLDING_TAX",r"Quellensteuer\s*(?:[A-Z]{3})?\s*-?("+A+r")"))
-FEE=(("provision",r"Provision\s*:?\s*(?:EUR)?\s*-?("+A+r")"),("foreign_expenses",r"(?:Fremdspesen|fremde\s+Spesen)\s*:?\s*(?:EUR)?\s*-?("+A+r")"),("exchange_fee",r"(?:B.rsenplatz.*Entgelt|B.rsengeb.hr)\s*:?\s*(?:EUR)?\s*-?("+A+r")"))
+FEE=(("provision",r"Provision\s*:?\s*(?:EUR)?\s*-?("+A+r")"),("foreign_expenses",r"(?:Fremdspesen|fremde\s+Spesen)\s*:?\s*(?:EUR)?\s*-?("+A+r")"),("settlement_fee",r"Abwickl\.?\s*entgelt\s*Clearstream\s*:?\s*(?:EUR)?\s*-?("+A+r")"),("exchange_fee",r"(?:B.rsenplatz.*Entgelt|B.rsengeb.hr)\s*:?\s*(?:EUR)?\s*-?("+A+r")"))
+CIPHER_TRADE=re.compile(r"Nennwert\s*Zum\s*(?:Misch)?[Kk]urs\s*von\s*\n\s*St\S(?P<sp>\S)(?P=sp)*(?P<qty>(?:(?!(?P=sp))\S)+)(?P=sp)+\SUR(?P=sp)+(?P<price>\S+?)(?P=sp)*\n"
+                        r"(?P=sp)*Kurswert(?P=sp)+\S(?P=sp)\SUR(?P=sp)+(?P<market>\S+?)(?P=sp)*\n")
+CIPHER_ACCOUNT=re.compile(r"Steuern\s*\nDE(?P<iban>\S+?)(?P<sp>\S)\SUR(?P=sp)+(?P<valuta>\S{10})")
+NUMBER_TEXT=re.compile(r"\d{1,3}(?:\.\d{3})*(?:,\d+)?")
+CIPHER_DATE=re.compile(r"ftstag(\S)\1*\S\1(\S{10})"); CIPHER_NUMBER=re.compile(r"nummer(\S)\1*\S\1((?:(?!\1)\S)+)\1((?:(?!\1)\S)+)")
+
+
+def _cipher_trade(head,tail):
+  """Entschlüsselt Stückzahl, Kurs und Kurswert aus Seite 1 mit defekter Schrift.
+
+  comdirect bettet je Dokument eine Schrift ohne Unicode-Zuordnung ein; die Zeichen
+  sind aufsteigend sortiert, aber je Variante verschoben. Der Schlüssel wird aus dem
+  lesbaren Steuerabschnitt gewonnen; bis zu zwei fehlende Ziffern werden über die
+  Sortierung eingegrenzt. Werte gelten nur bei genau einer Lösung mit Stück x Kurs = Kurswert.
+  """
+  trade=CIPHER_TRADE.search(head)
+  if not trade: return None
+  line=TRADE_LINE.search(tail); settle=re.search(r"Lasten\s*vor\s*Steuern:?\s*EUR\s*-?("+A+r")",tail,re.I)
+  day=re.search(r"\bvom\s*("+D+r")",tail); number=re.search(r"\bNr\.\s*(\d{6,})",tail)
+  coded_day=CIPHER_DATE.search(head); coded_number=CIPHER_NUMBER.search(head)
+  account=re.search(r"Valuta\s*("+D+r")\s*auf\s*Konto\s*EUR\s*mit\s*der\s*IBAN\s*DE(\d[\d ]*\d)",tail); coded_account=CIPHER_ACCOUNT.search(head)
+  plain_qty=line and line.group("qty")
+  # Der Steuerabschnitt ergänzt Nachkommanullen ("2,230" statt "2,23"); auf ganze Stück gekürzte Werte sind kein belegter Anker.
+  while plain_qty and len(plain_qty)>len(trade["qty"]) and "," in plain_qty and plain_qty.endswith("0"): plain_qty=plain_qty[:-1]
+  pairs=((trade["qty"],plain_qty),(coded_day and coded_day.group(2),day and day.group(1)),
+         (coded_number and coded_number.group(2)+coded_number.group(3),number and number.group(1)),
+         (coded_account and coded_account["iban"].replace(coded_account["sp"],"")+coded_account["valuta"],
+          account and account.group(2).replace(" ","")+account.group(1)))
+  key={}
+  for coded,plain in pairs:
+   if coded and plain and len(coded)==len(plain):
+    for c,p in zip(coded,plain):
+     if key.setdefault(c,p)!=p: return None
+
+  def solve(key):
+   # Der Kurswert hat immer zwei Nachkommastellen; damit ist das Komma-Zeichen bekannt.
+   key=dict(key)
+   if len(trade["market"])>3 and key.setdefault(trade["market"][-3],",")!=",": return []
+   if len(set(key.values()))!=len(key): return []
+   known={int(p):c for c,p in key.items() if p.isdigit()}
+   unknown=sorted({c for name in ("qty","price","market") for c in trade[name]}-set(key))
+   def candidates(code):
+    return [str(d) for d in range(10) if d not in known
+            and all(c<code for k,c in known.items() if k<d) and all(c>code for k,c in known.items() if k>d)]
+   solutions=[]
+   for digits in product(*(candidates(code) for code in unknown)) if len(unknown)<=2 else ():
+    if len(set(digits))<len(digits): continue
+    trial={**key,**dict(zip(unknown,digits))}
+    try:
+     texts=["".join(trial[c] for c in trade[name]) for name in ("qty","price","market")]
+     # dec() entfernt Punkte; ein als Ziffer geratener Tausenderpunkt darf deshalb nicht durchrutschen.
+     if not all(NUMBER_TEXT.fullmatch(t) for t in texts): continue
+     qty,price,market=(dec(t) for t in texts)
+    except (KeyError,ArithmeticError,ValueError):
+     continue
+    if qty>0 and (qty*price).quantize(Decimal("0.01"),ROUND_HALF_UP)==market: solutions.append((qty,price,market,trial))
+   return solutions
+
+  solutions=solve(key)
+  # Die Belastung entspricht dem Kurswert nur ohne Entgelte; sie gilt daher nur, wenn der entschlüsselte Kurswert ihr exakt entspricht.
+  if len(solutions)!=1 and settle and len(settle.group(1))==len(trade["market"]):
+   hint=dict(zip(trade["market"],settle.group(1)))
+   if all(key.get(c,p)==p for c,p in hint.items()):
+    solutions=[x for x in solve({**hint,**key}) if x[2]==dec(settle.group(1))]
+  if len(solutions)!=1: return None
+  qty,price,market,trial=solutions[0]
+  return qty,price,market,_cipher_fee(head,trade["sp"] if "sp" in trade.groupdict() else None,trial,market,settle)
+
+
+def _cipher_fee(head,sp,key,market,settle):
+  """Entschlüsselt die Provision mit dem Dokumentschlüssel; gilt nur bei eindeutiger Lösung.
+
+  Fehlende Ziffern werden über die Sortierung des Schlüssels eingegrenzt. Die Lösung muss
+  mit der gedruckten Belastung (Kurswert + Provision) übereinstimmen; sonst bleibt die Gebühr leer.
+  """
+  if not sp: return None
+  row=re.search(r"Provision(?:"+re.escape(sp)+r")+\S"+re.escape(sp)+r"\SUR(?:"+re.escape(sp)+r")+(?P<fee>(?:(?!"+re.escape(sp)+r")\S)+)",head)
+  if not row or not settle: return None
+  coded=row["fee"]; known={int(p):c for c,p in key.items() if p.isdigit()}; comma=next((c for c,p in key.items() if p==","),None)
+  unknown=sorted({c for c in coded if c not in key})
+  def candidates(code):
+    return [str(d) for d in range(10) if d not in known
+            and all(c<code for k,c in known.items() if k<d) and all(c>code for k,c in known.items() if k>d)]
+  if len(unknown)>2: return None
+  found=set()
+  for digits in product(*(candidates(code) for code in unknown)):
+    if len(set(digits))<len(digits): continue
+    trial={**key,**dict(zip(unknown,digits))}
+    text="".join(trial[c] for c in coded)
+    if not NUMBER_TEXT.fullmatch(text) or (comma and coded.count(comma)>1): continue
+    fee=dec(text)
+    if fee>0 and market+fee==dec(settle.group(1)): found.add(fee)
+  return found.pop() if len(found)==1 else None
+
+
 @dataclass(frozen=True)
 class _SecurityIdentity:
   name: str | None = None
@@ -332,11 +428,15 @@ class ComdirectPlugin:
   return self.transaction(doc,d,evidence,ev,fv,depots,depot_id,isin,eid,security_name,column_wkn,column_isin,identity)
  def transaction(self,doc,d,evidence,ev,fv,depots,depot_id,isin,eid,security_name=None,column_wkn=None,column_isin=None,identity=None):
   text=doc.text; h=d.handler_id; kind="BUY" if h=="wertpapierkauf" else "SELL" if h=="wertpapierverkauf" else "REDEMPTION" if h=="einloesung" else "DIVIDEND"
-  quantity_match=NENNWERT_QTY.search(text) or QTY.search(text)
+  # Werte aus der "Steuerlichen Behandlung" sind nur Ersatz, wenn die Abrechnung selbst keinen Wert liefert.
+  tax_section=re.search(r"Steuerliche\s*Behandlung",text); head=text[:tax_section.start()] if tax_section else text
+  quantity_match=NENNWERT_QTY.search(head) or QTY.search(head) or QTY.search(text)
   qty=dec(quantity_match.group(1)) if quantity_match and dec(quantity_match.group(1))>0 else None
   line_match=TRADE_LINE.search(text)
-  exec_match=TRADE_EXECUTION.search(text)
-  if quantity_match is None and line_match is not None:
+  exec_match=TRADE_EXECUTION.search(head)
+  cipher=None if exec_match else _cipher_trade(head,text[len(head):])
+  if cipher: qty=cipher[0]
+  if quantity_match is None and cipher is None and line_match is not None:
    candidate=dec(line_match.group("qty"))
    if candidate>0: qty=candidate
   if quantity_match is None and qty is None and exec_match is not None and exec_match.group("qty"):
@@ -356,6 +456,10 @@ class ComdirectPlugin:
                        event_id=event_id, nature=IssueNature.UNSECURED_ASSIGNMENT))
   for code,missing,message in (("COMDIRECT_SECURITY_MISSING",not (isin or resolved_wkn),"Wertpapieridentität fehlt."),("COMDIRECT_QUANTITY_MISSING",qty is None,"Stückzahl fehlt."),("COMDIRECT_SETTLEMENT_MISSING",settlement is None,"Settlementbetrag fehlt.")):
    if missing: issues.append(Issue(stable_id("issue",event_id,code),code,IssueSeverity.WARNING,message,event_id=event_id,nature=IssueNature.MISSING_INFORMATION))
+  if kind in {"BUY","SELL","REDEMPTION"} and exec_match is None and cipher is None and CIPHER_TRADE.search(head) and not (PRICE.search(head) and MARKET_VALUE.search(head)):
+   issues.append(Issue(stable_id("issue",event_id,"COMDIRECT_TRADE_VALUES_UNRESOLVED"),"COMDIRECT_TRADE_VALUES_UNRESOLVED",IssueSeverity.WARNING,
+                       "Kurs und Kurswert stehen in einer defekten eingebetteten Schrift und sind nicht eindeutig entschlüsselbar; sie bleiben leer.",
+                       event_id=event_id,nature=IssueNature.MISSING_INFORMATION))
   event_ev=ev("economic_event",settlement if settlement else re.search(next(p for x,p in TITLES if x==h),text,re.I|re.S)); iban=IBAN.search(text); account_id=None; accounts=()
   if iban:
    iban_value=re.sub(r"\s","",iban.group(0)); ie=ev("iban",iban); account_id=stable_id("account","comdirect",iban_value); accounts=(Account(account_id,bank_name=fv("comdirect",ie),iban=fv(iban_value,ie),currency=fv("EUR",ie)),)
@@ -370,15 +474,21 @@ class ComdirectPlugin:
   # position change.  Never synthesize a SecurityMovement for it.
   security=() if kind not in {"BUY", "SELL", "REDEMPTION"} or not(qty and isin) else (SecurityMovement(stable_id("security",event_id),event_id,isin,qty if kind=="BUY" else -qty,(event_ev,),depot_id),)
   fees=tuple(FeeEvent(stable_id("fee",event_id,k),"trading",k,dec(m.group(1)),"EUR",date(valuta.group(1)) if valuta else date("01.01.1970"),FeeEffect.INCLUDED_IN_SETTLEMENT,doc.document_id,"comdirect",depot_id=depot_id,account_id=account_id,security_id=isin,transaction_id=event_id,evidence_ids=(event_ev,)) for k,p in FEE for m in [re.search(p,text,re.I)] if m)
-  comps=tuple(TaxComponent(k,dec(m.group(1)),"EUR") for k,p in TAX for m in [re.search(p,text,re.I)] if m); taxes=(TaxEvent(stable_id("tax",event_id),event_id,"WITHHOLDING",comps,evidence_ids=(event_ev,),depot_id=depot_id,isin=isin,bank_id="comdirect",account_id=account_id),) if comps else ()
+  # Provision in defekter eingebetteter Schrift: mit dem Dokumentschlüssel entschlüsselt (nur bei eindeutiger, zur Belastung passender Lösung).
+  if cipher and cipher[3] is not None and not any(f.subcategory=="provision" for f in fees):
+   fees+=(FeeEvent(stable_id("fee",event_id,"provision"),"trading","provision",cipher[3],"EUR",date(valuta.group(1)) if valuta else date("01.01.1970"),FeeEffect.INCLUDED_IN_SETTLEMENT,doc.document_id,"comdirect",depot_id=depot_id,account_id=account_id,security_id=isin,transaction_id=event_id,evidence_ids=(event_ev,)),)
+  elif kind in {"BUY","SELL"} and cipher and cipher[3] is None and "Provision" in head and not any(f.subcategory=="provision" for f in fees):
+   issues.append(Issue(stable_id("issue",event_id,"COMDIRECT_FEE_UNRESOLVED"),"COMDIRECT_FEE_UNRESOLVED",IssueSeverity.WARNING,"Die Provision steht in einer defekten eingebetteten Schrift und ist nicht eindeutig entschlüsselbar; sie bleibt leer.",event_id=event_id,nature=IssueNature.MISSING_INFORMATION))
+  # Die "Steuerliche Behandlung" eines Kaufs wirkt nur auf den Verrechnungstopf; ihre 0,00-Zeilen sind keine einbehaltene Steuer.
+  comps=tuple(TaxComponent(k,dec(m.group(1)),"EUR") for k,p in TAX for m in [re.search(p,text,re.I)] if m and (kind!="BUY" or dec(m.group(1))>0)); taxes=(TaxEvent(stable_id("tax",event_id),event_id,"WITHHOLDING",comps,evidence_ids=(event_ev,),depot_id=depot_id,isin=isin,bank_id="comdirect",account_id=account_id),) if comps else ()
   trades=()
   if kind in {"BUY","SELL","REDEMPTION"}:
-   pm=PRICE.search(text); mm=MARKET_VALUE.search(text); gm=GROSS.search(text); fx=FX.search(text); nm=NAME.search(text); tm=TRADE_DATE.search(text); xm=EXECUTION_DATE.search(text); dm=TRADE_DAY.search(text)
+   pm=PRICE.search(head); mm=MARKET_VALUE.search(head); gm=GROSS.search(head); fx=FX.search(head); nm=NAME.search(text); tm=TRADE_DATE.search(text); xm=EXECUTION_DATE.search(text); dm=TRADE_DAY.search(text)
    name_value=nm.group(1).strip() if nm else None
    if name_value and not re.sub(r"[/\s]|WPKNR|WKN|ISIN","",name_value,flags=re.I): name_value=None
    if not name_value: name_value=security_name
-   price=dec(pm.group("a")) if pm else (dec(exec_match.group("price")) if exec_match else None)
-   market=dec(mm.group("a")) if mm else (dec(exec_match.group("market")) if exec_match else None)
+   price=dec(pm.group("a")) if pm else (dec(exec_match.group("price")) if exec_match else cipher[1] if cipher else None)
+   market=dec(mm.group("a")) if mm else (dec(exec_match.group("market")) if exec_match else cipher[2] if cipher else None)
    trades=(SecurityTrade(stable_id("trade",event_id),event_id,kind,name_value or MissingValue.NOT_FOUND,isin or MissingValue.NOT_FOUND,resolved_wkn or MissingValue.NOT_FOUND,qty if qty is not None else MissingValue.NOT_FOUND,date(tm.group(1)) if tm else (date(dm.group(1)) if dm else MissingValue.NOT_FOUND),date(xm.group(1)) if xm else MissingValue.NOT_FOUND,date(valuta.group(1)) if valuta else MissingValue.NOT_FOUND,price if price is not None else MissingValue.NOT_FOUND,(pm.group("cur1") or pm.group("cur2")) if pm and (pm.group("cur1") or pm.group("cur2")) else ("EUR" if price is not None and not pm else MissingValue.NOT_FOUND),market if market is not None else MissingValue.NOT_FOUND,dec(gm.group("a")) if gm else MissingValue.NOT_FOUND,dec(fx.group(1)) if fx else MissingValue.NOT_FOUND,dec(settlement.group("a")) if settlement else MissingValue.NOT_FOUND,settlement.group("cur") if settlement else MissingValue.NOT_FOUND,depot_id,account_id,(event_ev,)),)
   identity_evidence=tuple(ev(label,(identity.name_source or value) if label=="security_name" else value,
                              *(identity.name_rows if label=="security_name" else ()))
