@@ -73,8 +73,8 @@ APPROVED_PLUGINS: tuple[PluginMetadata, ...] = (
         ("steuerverrechnung", "ING Steuerverrechnung"),
         ("jahresdepotauszug", "ING Jahresdepotauszug"),
     )),
-    PluginMetadata("user.deka-quartalsbericht", "Deka", "1.0", _handlers(
-        ("quartalsbericht", "Deka Quartalsbericht/Jahresdepotauszug"),
+    PluginMetadata("user.deka-quartalsbericht", "Deka", "1.0", (
+        HandlerMetadata("quartalsbericht", "Deka Quartalsbericht/Jahresdepotauszug", True),
     )),
     PluginMetadata("fnz.finvesto", "FNZ / Finvesto", "2.0", (
         HandlerMetadata("umsatzabrechnung", "FNZ Umsatzabrechnung", True),
