@@ -491,8 +491,11 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
     withheld=sum((c.amount for c in comps),Decimal())
     if net is not None and abs(gross-withheld-net)>Decimal("0.01"):
      issues.append(Issue(stable_id("issue",event_id,"interest"),"INTEREST_RECONCILIATION",IssueSeverity.ERROR,"Zinsabschluss ist nicht abgestimmt (Brutto %.2f, Steuern %.2f, Netto %.2f)."%(gross,withheld,net),be,event_id,IssueNature.MATHEMATICAL_INCONSISTENCY))
-   movement=CashMovement(stable_id("cash",event_id),event_id,block["amount"],"EUR",CashStatus.ACTUAL,account_id=current,evidence_ids=(be,),movement_type=CashMovementType.INTEREST_CREDIT if interest else CashMovementType.OTHER)
-   events.append(FinancialEvent(event_id,doc.document_id,"CASH_BOOKING",date(block["booked"]),(movement,),tax_events=taxes,evidence_ids=(be,)))
+   custody=bool(re.search(r"Verwahrentgelt",purpose,re.I)) and block["amount"]<0
+   movement=CashMovement(stable_id("cash",event_id),event_id,block["amount"],"EUR",CashStatus.ACTUAL,account_id=current,evidence_ids=(be,),movement_type=CashMovementType.INTEREST_CREDIT if interest else CashMovementType.FEE_DEBIT if custody else CashMovementType.OTHER)
+   # Verwahrentgelt (z. B. Xetra Gold): effektiv gebuchte Gebühr, mit der Kontobuchung verknüpft (kein zweiter Abzug).
+   fees=(FeeEvent(stable_id("fee",event_id),"custody","verwahrentgelt",abs(block["amount"]),"EUR",date(block["booked"]),FeeEffect.ACTUAL_BOOKED,doc.document_id,"comdirect",account_id=current,transaction_id=event_id,cash_movement_id=movement.movement_id,evidence_ids=(be,)),) if custody else ()
+   events.append(FinancialEvent(event_id,doc.document_id,"CASH_BOOKING",date(block["booked"]),(movement,),tax_events=taxes,fee_events=fees,evidence_ids=(be,)))
 
   def flush_position():
    nonlocal pos

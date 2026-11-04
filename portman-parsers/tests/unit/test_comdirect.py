@@ -322,3 +322,18 @@ Zu Ihren Lasten EUR 24,92"""
   result=plugin.parse(source,plugin.detect(source)[0]); event=result.events[0]
   assert event.trades[0].quantity is MissingValue.NOT_FOUND and not event.security_movements
   assert "COMDIRECT_QUANTITY_MISSING" in {issue.code for issue in result.issues}
+
+
+def test_finanzreport_verwahrentgelt_is_linked_fee_not_second_debit():
+ text="""comdirect\nFinanzreport Nr. 1\nVerrechnungskonto DE00 0000 0000 0000 0000 01
+Alter Saldo 31.12.2025 93,61
+06.01.2026 05.01.2026 Entgelte Verwahrentgelt Xetra Gold WKN A0S9GB, gem. Abrechnung -0,67
+Neuer Saldo 06.01.2026 92,94"""
+ source=PdfDocument("report-fee","e"*64,(PdfPage(1,text),)); plugin=ComdirectFinanzreportPlugin(); result=plugin.parse(source,plugin.detect(source)[0])
+ booking=[event for event in result.events if event.fee_events]
+ assert len(booking)==1; event=booking[0]
+ assert len(event.cash_movements)==1 and event.cash_movements[0].amount==Decimal("-0.67")
+ assert event.cash_movements[0].movement_type.value=="FEE_DEBIT"
+ assert len(event.fee_events)==1; fee=event.fee_events[0]
+ assert (fee.category,fee.subcategory,fee.amount,fee.effect.value)==("custody","verwahrentgelt",Decimal("0.67"),"ACTUAL_BOOKED")
+ assert fee.cash_movement_id==event.cash_movements[0].movement_id
