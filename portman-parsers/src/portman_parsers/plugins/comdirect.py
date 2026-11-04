@@ -559,6 +559,7 @@ FR_BOOKING_AMOUNT=re.compile(r"^[+-]"+A+r"$")
 FR_DATE_LINE=re.compile(r"^"+D+r"$")
 FR_ROW=re.compile(r"^("+D+r")(?:\s+("+D+r"))?\s+(.*?)\s+([+-]"+A+r")$")
 FR_ROW_TYPE_FIRST=re.compile(r"^(\D.*?)\s+("+D+r")\s+("+D+r")\s+([+-]"+A+r")$")
+FR_HISTORICAL_AMOUNT=re.compile(r"(?<!\d)([+-]"+A+r")(?!\d)")
 FR_POSITION_HEAD=re.compile(r"^([A-Z0-9]{6})\s*/\s*(Girosammelverwahrung|Wertpapierrechnung)$")
 FR_POSITION_VALUES=re.compile(r"^("+A+r")\s+("+A+r")\s+([A-Z]{3})\s+("+A+r")$")
 FR_POSITION_REST=re.compile(r"^([+-]?"+A+r")(?:\s+([+-]"+A+r"))?$")
@@ -594,6 +595,7 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
  def detect(self,doc): return (Detection(self.metadata.plugin_id,self.metadata.version,"finanzreport","comdirect Finanzreport",Decimal("0.99"),"Finanzreport header recognized"),) if re.search("comdirect",doc.text,re.I) and re.search(r"Finanzreport\s+Nr",doc.text,re.I) else ()
  def parse(self,doc,d):
   text=doc.text; ev,fv,evidence=evidence_recorder(doc,self.metadata.plugin_id,d.handler_id,self.metadata.version)
+  deferred_evidence=[]
   header=re.search(r"Finanzreport\s+Nr\.?\s*(\S*)",text,re.I); header_ev=ev("document_type",header)
   period=re.search(r"(?:Berichtszeitraum|Zeitraum)\s*:?[ \t]*("+D+r")\s*(?:bis|-)\s*("+D+r")",text,re.I)
   report_dates={hit.group(1) for hit in FR_REPORT_DATE.finditer(text)}
@@ -625,7 +627,13 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
    if key in seen:
     issues.append(Issue(stable_id("issue",event_id,"duplicate"),"DUPLICATE_BOOKING",IssueSeverity.WARNING,"Duplicate booking in Finanzreport.",event_id=event_id,nature=IssueNature.CONFIRMED_DEVIATION)); return
    seen.add(key)
-   be=ev("booking","\n".join(block["raw"]),offset=block["offset"])
+   excerpt="\n".join(block["raw"])
+   if block.get("historical"):
+    evidence_page_number=evidence_page(doc,excerpt,block["offset"])
+    be=stable_id("evidence",doc.document_id,evidence_page_number,"booking",excerpt,event_id)
+    deferred_evidence.append(Evidence(be,doc.document_id,evidence_page_number,"booking",excerpt,f"page:{evidence_page_number}",doc.source_hash,self.metadata.plugin_id,d.handler_id,self.metadata.version))
+   else:
+    be=ev("booking",excerpt,offset=block["offset"])
    interest=FR_INTEREST_HEAD.search(re.sub(r"\s+","",purpose))
    taxes=()
    if interest:
@@ -662,7 +670,7 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
    positions.append(block)
 
   # Namensbezogene IBANs aus dem historischen Hinweisblock; widersprüchliche Angaben gelten als nicht eindeutig.
-  labelled={}; labelled_conflicts=set(); historical_sections=set()
+  labelled={}; labelled_conflicts=set(); historical_sections=set(); historical_incomplete=set(); historical_unassigned=set(); historical_modes={}; historical_pending=None; historical_leading_dates=[]; historical_leading_body=[]; historical_unanchored=[]
   for _page,label_offset,label_line in lines:
    label=FR_LABELLED_IBAN.match(label_line)
    if not label: continue
@@ -670,6 +678,15 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
    if label_name in labelled and labelled[label_name][0]!=label_iban: labelled_conflicts.add(label_name)
    labelled.setdefault(label_name,(label_iban,label_line,label_offset))
   for label_name in labelled_conflicts: del labelled[label_name]
+
+  def flush_historical():
+   nonlocal historical_pending,pending
+   if historical_pending is None: return
+   block,historical_pending=historical_pending,None
+   if len(block["dates"])!=2 or not block["body"]:
+    historical_incomplete.add(block["account"]); return
+   pending={"booked":block["dates"][0],"valuta":block["dates"][1],"body":block["body"],"raw":block["raw"],"amount":block["amount"],"offset":block["offset"],"page":block["page"],"historical":True}
+   flush_booking()
 
   index=0
   while index<len(lines):
@@ -687,7 +704,7 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
    if account:
     name,iban=account.group(1),re.sub(r"\s","",account.group(2))
     aid=account_dto(name,iban,account.group(4),line,offset)
-    flush_booking(); current=aid; depot_mode=False
+    flush_historical(); historical_leading_dates.clear(); historical_leading_body.clear(); historical_unanchored.clear(); flush_booking(); current=aid; depot_mode=False
     if account.group(3): overview[iban]=dec(account.group(3))
     elif index<len(lines) and FR_AMOUNT.fullmatch(lines[index][2]) and not FR_SALDO.match(lines[index][2]):
      overview[iban]=dec(lines[index][2]); index+=1
@@ -715,7 +732,7 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
       reason="mehrdeutig" if name.lower() in labelled_conflicts else "im Dokument nicht vorhanden"
       issues.append(Issue(stable_id("issue",doc.document_id,"account-iban-missing",name.lower(),offset),"ACCOUNT_IBAN_UNRESOLVED",IssueSeverity.ERROR if lost else IssueSeverity.WARNING,"Kontobereich %s ohne eindeutige IBAN (%s); %d Buchung(en) wurden nicht übernommen."%(heading.group(1),reason,lost),nature=IssueNature.UNSECURED_ASSIGNMENT))
       continue
-     flush_booking(); flush_position(); current=by_iban[iban]; section_accounts.add(current); depot_mode=False; depot_done=False
+     flush_historical(); historical_leading_dates.clear(); historical_leading_body.clear(); historical_unanchored.clear(); flush_booking(); flush_position(); current=by_iban[iban]; section_accounts.add(current); depot_mode=False; depot_done=False
      continue
    if depot_mode:
     if depot_done: continue
@@ -757,11 +774,12 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
     flush_position(); continue
    if current is None: continue
    if line.startswith("Kto. / IBAN"):
-    # Historische Tabellenspalten (Buchungstext, Betrag und Datum getrennt): Zeilen sind nicht sicher zuordenbar.
-    flush_booking(); historical_sections.add(current); continue
-   if current in historical_sections and not FR_SALDO.match(line): continue
+    historical_sections.add(current); historical_unanchored.clear(); continue
    saldo=FR_SALDO.match(line)
    if saldo:
+    flush_historical()
+    if historical_unanchored: historical_unassigned.add(current); historical_unanchored.clear()
+    if historical_leading_dates or historical_leading_body: historical_incomplete.add(current); historical_leading_dates.clear(); historical_leading_body.clear()
     flush_booking()
     amount=saldo.group(3); excerpt=line
     if amount is None and index<len(lines) and FR_AMOUNT.fullmatch(lines[index][2]):
@@ -772,6 +790,42 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
     balances.append(AccountBalance(stable_id("balance",current,saldo.group(1).lower(),saldo.group(2)),current,fv(date(saldo.group(2)),se),fv(dec(amount),se),fv("EUR",se),FieldValue.manual("opening" if saldo.group(1)=="Alter" else "closing")))
     (opened if saldo.group(1)=="Alter" else closed)[current]=dec(amount)
     if saldo.group(1)=="Neuer": current=None
+    continue
+   if current in historical_sections:
+    amounts=list(FR_HISTORICAL_AMOUNT.finditer(line))
+    if len(amounts)==1:
+     if historical_unanchored: historical_unassigned.add(current); historical_unanchored.clear()
+     mode=historical_modes.get(current)
+     if historical_pending is not None:
+      if mode=="amount-first" and len(historical_pending["dates"])>=2: flush_historical()
+      else: historical_pending["body"].append(line); historical_pending["raw"].append(line); continue
+     if mode is None:
+      if len(historical_leading_dates)==2: mode="dates-first"
+      elif not historical_leading_dates: mode="amount-first"
+      else: historical_incomplete.add(current); historical_leading_dates.clear(); historical_leading_body.clear(); continue
+      historical_modes[current]=mode
+     if mode=="dates-first" and len(historical_leading_dates)!=2:
+      historical_unassigned.add(current); historical_leading_dates.clear(); historical_leading_body.clear(); continue
+     amount=amounts[0]; purpose=(line[:amount.start()]+" "+line[amount.end():]).strip()
+     historical_pending={"account":current,"dates":list(historical_leading_dates),"body":[*historical_leading_body,purpose],"raw":[*historical_leading_dates,*historical_leading_body,line],"amount":dec(amount.group(1)),"offset":offset,"page":page}
+     historical_leading_dates.clear(); historical_leading_body.clear()
+     continue
+    if FR_DATE_LINE.fullmatch(line):
+     if historical_unanchored: historical_unassigned.add(current); historical_unanchored.clear()
+     mode=historical_modes.get(current)
+     if mode=="dates-first":
+      if historical_pending is not None: flush_historical()
+      historical_leading_dates.append(line)
+      if len(historical_leading_dates)>2: historical_incomplete.add(current)
+     elif historical_pending is None:
+      historical_leading_dates.append(line)
+      if len(historical_leading_dates)>2: historical_incomplete.add(current)
+     else:
+      historical_pending["dates"].append(line); historical_pending["raw"].append(line)
+     continue
+    if historical_pending is None and historical_leading_dates: historical_leading_body.append(line)
+    elif historical_pending is None: historical_unanchored.append(line)
+    else: historical_pending["body"].append(line); historical_pending["raw"].append(line)
     continue
    row=FR_ROW.match(line)
    if row and not FR_DATE_LINE.fullmatch(line):
@@ -796,12 +850,21 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
     pending["amount"]=dec(line); pending["raw"].append(line); flush_booking(); continue
    if pending is not None:
     pending["body"].append(line); pending["raw"].append(line)
-  flush_booking(); flush_position()
+  flush_historical(); flush_booking(); flush_position()
 
+  unsupported_historical=set()
   for aid in sorted(historical_sections):
-   differs=aid in opened and aid in closed and opened[aid]!=closed[aid]
-   issues.append(Issue(stable_id("issue",doc.document_id,"historical-bookings",aid),"HISTORICAL_BOOKING_LAYOUT_UNSUPPORTED",IssueSeverity.ERROR if differs else IssueSeverity.WARNING,"Historisches Buchungslayout: Salden übernommen, Einzelbuchungen wurden nicht übernommen (Saldenabgleich entfällt)."+(" Anfangs- und Endsaldo weichen ab." if differs else ""),nature=IssueNature.MISSING_INFORMATION))
-  for aid in (section_accounts|{event.cash_movements[0].account_id for event in events if event.cash_movements and event.cash_movements[0].account_id})-historical_sections:
+   total=sum((event.cash_movements[0].amount for event in events if event.cash_movements and event.cash_movements[0].account_id==aid),Decimal())
+   complete=aid not in historical_incomplete and aid not in historical_unassigned and aid in opened and aid in closed and opened[aid]+total==closed[aid]
+   if complete: continue
+   unsupported_historical.add(aid)
+   reasons=[]
+   if aid in historical_incomplete: reasons.append("unvollständiger oder mehrdeutiger Buchungsblock")
+   if aid in historical_unassigned: reasons.append("nicht zuordenbare Tabellenzeile")
+   if aid not in opened or aid not in closed: reasons.append("Anfangs- oder Endsaldo fehlt")
+   elif opened[aid]+total!=closed[aid]: reasons.append("Saldenabweichung")
+   issues.append(Issue(stable_id("issue",doc.document_id,"historical-bookings",aid),"HISTORICAL_BOOKING_LAYOUT_UNSUPPORTED",IssueSeverity.ERROR,"Historisches Buchungslayout nicht vollständig erkannt (%s); nicht eindeutig zuordenbare Buchungen wurden nicht übernommen."%", ".join(reasons),nature=IssueNature.MISSING_INFORMATION))
+  for aid in (section_accounts|{event.cash_movements[0].account_id for event in events if event.cash_movements and event.cash_movements[0].account_id})-unsupported_historical:
    total=sum((event.cash_movements[0].amount for event in events if event.cash_movements and event.cash_movements[0].account_id==aid),Decimal())
    if aid not in opened or aid not in closed:
     issues.append(Issue(stable_id("issue",aid,"saldo-missing"),"SALDO_MISSING",IssueSeverity.WARNING,"Anfangs- oder Endsaldo fehlt; Saldenprüfung entfällt.",nature=IssueNature.MISSING_INFORMATION)); continue
@@ -854,4 +917,4 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
      seen_links.add(link_key)
      le=ev("depot_account_link",match); links.append(DepotAccountLink(stable_id("depot-account",depots[0].depot_id,account.account_id,doc.document_id),depots[0].depot_id,account.account_id,fv("SETTLEMENT",le),valid_from=fv(date(period.group(1)),le) if period else FieldValue.unknown(),is_default=FieldValue.manual(False)))
   attrs={"document_number":header.group(1) or MissingValue.NOT_FOUND,"period_start":period.group(1) if period else MissingValue.NOT_FOUND,"period_end":period.group(2) if period else MissingValue.NOT_FOUND,"report_date":report_date or MissingValue.NOT_FOUND,"layout_path":"core" if re.search(r"IBAN|Depotgesamtwert",text,re.I) else "legacy"}
-  return ParsedDocument(stable_id("result",doc.document_id,self.metadata.version),doc.document_id,self.metadata.plugin_id,self.metadata.version,"finanzreport",events=tuple(events),evidence=tuple(evidence),issues=tuple(issues),attributes=attrs,accounts=tuple(accounts),account_balances=tuple(balances),depots=tuple(depots),depot_snapshots=tuple(snapshots),depot_account_links=tuple(links))
+  return ParsedDocument(stable_id("result",doc.document_id,self.metadata.version),doc.document_id,self.metadata.plugin_id,self.metadata.version,"finanzreport",events=tuple(events),evidence=tuple(evidence+deferred_evidence),issues=tuple(issues),attributes=attrs,accounts=tuple(accounts),account_balances=tuple(balances),depots=tuple(depots),depot_snapshots=tuple(snapshots),depot_account_links=tuple(links))
