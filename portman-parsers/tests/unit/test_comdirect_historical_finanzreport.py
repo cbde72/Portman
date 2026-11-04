@@ -241,6 +241,25 @@ Neuer Saldo 31.01.2013 +90,00
     assert [(issue.code, issue.severity.value) for issue in result.issues] == [("HISTORICAL_BOOKING_LAYOUT_UNSUPPORTED", "ERROR")]
 
 
+def test_historische_buchungskandidaten_ohne_saldenabgleich_werden_nicht_ausgegeben():
+    text = """comdirect\nFinanzreport Nr. 1 per 01.02.2013
+Girokonto
+Buchungstag
+Kto. / IBAN BLZ / BIC
+Alter Saldo 01.01.2013 +100,00
+01.01.2013
+02.01.2013
+Lastschrift -10,00 Beispiel
+Neuer Saldo 31.01.2013 +95,00
+""" + _hinweis(Girokonto=IBAN_GIRO)
+    result = _parse(text)
+    assert not result.events
+    issue = next(issue for issue in result.issues if issue.code == "HISTORICAL_BOOKING_LAYOUT_UNSUPPORTED")
+    assert issue.severity.value == "ERROR"
+    assert "1 erkannte Buchungskandidaten" in issue.message
+    assert "nicht als Kontobewegungen ausgegeben" in issue.message
+
+
 def test_historische_tabellenspalten_daten_vor_buchung_und_betrag_im_text():
     text = """comdirect\nFinanzreport Nr. 1 per 01.02.2013
 Girokonto

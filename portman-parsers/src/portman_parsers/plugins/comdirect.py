@@ -854,7 +854,8 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
 
   unsupported_historical=set()
   for aid in sorted(historical_sections):
-   total=sum((event.cash_movements[0].amount for event in events if event.cash_movements and event.cash_movements[0].account_id==aid),Decimal())
+   account_events=[event for event in events if event.cash_movements and event.cash_movements[0].account_id==aid]
+   total=sum((event.cash_movements[0].amount for event in account_events),Decimal())
    complete=aid not in historical_incomplete and aid not in historical_unassigned and aid in opened and aid in closed and opened[aid]+total==closed[aid]
    if complete: continue
    unsupported_historical.add(aid)
@@ -863,7 +864,9 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
    if aid in historical_unassigned: reasons.append("nicht zuordenbare Tabellenzeile")
    if aid not in opened or aid not in closed: reasons.append("Anfangs- oder Endsaldo fehlt")
    elif opened[aid]+total!=closed[aid]: reasons.append("Saldenabweichung")
-   issues.append(Issue(stable_id("issue",doc.document_id,"historical-bookings",aid),"HISTORICAL_BOOKING_LAYOUT_UNSUPPORTED",IssueSeverity.ERROR,"Historisches Buchungslayout nicht vollständig erkannt (%s); nicht eindeutig zuordenbare Buchungen wurden nicht übernommen."%", ".join(reasons),nature=IssueNature.MISSING_INFORMATION))
+   issues.append(Issue(stable_id("issue",doc.document_id,"historical-bookings",aid),"HISTORICAL_BOOKING_LAYOUT_UNSUPPORTED",IssueSeverity.ERROR,"Historisches Buchungslayout nicht vollständig erkannt (%s); %d erkannte Buchungskandidaten wurden wegen des fehlenden Saldenabgleichs nicht als Kontobewegungen ausgegeben."%(", ".join(reasons),len(account_events)),nature=IssueNature.MISSING_INFORMATION))
+  if unsupported_historical:
+   events=[event for event in events if not event.cash_movements or event.cash_movements[0].account_id not in unsupported_historical]
   for aid in (section_accounts|{event.cash_movements[0].account_id for event in events if event.cash_movements and event.cash_movements[0].account_id})-unsupported_historical:
    total=sum((event.cash_movements[0].amount for event in events if event.cash_movements and event.cash_movements[0].account_id==aid),Decimal())
    if aid not in opened or aid not in closed:
