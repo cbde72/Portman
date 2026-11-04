@@ -550,12 +550,15 @@ class ComdirectPlugin:
 
 FR_NAMES=("Girokonto","Tagesgeld PLUS-Konto","Tagesgeld PLUS","Tagesgeldkonto","Verrechnungskonto","O&F-Konto")
 FR_ACCOUNT_LINE=re.compile(r"^("+"|".join(FR_NAMES)+r")\s+(DE(?:\s*\d){20})(?:\s+([+-]?"+A+r"))?(?:\s+([A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?))?$")
+# Historische Layouts nennen die IBANs je Konto nur im Hinweisblock "Für Ihre Überweisungen ...".
+FR_LABELLED_IBAN=re.compile(r"^-?\s*(Girokonto|Tagesgeld PLUS(?:-Konto)?|Tagesgeldkonto|Verrechnungskonto|O&F-Konto)\s*:\s*Konto\s+\d+\s+IBAN\s+(DE(?:\s*\d){20})")
 FR_HEADING=re.compile(r"^(Girokonto|Tagesgeld(?: PLUS(?:-Konto)?)?|Tagesgeldkonto|Verrechnungskonto|O&F-Konto)(?:\s+(?:Dispositionskredit|ec|girocard)\b.*)?$")
 FR_SALDO=re.compile(r"^(Alter|Neuer)\s+Saldo\s+("+D+r")(?:\s+([+-]?"+A+r"))?$",re.I)
 FR_AMOUNT=re.compile(r"^[+-]?"+A+r"$")
 FR_BOOKING_AMOUNT=re.compile(r"^[+-]"+A+r"$")
 FR_DATE_LINE=re.compile(r"^"+D+r"$")
 FR_ROW=re.compile(r"^("+D+r")(?:\s+("+D+r"))?\s+(.*?)\s+([+-]"+A+r")$")
+FR_ROW_TYPE_FIRST=re.compile(r"^(\D.*?)\s+("+D+r")\s+("+D+r")\s+([+-]"+A+r")$")
 FR_POSITION_HEAD=re.compile(r"^([A-Z0-9]{6})\s*/\s*(Girosammelverwahrung|Wertpapierrechnung)$")
 FR_POSITION_VALUES=re.compile(r"^("+A+r")\s+("+A+r")\s+([A-Z]{3})\s+("+A+r")$")
 FR_POSITION_REST=re.compile(r"^([+-]?"+A+r")(?:\s+([+-]"+A+r"))?$")
@@ -658,6 +661,16 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
     issues.append(Issue(stable_id("issue",doc.document_id,"position",block["wkn"]),"DEPOT_POSITION_MISMATCH",IssueSeverity.ERROR,"Kurswert, Kaufwert und Gewinn/Verlust der Position %s sind nicht abgestimmt."%block["wkn"],nature=IssueNature.MATHEMATICAL_INCONSISTENCY))
    positions.append(block)
 
+  # Namensbezogene IBANs aus dem historischen Hinweisblock; widersprüchliche Angaben gelten als nicht eindeutig.
+  labelled={}; labelled_conflicts=set(); historical_sections=set()
+  for _page,label_offset,label_line in lines:
+   label=FR_LABELLED_IBAN.match(label_line)
+   if not label: continue
+   label_name=label.group(1).lower(); label_iban=re.sub(r"\s","",label.group(2))
+   if label_name in labelled and labelled[label_name][0]!=label_iban: labelled_conflicts.add(label_name)
+   labelled.setdefault(label_name,(label_iban,label_line,label_offset))
+  for label_name in labelled_conflicts: del labelled[label_name]
+
   index=0
   while index<len(lines):
    page,offset,line=lines[index]
@@ -689,7 +702,19 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
      iban=names.get(name.lower())
      if iban is None and name.lower().startswith("tagesgeld"): iban=names.get("tagesgeld plus-konto")
      if iban is None:
-      raise ValueError("Finanzreport: Kontobereich ohne Kontoübersicht (IBAN fehlt) für "+heading.group(1)+".")
+      found=labelled.get(name.lower()) or (labelled.get("tagesgeld plus-konto") if name.lower()=="tagesgeld plus" else None) or (labelled.get("tagesgeld plus") if name.lower()=="tagesgeld plus-konto" else None)
+      if found is not None:
+       account_dto(name,found[0],None,found[1],found[2]); iban=found[0]
+     if iban is None:
+      # Keine IBAN im Dokument bzw. nicht eindeutig: Bereich nicht zuordnen, Verlust sichtbar melden.
+      flush_booking(); flush_position(); current=None; depot_mode=False; depot_done=False
+      lost=0
+      for _p,_o,later in lines[index:]:
+       if FR_SALDO.match(later) and later.startswith("Neuer"): break
+       if (FR_ROW.match(later) and not FR_DATE_LINE.fullmatch(later)) or FR_ROW_TYPE_FIRST.match(later): lost+=1
+      reason="mehrdeutig" if name.lower() in labelled_conflicts else "im Dokument nicht vorhanden"
+      issues.append(Issue(stable_id("issue",doc.document_id,"account-iban-missing",name.lower(),offset),"ACCOUNT_IBAN_UNRESOLVED",IssueSeverity.ERROR if lost else IssueSeverity.WARNING,"Kontobereich %s ohne eindeutige IBAN (%s); %d Buchung(en) wurden nicht übernommen."%(heading.group(1),reason,lost),nature=IssueNature.UNSECURED_ASSIGNMENT))
+      continue
      flush_booking(); flush_position(); current=by_iban[iban]; section_accounts.add(current); depot_mode=False; depot_done=False
      continue
    if depot_mode:
@@ -731,6 +756,10 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
     pos={"wkn":row.group(1),"page":page,"offset":offset,"raw":[line],"name":None,"quantity":dec(row.group(2)),"price":dec(row.group(3)),"price_currency":"EUR","value":dec(row.group(4)),"cost":None,"profit":None,"rest":[],"require_name":False,"price_date":row.group(5)}
     flush_position(); continue
    if current is None: continue
+   if line.startswith("Kto. / IBAN"):
+    # Historische Tabellenspalten (Buchungstext, Betrag und Datum getrennt): Zeilen sind nicht sicher zuordenbar.
+    flush_booking(); historical_sections.add(current); continue
+   if current in historical_sections and not FR_SALDO.match(line): continue
    saldo=FR_SALDO.match(line)
    if saldo:
     flush_booking()
@@ -749,6 +778,12 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
     flush_booking()
     pending={"booked":row.group(1),"valuta":row.group(2),"body":[row.group(3)],"raw":[line],"amount":dec(row.group(4)),"offset":offset,"page":page}
     flush_booking(); continue
+   row=FR_ROW_TYPE_FIRST.match(line)
+   if row:
+    # Historisches Layout: Vorgangsart zuerst, danach Buchungstag, Valuta und Betrag.
+    flush_booking()
+    pending={"booked":row.group(2),"valuta":row.group(3),"body":[row.group(1)],"raw":[line],"amount":dec(row.group(4)),"offset":offset,"page":page}
+    flush_booking(); continue
    if FR_DATE_LINE.fullmatch(line):
     if pending is None or pending["amount"] is not None:
      flush_booking(); pending={"booked":line,"valuta":None,"body":[],"raw":[line],"amount":None,"offset":offset,"page":page}
@@ -763,7 +798,10 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
     pending["body"].append(line); pending["raw"].append(line)
   flush_booking(); flush_position()
 
-  for aid in section_accounts|{event.cash_movements[0].account_id for event in events if event.cash_movements and event.cash_movements[0].account_id}:
+  for aid in sorted(historical_sections):
+   differs=aid in opened and aid in closed and opened[aid]!=closed[aid]
+   issues.append(Issue(stable_id("issue",doc.document_id,"historical-bookings",aid),"HISTORICAL_BOOKING_LAYOUT_UNSUPPORTED",IssueSeverity.ERROR if differs else IssueSeverity.WARNING,"Historisches Buchungslayout: Salden übernommen, Einzelbuchungen wurden nicht übernommen (Saldenabgleich entfällt)."+(" Anfangs- und Endsaldo weichen ab." if differs else ""),nature=IssueNature.MISSING_INFORMATION))
+  for aid in (section_accounts|{event.cash_movements[0].account_id for event in events if event.cash_movements and event.cash_movements[0].account_id})-historical_sections:
    total=sum((event.cash_movements[0].amount for event in events if event.cash_movements and event.cash_movements[0].account_id==aid),Decimal())
    if aid not in opened or aid not in closed:
     issues.append(Issue(stable_id("issue",aid,"saldo-missing"),"SALDO_MISSING",IssueSeverity.WARNING,"Anfangs- oder Endsaldo fehlt; Saldenprüfung entfällt.",nature=IssueNature.MISSING_INFORMATION)); continue
