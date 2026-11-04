@@ -35,7 +35,9 @@ FX=re.compile(r"(?:Devisenkurs|Umrechnungskurs)\s*:?[ \t]*("+A+r")",re.I)
 NAME=re.compile(r"(?:Wertpapierbezeichnung|Bezeichnung)\s*:?[ \t]*(.+)",re.I)
 SETTLE=re.compile(r"(?:Zu\s*Ihren\s*(?P<dir>Lasten|Gunsten)|(?:^|\n)Gutschrift|(?:^|\n)Zahlungsbetrag).{0,80}?(?P<cur>[A-Z]{3})\s*-?\s*(?P<a>"+A+r")",re.I|re.S)
 TAX=(("CAPITAL_GAINS_TAX",r"Kapitalertragsteuer\s*(?:EUR)?\s*-?("+A+r")"),("SOLIDARITY_SURCHARGE",r"Solidarit.tszuschlag\s*(?:EUR)?\s*-?("+A+r")"),("CHURCH_TAX",r"Kirchensteuer\s*(?:EUR)?\s*-?("+A+r")"),("WITHHOLDING_TAX",r"Quellensteuer\s*(?:[A-Z]{3})?\s*-?("+A+r")"))
-FEE=(("provision",r"Provision\s*:?\s*(?:EUR)?\s*-?("+A+r")"),("foreign_expenses",r"(?:Fremdspesen|fremde\s+Spesen)\s*:?\s*(?:EUR)?\s*-?("+A+r")"),("exchange_fee",r"(?:B.rsenplatz.*Entgelt|B.rsengeb.hr)\s*:?\s*(?:EUR)?\s*-?("+A+r")"))
+FEE=(("provision",r"Provision\s*:?\s*(?:EUR)?\s*-?("+A+r")"),("foreign_expenses",r"(?:Fremdspesen|fremde\s+Spesen)\s*:?\s*(?:EUR)?\s*-?("+A+r")"),("exchange_fee",r"(?:B.rsenplatz.*Entgelt|B.rsengeb.hr)\s*:?\s*(?:EUR)?\s*-?("+A+r")"),("clearing_fee",r"Abwickl\S*entgelt\s*Clearstream\s*:?\s*(?:EUR)?\s*-?("+A+r")"))
+# Gebührenzeilen in defekter Schrift: Bezeichnung lesbar (bzw. mit verschobenen Großbuchstaben), Doppelpunkt, "EUR" und Betrag verschlüsselt.
+CIPHER_FEE_LABELS=(("provision",r"P?rovision"),("clearing_fee",r"\Sbwickl\Sentgelt{sp}\Slearstream"),("exchange_fee",r"\S.rsenplatzabh.ng\S{sp}\Sntgelt"))
 CIPHER_TRADE=re.compile(r"Nennwert\s*Zum\s*(?:Misch)?[Kk]urs\s*von\s*\n\s*St\S(?P<sp>\S)(?P=sp)*(?P<qty>(?:(?!(?P=sp))\S)+)(?P=sp)+\SUR(?P=sp)+(?P<price>\S+?)(?P=sp)*\n"
                         r"(?P=sp)*Kurswert(?P=sp)+\S(?P=sp)\SUR(?P=sp)+(?P<market>\S+?)(?P=sp)*\n")
 CIPHER_ACCOUNT=re.compile(r"Steuern\s*\nDE(?P<iban>\S+?)(?P<sp>\S)\SUR(?P=sp)+(?P<valuta>\S{10})")
@@ -91,7 +93,7 @@ def _cipher_trade(head,tail):
      qty,price,market=(dec(t) for t in texts)
     except (KeyError,ArithmeticError,ValueError):
      continue
-    if qty>0 and (qty*price).quantize(Decimal("0.01"),ROUND_HALF_UP)==market: solutions.append((qty,price,market))
+    if qty>0 and (qty*price).quantize(Decimal("0.01"),ROUND_HALF_UP)==market: solutions.append((qty,price,market,trial))
    return solutions
 
   solutions=solve(key)
@@ -101,6 +103,39 @@ def _cipher_trade(head,tail):
    if all(key.get(c,p)==p for c,p in hint.items()):
     solutions=[x for x in solve({**hint,**key}) if x[2]==dec(settle.group(1))]
   return solutions[0] if len(solutions)==1 else None
+
+
+def _cipher_fees(head,tail,cipher):
+  """Entschlüsselt Gebührenzeilen mit dem Schlüssel aus `_cipher_trade`.
+
+  Ein Wert gilt nur, wenn jedes Zeichen im belegten Schlüssel steht und der Kurswert
+  zuzüglich aller entschlüsselten Gebühren exakt der lesbaren Belastung vor Steuern
+  entspricht. Wie in `_cipher_trade` werden bis zu zwei unbekannte Ziffern nur über die
+  aufsteigende Sortierung der Schrift eingegrenzt; es muss genau eine Lösung bleiben.
+  Sonst bleiben die Gebühren leer; es werden keine Beträge abgeleitet.
+  """
+  trade=CIPHER_TRADE.search(head); settle=re.search(r"Lasten\s*vor\s*Steuern:?\s*EUR\s*-?("+A+r")",tail,re.I)
+  if not (cipher and trade and settle): return ()
+  sp=re.escape(trade["sp"]); key=cipher[3]; coded=[]
+  for kind,label in CIPHER_FEE_LABELS:
+   line=re.compile(r"(?:^|\n)"+sp+r"*(?:"+label.format(sp=sp)+r")"+sp+r"+\S"+sp+r"\SU\S?"+sp+r"+(?P<amt>(?:(?!"+sp+r")\S)+)"+sp+r"*(?:\n|$)")
+   coded+=[(kind,match["amt"]) for match in line.finditer(head)]
+  if not coded or len({k for k,_ in coded})!=len(coded): return ()
+  known={int(p):c for c,p in key.items() if p.isdigit()}
+  unknown=sorted({c for _,amount in coded for c in amount}-set(key))
+  if len(unknown)>2: return ()
+  def candidates(code):
+   return [str(d) for d in range(10) if d not in known
+           and all(c<code for k,c in known.items() if k<d) and all(c>code for k,c in known.items() if k>d)]
+  solutions=[]
+  for digits in product(*(candidates(code) for code in unknown)):
+   if len(set(digits))<len(digits): continue
+   trial={**key,**dict(zip(unknown,digits))}
+   texts=["".join(trial[c] for c in amount) for _,amount in coded]
+   if not all(re.fullmatch(r"\d{1,3}(?:\.\d{3})*,\d{2}",t) for t in texts): continue
+   fees=tuple((kind,dec(t)) for (kind,_),t in zip(coded,texts))
+   if cipher[2]+sum(a for _,a in fees)==dec(settle.group(1)): solutions.append(fees)
+  return solutions[0] if len(solutions)==1 else ()
 
 
 @dataclass(frozen=True)
@@ -446,6 +481,9 @@ class ComdirectPlugin:
   # position change.  Never synthesize a SecurityMovement for it.
   security=() if kind not in {"BUY", "SELL", "REDEMPTION"} or not(qty and isin) else (SecurityMovement(stable_id("security",event_id),event_id,isin,qty if kind=="BUY" else -qty,(event_ev,),depot_id),)
   fees=tuple(FeeEvent(stable_id("fee",event_id,k),"trading",k,dec(m.group(1)),"EUR",date(valuta.group(1)) if valuta else date("01.01.1970"),FeeEffect.INCLUDED_IN_SETTLEMENT,doc.document_id,"comdirect",depot_id=depot_id,account_id=account_id,security_id=isin,transaction_id=event_id,evidence_ids=(event_ev,)) for k,p in FEE for m in [re.search(p,text,re.I)] if m)
+  # Nur Käufe: dort ist die Belastung vor Steuern genau Kurswert plus Entgelte; Klartextgebühren haben Vorrang.
+  if kind=="BUY" and cipher and not fees:
+   fees=tuple(FeeEvent(stable_id("fee",event_id,k),"trading",k,amount,"EUR",date(valuta.group(1)) if valuta else date("01.01.1970"),FeeEffect.INCLUDED_IN_SETTLEMENT,doc.document_id,"comdirect",depot_id=depot_id,account_id=account_id,security_id=isin,transaction_id=event_id,evidence_ids=(event_ev,)) for k,amount in _cipher_fees(head,text[len(head):],cipher))
   # Die "Steuerliche Behandlung" eines Kaufs wirkt nur auf den Verrechnungstopf; ihre 0,00-Zeilen sind keine einbehaltene Steuer.
   comps=tuple(TaxComponent(k,dec(m.group(1)),"EUR") for k,p in TAX for m in [re.search(p,text,re.I)] if m and (kind!="BUY" or dec(m.group(1))>0)); taxes=(TaxEvent(stable_id("tax",event_id),event_id,"WITHHOLDING",comps,evidence_ids=(event_ev,),depot_id=depot_id,isin=isin,bank_id="comdirect",account_id=account_id),) if comps else ()
   trades=()

@@ -450,3 +450,53 @@ Zu Ihren Lasten EUR 24,92"""
   result=plugin.parse(source,plugin.detect(source)[0]); event=result.events[0]
   assert event.trades[0].quantity is MissingValue.NOT_FOUND and not event.security_movements
   assert "COMDIRECT_QUANTITY_MISSING" in {issue.code for issue in result.issues}
+
+# Gebühren in defekter Schrift (codierte Zeichenfolgen aus echten Abrechnungen, ohne Personendaten)
+def cipher_fees(text):
+ return [(fee.subcategory,fee.amount) for fee in parse_text(text).events[0].fee_events]
+
+SAP_ARGS=("T","�","l","E","noloolpnps","zoppnvsw","nioor","pouisn","psist","01.11.2024","91220748","0,113","24,82")
+def sap_fee_head(coded,sp="T"):
+ return f"Eigene{sp}Entgelte{sp*20}\n{sp*26}Provision{sp*19}§{sp}EUR{sp*16}{coded}{sp*11}\n"
+
+def test_cipher_provision_is_decoded_with_trade_key():
+ text=raw_cipher_buy(*SAP_ARGS,kurs="Mischkurs",head=sap_fee_head("nirv"))
+ assert cipher_values(text)==(Decimal("0.113"),Decimal("216.40"),Decimal("24.45"))
+ assert cipher_fees(text)==[("provision",Decimal("0.37"))]
+
+def test_cipher_provision_is_not_invented_when_settlement_does_not_match():
+ # "nirt" ergäbe 0,35; Kurswert + Gebühr erklärt die Belastung von 24,82 dann nicht.
+ text=raw_cipher_buy(*SAP_ARGS,kurs="Mischkurs",head=sap_fee_head("nirt"))
+ assert cipher_values(text)==(Decimal("0.113"),Decimal("216.40"),Decimal("24.45"))
+ assert cipher_fees(text)==[]
+
+def test_cipher_provision_resolves_missing_digit_by_glyph_order_and_settlement():
+ # "s" kommt sonst nirgends vor; zwischen r=4 und t=6 bleibt nur 5, und 39,41 + 0,59 = 40,00.
+ sp="R"; head=f"Eigene{sp}Entgelte{sp*20}\n{sp*26}Provision{sp*19}z{sp}EUR{sp*17}mgsw{sp*53}\n"
+ text=raw_cipher_buy(sp,"z","i","E","mnimpiomon","wnmopomo","ngtm","orgtp","pwgrn","01.03.2021","91023202","1,600","40,00",head=head)
+ assert cipher_values(text)==(Decimal("1.60"),Decimal("24.63"),Decimal("39.41"))
+ assert cipher_fees(text)==[("provision",Decimal("0.59"))]
+
+def test_cipher_clearing_provision_and_exchange_fee_are_all_required():
+ sp="w"; eur="�"
+ clearing=f"{sp*26}zbwicklcentgelt{sp}ßlearstream{sp}p{sp}{eur}UR{sp*16}gaoe{sp*11}\n"
+ provision=f"{sp*26}Provision{sp*19}p{sp}{eur}UR{sp*16}oaoe{sp*11}\n"
+ exchange=f"{sp*26}§örsenplatzabhängc{sp}öntgelt{sp*2}p{sp}{eur}UR{sp*16}gake{sp*11}\n"
+ args=(sp,"p","c",eur,"elcefcgegh","ofeeekfk","ge","loanf","fcholage","06.01.2023","91000515","20","1.411,50")
+ assert sorted(cipher_fees(raw_cipher_buy(*args,head=clearing+provision+exchange)))==[
+  ("clearing_fee",Decimal("2.90")),("exchange_fee",Decimal("2.50")),("provision",Decimal("9.90"))]
+ # Fehlt eine ausgewiesene Gebühr, erklärt die Summe die Belastung nicht: keine Teilübernahme.
+ assert cipher_fees(raw_cipher_buy(*args,head=clearing+provision))==[]
+
+def test_plain_clearstream_settlement_fee_is_extracted():
+ text="""comdirect
+Wertpapierkauf
+Nennwert Zum Kurs von
+St. 16 EUR 25,00
+Kurswert : EUR 400,00
+Provision : EUR 9,90
+Abwickl.entgelt Clearstream : EUR 2,90
+Börsenplatzabhäng. Entgelt : EUR 1,50
+Summe Entgelte : EUR 14,30
+Zu Ihren Lasten vor Steuern EUR 414,30"""
+ assert sorted(cipher_fees(text))==[("clearing_fee",Decimal("2.90")),("exchange_fee",Decimal("1.50")),("provision",Decimal("9.90"))]
