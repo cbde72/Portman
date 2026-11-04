@@ -18,7 +18,7 @@ ISIN_CANDIDATE=re.compile(r"[A-Z]{2}[A-Z0-9]{9}[0-9]")
 WKN_CANDIDATE=re.compile(r"(?<![A-Z0-9])[A-Z0-9]{6}")
 IDENTITY_HEADER=re.compile(r"Wertpapier\s*-?\s*Bezeichnung.*?(?:WKN|WPKNR)\s*/\s*ISIN",re.I)
 IDENTITY_ROW_STOP=re.compile(r"^(?:Emissionsland|zahlbar|Abrechnung|Bruttobetrag|Zu\s+Ihren|Verrechnung|Information|Ihre\s+comdirect|Gesch(?:ä|ae)ftstag|Schlusstag|Ausf(?:ü|ue)hrungstag|Ausf(?:ü|ue)hrung|Depot|IBAN|Valuta|Kurs|Kurswert|Provision|Steuer|Referenz|F(?:ä|ae)lligkeit|Nennwert|Gesch(?:ä|ae)ftsnummer|Rechnungsnummer|Kundennr|BLZ|Telefon)\b",re.I)
-IDENTITY_ROW_PREFIX=re.compile(r"^\s*(?:per\s+\d{2}\.\d{2}\.\d{4}|(?:STK|Stk)\.?\s*-?\s*[\d.,]+)\s*",re.I)
+IDENTITY_ROW_PREFIX=re.compile(r"^\s*(?:p\s*e\s*r\s+\d{2}\.\d{2}\.\d{4}|(?:S\s*T\s*K)\.?\s*-?\s*[\d.,]+)\s*",re.I)  # Layouttext trennt Buchstaben ("p er", "S TK")
 IDENTITY_REASON={"PARTIAL":"nur WKN oder Name erkannt","AMBIGUOUS":"mehrere Kennungen im selben Wertpapierblock","INVALID":"ISIN-Prüfziffer oder ISIN-Format ungültig"}
 QTY=re.compile(r"(?:Stk\.?|STK)\s*("+A+r")",re.I); NENNWERT_QTY=re.compile(r"Nennwert\s*Zum\s*(?:Misch)?Kurs\s*von\s*(?:St\.?|Stk\.?)\s*("+A+r")",re.I); VALUTA=re.compile(r"(?:Valuta|zahlbar\s+ab)\s*("+D+r")",re.I)
 WKN=re.compile(r"\bWKN\s*:?[ \t]*([A-Z0-9]{6})\b",re.I)
@@ -345,6 +345,28 @@ def evidence_page(document,excerpt,offset=None,alternatives=()):
       if key in _squash(page.text): return page.number
   raise ValueError(f"evidence excerpt does not occur in any PDF page: {str(excerpt)[:60]!r}")
 
+def _original_excerpt(document,candidates):
+  """Return the first candidate as it literally occurs in a PDF page, else None.
+
+  Names are normalised (layout text, collapsed glyph spacing, row order), so a
+  candidate may differ from the page text only by whitespace.  In that case the
+  original page span is returned, never the normalised text and never a
+  substitute finding.
+  """
+  for candidate in candidates:
+    if not candidate or not str(candidate).strip(): continue
+    candidate=str(candidate)
+    for page in document.pages:
+      if candidate in page.text: return candidate
+    key=_squash(candidate)
+    if not key: continue
+    for page in document.pages:
+      positions=[i for i,ch in enumerate(page.text) if not ch.isspace()]
+      squashed="".join(page.text[i] for i in positions).lower()
+      start=squashed.find(key)
+      if start>=0: return page.text[positions[start]:positions[start+len(key)-1]+1]
+  return None
+
 def evidence_recorder(document,plugin_id,handler_id,plugin_version):
   """Evidence factory whose field values always share the evidence page.
 
@@ -456,6 +478,13 @@ class ComdirectPlugin:
   if labelled_wkn and not re.fullmatch(r"[A-Z0-9]{6}", labelled_wkn):
    labelled_wkn = None
   resolved_wkn = column_wkn or labelled_wkn or (line_match.group("wkn").upper() if line_match else None)
+  # Der Name stammt ggf. aus dem Layouttext (andere Spaltenfolge/Zeichenabstände);
+  # als Evidence zählt nur Originaltext der Seiten, sonst bleibt der Name leer.
+  name_excerpt=_original_excerpt(doc,(identity.name_source,*identity.name_rows,security_name)) if security_name else None
+  if security_name and not name_excerpt:
+   issues.append(Issue(stable_id("issue",event_id,"security-name-evidence"),"COMDIRECT_SECURITY_NAME_UNVERIFIED",IssueSeverity.WARNING,
+                       "Wertpapiername im PDF-Text nicht belegbar; Name bleibt leer.",event_id=event_id,nature=IssueNature.MISSING_INFORMATION))
+   security_name=None
   if identity.status in {"AMBIGUOUS", "INVALID"}:
    issues.append(Issue(stable_id("issue", event_id, "security-identity", identity.status),
                        "COMDIRECT_SECURITY_" + identity.status, IssueSeverity.WARNING,
@@ -495,8 +524,7 @@ class ComdirectPlugin:
    price=dec(pm.group("a")) if pm else (dec(exec_match.group("price")) if exec_match else cipher[1] if cipher else None)
    market=dec(mm.group("a")) if mm else (dec(exec_match.group("market")) if exec_match else cipher[2] if cipher else None)
    trades=(SecurityTrade(stable_id("trade",event_id),event_id,kind,name_value or MissingValue.NOT_FOUND,isin or MissingValue.NOT_FOUND,resolved_wkn or MissingValue.NOT_FOUND,qty if qty is not None else MissingValue.NOT_FOUND,date(tm.group(1)) if tm else (date(dm.group(1)) if dm else MissingValue.NOT_FOUND),date(xm.group(1)) if xm else MissingValue.NOT_FOUND,date(valuta.group(1)) if valuta else MissingValue.NOT_FOUND,price if price is not None else MissingValue.NOT_FOUND,(pm.group("cur1") or pm.group("cur2")) if pm and (pm.group("cur1") or pm.group("cur2")) else ("EUR" if price is not None and not pm else MissingValue.NOT_FOUND),market if market is not None else MissingValue.NOT_FOUND,dec(gm.group("a")) if gm else MissingValue.NOT_FOUND,dec(fx.group(1)) if fx else MissingValue.NOT_FOUND,dec(settlement.group("a")) if settlement else MissingValue.NOT_FOUND,settlement.group("cur") if settlement else MissingValue.NOT_FOUND,depot_id,account_id,(event_ev,)),)
-  identity_evidence=tuple(ev(label,(identity.name_source or value) if label=="security_name" else value,
-                             *(identity.name_rows if label=="security_name" else ()))
+  identity_evidence=tuple(ev(label,name_excerpt if label=="security_name" else value)
                           for label,value in (("security_wkn",resolved_wkn),("security_isin",isin),("security_name",security_name)) if value)
   reference_matches=tuple(BANK_REFERENCE.finditer(text))
   reference_values=tuple(re.sub(r"\s+","",match.group(1)) for match in reference_matches)
