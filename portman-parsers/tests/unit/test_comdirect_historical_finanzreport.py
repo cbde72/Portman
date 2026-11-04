@@ -167,7 +167,7 @@ Neuer Saldo 31.01.2007 +9,33
     assert not result.issues
 
 
-def test_historische_tabellenspalten_uebernehmen_salden_aber_keine_ungesicherten_buchungen():
+def test_historische_tabellenspalten_uebernehmen_eindeutige_buchung_und_stimmen_saldo_ab():
     text = """comdirect\nFinanzreport Nr. 1 per 01.02.2013
 Girokonto
 Buchungstag
@@ -180,6 +180,100 @@ Neuer Saldo 31.01.2013 +90,00
 """ + _hinweis(Girokonto=IBAN_GIRO)
     result = _parse(text)
     assert len(result.accounts) == 1 and len(result.account_balances) == 2
+    assert [event.cash_movements[0].amount for event in result.events] == [Decimal("-10.00")]
+    assert not result.issues
+
+
+def test_historische_tabellenspalten_text_vor_betrag_und_wiederholter_kopf():
+    text = """comdirect\nFinanzreport Nr. 1 per 01.02.2013
+Girokonto
+Buchungstag
+Kto. / IBAN BLZ / BIC
+Alter Saldo 01.01.2013 +100,00
+Lastschrift Beispiel -10,00
+Referenzzeile
+01.01.2013
+01.01.2013
+Kto. / IBAN BLZ / BIC
+Gutschrift Beispiel +5,00
+02.01.2013
+03.01.2013
+Neuer Saldo 31.01.2013 +95,00
+""" + _hinweis(Girokonto=IBAN_GIRO)
+    result = _parse(text)
+    assert [event.cash_movements[0].amount for event in result.events] == [Decimal("-10.00"), Decimal("5.00")]
+    assert not result.issues
+
+
+def test_historischer_seitenkopf_verwirft_nur_unverankerte_seitenrandzeilen():
+    text = """comdirect\nFinanzreport Nr. 1 per 01.02.2013
+Girokonto
+Buchungstag
+Kto. / IBAN BLZ / BIC
+Alter Saldo 01.01.2013 +100,00
+Seitenfuß
+Kontaktzeile
+Kto. / IBAN BLZ / BIC
+01.01.2013
+02.01.2013
+Lastschrift -10,00 Beispiel
+Neuer Saldo 31.01.2013 +90,00
+""" + _hinweis(Girokonto=IBAN_GIRO)
+    result = _parse(text)
+    assert [event.cash_movements[0].amount for event in result.events] == [Decimal("-10.00")]
+    assert not result.issues
+
+
+def test_historische_tabellenspalten_mehrdeutige_daten_bleiben_offen():
+    text = """comdirect\nFinanzreport Nr. 1 per 01.02.2013
+Girokonto
+Buchungstag
+Kto. / IBAN BLZ / BIC
+Alter Saldo 01.01.2013 +100,00
+Lastschrift Beispiel -10,00
+01.01.2013
+02.01.2013
+03.01.2013
+Neuer Saldo 31.01.2013 +90,00
+""" + _hinweis(Girokonto=IBAN_GIRO)
+    result = _parse(text)
     assert not result.events
-    codes = [(i.code, i.severity.value) for i in result.issues]
-    assert codes == [("HISTORICAL_BOOKING_LAYOUT_UNSUPPORTED", "ERROR")]
+    assert [(issue.code, issue.severity.value) for issue in result.issues] == [("HISTORICAL_BOOKING_LAYOUT_UNSUPPORTED", "ERROR")]
+
+
+def test_historische_buchungskandidaten_ohne_saldenabgleich_werden_nicht_ausgegeben():
+    text = """comdirect\nFinanzreport Nr. 1 per 01.02.2013
+Girokonto
+Buchungstag
+Kto. / IBAN BLZ / BIC
+Alter Saldo 01.01.2013 +100,00
+01.01.2013
+02.01.2013
+Lastschrift -10,00 Beispiel
+Neuer Saldo 31.01.2013 +95,00
+""" + _hinweis(Girokonto=IBAN_GIRO)
+    result = _parse(text)
+    assert not result.events
+    issue = next(issue for issue in result.issues if issue.code == "HISTORICAL_BOOKING_LAYOUT_UNSUPPORTED")
+    assert issue.severity.value == "ERROR"
+    assert "1 erkannte Buchungskandidaten" in issue.message
+    assert "nicht als Kontobewegungen ausgegeben" in issue.message
+
+
+def test_historische_tabellenspalten_daten_vor_buchung_und_betrag_im_text():
+    text = """comdirect\nFinanzreport Nr. 1 per 01.02.2013
+Girokonto
+Buchungstag
+Kto. / IBAN BLZ / BIC
+Alter Saldo 01.01.2013 +100,00
+01.01.2013
+02.01.2013
+Empfänger Beispiel
+Referenz Beispiel
+Lastschrift -10,00 Beispiel
+Referenzzeile
+Neuer Saldo 31.01.2013 +90,00
+""" + _hinweis(Girokonto=IBAN_GIRO)
+    result = _parse(text)
+    assert [event.cash_movements[0].amount for event in result.events] == [Decimal("-10.00")]
+    assert not result.issues
