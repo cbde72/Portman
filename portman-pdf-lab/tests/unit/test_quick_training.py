@@ -22,6 +22,8 @@ Geschäftstag 04.02.2026
 Zu Ihren Lasten EUR 126,50
 Handelsplatz: XETRA"""
 
+TARGET_PATH = "events[0].trades[0].gross_amount"
+
 
 def app(): return QApplication.instance() or QApplication([])
 
@@ -42,24 +44,25 @@ def test_complete_quick_training_stays_in_field_analysis_and_separates_release(t
     application = app(); window, repository, pdf = prepared(tmp_path)
     try:
         assert window.ui_mode.currentText() == "Schnell"
-        venue = window.field_analysis.row_for_path("events[0].trades[0].security_name")
+        venue = window.field_analysis.row_for_path(TARGET_PATH)
+        assert venue is not None and not venue.extracted and venue.status.value != "ERKANNT"
         window._start_field_training(venue)
         assert window.tabs.currentWidget() is window.field_analysis and not window.quick_training.isHidden()
         assert window.quick_training.context.parser_id == "user.comdirect-ertraege"
         assert window.quick_training.context.field_path == venue.path
 
-        start = window.page_texts[1].index("XETRA")
-        selection = PdfCoordinateSelection(1, "XETRA", start, start + 5,
+        start = window.page_texts[1].index("126,50")
+        selection = PdfCoordinateSelection(1, "126,50", start, start + 6,
             {"coordinate_system":"PDF_POINTS", "quads":[[[10,10],[30,10],[30,20],[10,20]]],
-             "page_width":612, "page_height":792, "rotation":0, "start_index":start, "end_index":start+5})
+             "page_width":612, "page_height":792, "rotation":0, "start_index":start, "end_index":start+6})
         window._pdf_selection_changed(selection)
-        assert window.quick_training.pdf_text.text() == "XETRA" and window.quick_training.step == 2
+        assert window.quick_training.pdf_text.text() == "126,50" and window.quick_training.step == 2
         window.quick_training.confirm.click(); application.processEvents()
 
         run = repository.run(window.current_run_id); annotations = repository.annotations_for_document(run["document_id"])
         annotation = next(item for item in annotations if item["field_path"] == venue.path)
-        assert annotation["reference_value"] == "XETRA" and annotation["coordinates"]["quads"]
-        assert annotation["original_text"] == "Handelsplatz: XETRA"
+        assert annotation["reference_value"] == "126,50" and annotation["coordinates"]["quads"]
+        assert annotation["original_text"] == "Zu Ihren Lasten EUR 126,50"
         assert window.quick_candidate_id and window.quick_training.step == 3
         # A reference/annotation does not invent a successful parser value.
         window.refresh_field_analysis(); assert window.field_analysis.row_for_path(venue.path).status.value != "ERKANNT"
@@ -72,7 +75,7 @@ def test_complete_quick_training_stays_in_field_analysis_and_separates_release(t
 
         extended = deepcopy(window.field_analysis.report)
         extended["rule_mode_effective"] = "EXTENDED"
-        extended["rule_decisions"] = [{"field_path":venue.path, "effective_value":"XETRA",
+        extended["rule_decisions"] = [{"field_path":venue.path, "effective_value":"126,50",
                                          "provenance":"rule-profile:test", "conflict":False}]
         window.field_analysis.bind_report(extended, window._catalog())
         assert window.field_analysis.row_for_path(venue.path).status.value == "ERKANNT"

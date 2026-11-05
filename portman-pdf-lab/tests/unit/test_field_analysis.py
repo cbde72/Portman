@@ -32,6 +32,8 @@ Valuta 04.02.2026
 Zu Ihren Lasten EUR 126,50"""
 
 VENUE_PATH = "events[0].trades[0].gross_amount"
+SECURITY_NAME_PATH = "events[0].trades[0].security_name"
+TRADE_DATE_PATH = "events[0].trades[0].trade_date"
 
 
 def app():
@@ -122,8 +124,14 @@ def test_training_context_contains_document_parser_field_evidence_and_versions(t
 
 def test_annotation_and_candidate_never_change_parser_recognition(tmp_path):
     _path, report, repository, catalog, document_id = stored_document(tmp_path)
-    venue = row_for(build_field_analysis_rows(report, catalog), VENUE_PATH)
+    initial = build_field_analysis_rows(report, catalog)
+    venue = row_for(initial, VENUE_PATH)
     assert venue.requirement == "OPTIONAL"
+    # The negative training case must start from a genuinely absent field.
+    assert not venue.extracted and venue.status != RecognitionStatus.RECOGNIZED
+    security_name = row_for(initial, SECURITY_NAME_PATH)
+    assert security_name.status == RecognitionStatus.RECOGNIZED
+    assert security_name.value == "Beispiel ETF"
 
     annotation_id = repository.create_annotation(
         document_id, "user.comdirect-ertraege", "wertpapierkauf", 1,
@@ -136,6 +144,17 @@ def test_annotation_and_candidate_never_change_parser_recognition(tmp_path):
     assert annotated.reference_value == "XETRA"
     assert annotated.training_status == "Annotation"
     assert annotated.status == venue.status
+    assert annotated.status != RecognitionStatus.RECOGNIZED
+
+    draft = {"candidate_id": 40, "status": "DRAFT",
+             "rule": {"field_path": VENUE_PATH, "rule_id": "annotation-1"}}
+    rows = build_field_analysis_rows(
+        report, catalog, repository.annotations_for_document(document_id), [draft])
+    draft_row = row_for(rows, VENUE_PATH)
+    assert draft_row.training_status == "Kandidat"
+    assert draft_row.candidate_id == 40
+    assert draft_row.status == venue.status
+    assert draft_row.status != RecognitionStatus.RECOGNIZED
 
     candidate = {"candidate_id": 41, "status": "APPROVED",
                  "rule": {"field_path": VENUE_PATH, "rule_id": "annotation-1"}}
@@ -145,6 +164,7 @@ def test_annotation_and_candidate_never_change_parser_recognition(tmp_path):
     assert approved.training_status == "Freigegeben"
     assert approved.candidate_id == 41
     assert approved.status == venue.status
+    assert approved.status != RecognitionStatus.RECOGNIZED
 
     rows = build_field_analysis_rows(
         report, catalog, repository.annotations_for_document(document_id),
@@ -152,17 +172,35 @@ def test_annotation_and_candidate_never_change_parser_recognition(tmp_path):
     active = row_for(rows, VENUE_PATH)
     assert active.training_status == "Freigegeben · Profil aktiv"
     assert active.status == venue.status  # annotation does not rewrite the parser result
+    assert active.status != RecognitionStatus.RECOGNIZED
 
+    # A MISSING annotation on a truly absent field documents the absence.
     absent = repository.create_annotation(
         document_id, "user.comdirect-ertraege", "wertpapierkauf", 1, "",
-        "events[0].trades[0].security_name", None, "MISSING", "MISSING",
-        "APPROVED", "tester")
+        TRADE_DATE_PATH, None, "MISSING", "MISSING", "APPROVED", "tester")
     rows = build_field_analysis_rows(
         report, catalog, repository.annotations_for_document(document_id))
-    missing = row_for(rows, "events[0].trades[0].security_name")
+    missing = row_for(rows, TRADE_DATE_PATH)
     assert missing.annotation_id == absent
     assert missing.status == RecognitionStatus.MISSING
     assert missing.status_text == "Nachweislich nicht im PDF vorhanden"
+    assert not missing.extracted
+
+    # A MISSING annotation contradicts an already extracted parser value. The
+    # contradiction is visible, but the extracted value is retained.
+    contradictory = repository.create_annotation(
+        document_id, "user.comdirect-ertraege", "wertpapierkauf", 1, "",
+        SECURITY_NAME_PATH, None, "MISSING", "MISSING", "APPROVED", "tester")
+    rows = build_field_analysis_rows(
+        report, catalog, repository.annotations_for_document(document_id))
+    conflict = row_for(rows, SECURITY_NAME_PATH)
+    assert conflict.annotation_id == contradictory
+    assert conflict.status == RecognitionStatus.REVIEW
+    assert conflict.conflict
+    assert conflict.value == "Beispiel ETF"
+    assert conflict.extracted
+    assert "widerspricht" in conflict.status_text
+    assert "Parserwert bleibt erhalten" in conflict.note
 
 
 def test_venue_rule_is_label_based_not_hard_coded_to_xetra():
@@ -294,27 +332,5 @@ def test_dividend_identity_fields_are_independent_and_visible_in_field_analysis(
     assert rows["events[0].security_name"].value == "Example-ETF Inhaber-Anteile o.N."
     assert rows["events[0].security_wkn"].value == "A1B2C3"
     assert rows["events[0].security_isin"].value == "DE000A1B2C35"
-
-
-def stored_document(tmp_path):
-    path = create_demo_pdf(tmp_path / "analysis.pdf", TEXT)
-    report = analyse_pdf(path, "STANDARD")
-    detection, result = report["detection"], report["result"]
-    repository = ReferenceRepository(tmp_path / "analysis.sqlite")
-    document_id = repository.register_document(
-        report["document_id"], report["source_hash"], str(path),
-        detection["plugin_id"], detection["document_type"])
-    report["run_id"] = repository.save_run(
-        document_id, detection["plugin_id"], detection["handler_id"],
-        detection["plugin_version"], result["schema_version"], result,
-        report.get("issues", []), report["timings"]["total_ns"])
-    catalog = CatalogStore(tmp_path / "catalogs").catalog(
-        "comdirect", result["plugin_id"], detection["document_type"],
-        result.get("attributes", {}).get("layout_path", "*"))
-    return path, report, repository, catalog, document_id
-
-
-def row_for(rows, path):
-    return next(row for row in rows if row.path == path)
 
 

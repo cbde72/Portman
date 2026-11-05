@@ -175,7 +175,10 @@ def _training_status(annotation: Mapping[str, Any] | None, candidate: Mapping[st
     return "Untrainiert", status, absence
 
 
-def _status_text(row: DisplayRow, requirement: str, absence: bool, conflict: bool) -> str:
+def _status_text(row: DisplayRow, requirement: str, absence: bool, conflict: bool,
+                 annotation_conflict: bool = False) -> str:
+    if annotation_conflict:
+        return "Prüfen (MISSING-Annotation widerspricht Parserwert)"
     if conflict:
         return "Prüfen (STANDARD/EXTENDED-Konflikt)"
     if row.status == RecognitionStatus.RECOGNIZED:
@@ -253,17 +256,25 @@ def build_field_analysis_rows(
         decision = decisions.get(path) or {}
         comparison = comparisons.get(path) or {}
         conflict = bool(decision.get("conflict") or comparison.get("conflict"))
+        extracted = (match.value is not None and not _is_missing(match.value)
+                     and match.status != RecognitionStatus.NOT_APPLICABLE)
+        # A confirmed absence contradicts an already extracted parser value.
+        # Keep the parser value visible, but mark the field for review.
+        annotation_conflict = bool(absence and extracted)
         effective = decision.get("effective_value")
         reference = (annotation or {}).get("reference_value")
         if (str(report.get("rule_mode_effective") or "").upper() == "EXTENDED" and
-                effective is not None and not conflict and annotation and str(effective) == str(reference)):
+                effective is not None and not conflict and not annotation_conflict and
+                annotation and str(effective) == str(reference)):
             # Only a real EXTENDED run with an active approved profile may turn
             # a trained field into a successful parser recognition. A manual
             # reference or draft candidate alone never reaches this branch.
             match = replace(match, value=effective, status=RecognitionStatus.RECOGNIZED,
                             source=str(decision.get("provenance") or "EXTENDED rule profile"))
-        status = RecognitionStatus.REVIEW if conflict else match.status
-        status_text = _status_text(match, requirement, absence, conflict)
+            extracted = True
+        status = (RecognitionStatus.REVIEW if conflict or annotation_conflict
+                  else match.status)
+        status_text = _status_text(match, requirement, absence, conflict, annotation_conflict)
         annotation_evidence = _evidence_mapping((annotation or {}).get("evidence"))
         evidence_value = match.evidence or (annotation_evidence or None)
         evidence_mapping = _evidence_mapping(evidence_value)
@@ -274,12 +285,14 @@ def build_field_analysis_rows(
         rule_id = str(candidate_rule.get("rule_id") or "")
         if not rule_id:
             rule_id = str(decision.get("rule_id") or comparison.get("rule_id") or "")
-        extracted = (match.value is not None and not _is_missing(match.value)
-                     and match.status != RecognitionStatus.NOT_APPLICABLE)
         note = ""
         if conflict:
             note = "STANDARD und EXTENDED liefern unterschiedliche Werte."
-        if absence:
+        if annotation_conflict:
+            note = " ".join(filter(None, (note,
+                "MISSING-Annotation widerspricht dem extrahierten Parserwert; "
+                "der Parserwert bleibt erhalten.")))
+        elif absence:
             note = " ".join(filter(None, (note, "Abwesenheit wurde durch eine Annotation bestätigt.")))
         analysis_rows.append(FieldAnalysisRow(
             field_id=definition.field_id if definition else path,
@@ -297,7 +310,7 @@ def build_field_analysis_rows(
             training_status=status_label,
             absence_confirmed=absence,
             extracted=extracted,
-            conflict=conflict,
+            conflict=conflict or annotation_conflict,
             annotation_id=(annotation or {}).get("annotation_id"),
             reference_value=(annotation or {}).get("reference_value"),
             candidate_id=(candidate or {}).get("candidate_id"),
