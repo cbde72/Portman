@@ -140,6 +140,18 @@ def test_trade_rejects_unverified_storno_and_preserves_wkn():
         plugin.parse(storno, plugin.detect(storno)[0])
 
 
+def test_same_trade_reference_keeps_event_identity_without_actual_cash_booking():
+    plugin = BaaderPlugin()
+    first = document(trade(), "first")
+    second = PdfDocument("second", "b" * 64, (PdfPage(1, trade()),), "second.pdf")
+    first_event = plugin.parse(first, plugin.detect(first)[0]).events[0]
+    second_event = plugin.parse(second, plugin.detect(second)[0]).events[0]
+    assert first_event.event_id == second_event.event_id
+    assert first_event.cash_movements[0].movement_id == second_event.cash_movements[0].movement_id
+    assert len(first_event.cash_movements) == len(second_event.cash_movements) == 1
+    assert first_event.cash_movements[0].status is CashStatus.EXPECTED
+
+
 def test_advance_tax_rejects_unreconciled_components():
     source = document("""Baader Bank AG
 Depot-Nr.: 1234567890
