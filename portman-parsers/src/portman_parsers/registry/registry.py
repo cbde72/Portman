@@ -112,10 +112,12 @@ def metadata_registry() -> PluginRegistry:
 
 
 def default_registry() -> PluginRegistry:
-    from portman_parsers.plugins import BankOfScotlandPlugin, ComdirectPlugin, ComdirectFinanzreportPlugin, ComdirectPPPlugin, FnzFinvestoPlugin, DekaQuartalsberichtPlugin, IngPlugin
+    from portman_parsers.plugins import BaaderPlugin, BankOfScotlandPlugin, ComdirectPlugin, ComdirectFinanzreportPlugin, ComdirectPPPlugin, FnzFinvestoPlugin, DekaQuartalsberichtPlugin, IngPlugin
     registry = PluginRegistry()
     for metadata in APPROVED_PLUGINS:
-        if metadata.plugin_id == "user.bank-of-scotland-kontoauszug":
+        if metadata.plugin_id == "baader.pdf":
+            plugin = BaaderPlugin()
+        elif metadata.plugin_id == "user.bank-of-scotland-kontoauszug":
             plugin = BankOfScotlandPlugin()
         elif metadata.plugin_id == "user.deka-quartalsbericht":
             plugin = DekaQuartalsberichtPlugin()
