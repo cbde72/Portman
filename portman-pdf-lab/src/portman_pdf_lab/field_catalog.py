@@ -110,11 +110,22 @@ DIVIDEND_FIELDS = (
     FieldDefinition("fee.amount", "events[0].fee_events[0].amount", "Gebührenbetrag", "Ausgewiesener Betrag einer Gebührenposition", "DECIMAL", requirement="OPTIONAL", editor="AMOUNT", order=72),
 )
 
+TRANSFER_FIELDS = (
+    FieldDefinition("security.isin", "events[0].security_isin", "ISIN", "Übertragenes Wertpapier", "ISIN", requirement="REQUIRED", editor="ISIN", order=10),
+    FieldDefinition("transfer.quantity", "events[0].security_movements[0].quantity", "Stückzahl", "Übertragene Stückzahl", "DECIMAL", requirement="REQUIRED", editor="DECIMAL", order=20),
+    FieldDefinition("transfer.date", "events[0].event_date", "Valuta", "Wertstellungsdatum des Übertrags", "DATE", requirement="REQUIRED", editor="DATE", order=30),
+)
+
+
 DEFAULT_FIELDS = TECHNICAL_FIELDS
 
 
 def fields_for_document(parser_id: str, document_type: str):
     value = f"{parser_id} {document_type}".casefold()
+    if "baader.pdf" in value and "quartalsaufstellung" in value: return DEPOT_FIELDS + TECHNICAL_FIELDS
+    if "baader.pdf" in value and "depotuebertrag" in value: return TRANSFER_FIELDS + TECHNICAL_FIELDS
+    if "baader.pdf" in value and "depotein-/auslieferung" in value: return TRANSFER_FIELDS + TECHNICAL_FIELDS
+    if "baader.pdf" in value and "wertpapierabrechnung" in value: return TRADE_FIELDS + TECHNICAL_FIELDS
     if document_type == "*" and "comdirect" in parser_id.casefold(): return TRADE_FIELDS + TECHNICAL_FIELDS
     if "mifid" in value or "kosteninformation" in value: return MIFID_FIELDS + TECHNICAL_FIELDS
     if "finanzreport" in value or "kontoauszug" in value or "bank of scotland" in value: return ACCOUNT_FIELDS + TECHNICAL_FIELDS
