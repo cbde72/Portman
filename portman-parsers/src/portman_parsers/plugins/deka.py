@@ -97,20 +97,18 @@ class DekaQuartalsberichtPlugin:
 
         # Repeated sub-depot headers on following pages belong to the same account.
         turnovers = {}
-        for page in document.pages:
-            if not TURNOVER.search(page.text):
-                continue
-            blocks = list(BLOCK.finditer(page.text))
-            for i, block in enumerate(blocks):
-                end = blocks[i + 1].start() if i + 1 < len(blocks) else len(page.text)
-                key = (block.group(1), block.group(2))
-                turnovers.setdefault(key, []).append((page, page.text[block.start():end]))
+        turnover_text = "\n".join(page.text for page in document.pages if TURNOVER.search(page.text))
+        blocks = list(BLOCK.finditer(turnover_text))
+        for index, block in enumerate(blocks):
+            end = blocks[index + 1].start() if index + 1 < len(blocks) else len(turnover_text)
+            key = (block.group(1), block.group(2))
+            turnovers.setdefault(key, []).append(turnover_text[block.start():end])
 
         for row in rows:
             isin, sub, name, value_text = row.groups()
             key, market_value = (isin, sub), number(value_text)
             parts = turnovers.get(key, [])
-            body = "\n".join(part for _, part in parts)
+            body = "\n".join(parts)
             matching = [m for m in STOCK.finditer(body) if date(m.group(1)) == as_of]
             quantity = FieldValue.unknown()
             price = FieldValue.unknown()
@@ -139,7 +137,7 @@ class DekaQuartalsberichtPlugin:
 
             # Preserve the old parser's economic semantics: distribution and reinvestment
             # are distinct linked EXPECTED movements, never actual account postings.
-            for page, part in parts:
+            for part in parts:
                 for line in DATED.finditer(part):
                     dist = DISTRIBUTION.search(line.group(1))
                     if not dist:

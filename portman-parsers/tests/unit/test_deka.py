@@ -57,7 +57,7 @@ def test_distribution_and_reinvestment_do_not_book_actual_cash():
 def test_mismatched_overview_is_rejected():
     plugin = DekaQuartalsberichtPlugin()
     source = document(total="110,00")
-    with pytest.raises(ValueError, match="do not reconcile"):
+    with pytest.raises(ValueError, match="market value mismatch"):
         plugin.parse(source, plugin.detect(source)[0])
 
 
@@ -68,3 +68,26 @@ def test_unknown_quantity_is_not_invented():
     assert result.depot_snapshots[0].positions[0].quantity.value == "UNKNOWN"
     assert any(issue.code == "DEKA_QUANTITY_UNVERIFIED" for issue in result.issues)
     assert not result.events
+
+
+def test_turnover_block_continues_on_following_page_without_repeated_subdepot_header():
+    source = document()
+    pages = (
+        source.pages[0],
+        PdfPage(2, (
+            "Umsatzübersicht Seite 1\n"
+            f"ISIN: {ISIN} Unterdepot: 01\n"
+            "Bestand am 31.12.2025 90,00 10,000 9,000\n"
+        )),
+        PdfPage(3, (
+            "Umsatzübersicht Seite 2\n"
+            "Ausschüttung / Kauf aus Ertrag 10,00 10,000 +1,000 20.03.2026 21.03.2026\n"
+            "Bestand am 31.03.2026 100,00 10,000 10,000\n"
+            "Bewertung mit dem Rücknahmepreis vom 31.03.2026\n"
+        )),
+    )
+    source = PdfDocument(source.document_id, source.source_hash, pages, source.filename)
+    plugin = DekaQuartalsberichtPlugin()
+    result = plugin.parse(source, plugin.detect(source)[0])
+    assert result.depot_snapshots[0].positions[0].quantity.value == Decimal("10.000")
+    assert [event.kind for event in result.events] == ["DIVIDEND", "REINVESTMENT"]
