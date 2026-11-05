@@ -177,9 +177,39 @@ class IngPlugin:
                         ev(key, custody.group(0).strip(), page.number)
                         values[key] = custody.group(2)
             return values
+        text = document.text
+        if handler in {"kauf", "verkauf"}:
+            patterns = {
+                "order_id": (r"Ordernummer\s+([0-9.]+)", 1),
+                "venue": (r"Handelsplatz\s+(\S[^\n]*?)\s*(?:\n|$)", 1),
+                "execution_time": (r"Ausführungstag(?:\s*/\s*-zeit)?\s+" + DAY + r"\s+um\s+(\d{2}:\d{2}:\d{2})", 1),
+            }
+            title = re.search(r"Wertpapierabrechnung\s+(?:Kauf|Verkauf)[^\n]*", text)
+            values = self._matched_attributes(text, patterns, ev)
+            if "venue" in values:
+                values["venue"] = " ".join(values["venue"].split())
+            if title:
+                if "Sparplan" in title.group(0):
+                    ev("order_subtype", title.group(0))
+                    values["order_subtype"] = "sparplan"
+                elif "Wiederanlage" in title.group(0):
+                    ev("order_subtype", title.group(0))
+                    values["order_subtype"] = "wiederanlage"
+            return values
+        if handler == "vorabpauschale":
+            return self._matched_attributes(
+                text,
+                {
+                    "per_unit": (r"Vorabpauschale\s+pro\s+Stück\s+EUR\s+(" + AMOUNT + r")", 1),
+                    "taxable_income": (r"KapSt-pflichtiger\s+Kapitalertrag\s+(" + AMOUNT + r")\s+EUR", 1),
+                    "partial_exemption_amount": (r"Teilfreistellung[^\n]*?(" + AMOUNT + r")\s+EUR", 1),
+                    "allowance_before": (r"Sparer-Pauschbetrag\s+vor\s+Ertrag\s+(" + AMOUNT + r")\s+EUR", 1),
+                    "allowance_after": (r"Sparer-Pauschbetrag\s+nach\s+Ertrag\s+(" + AMOUNT + r")\s+EUR", 1),
+                },
+                ev,
+            )
         if handler != "dividendengutschrift":
             return {}
-        text = document.text
         patterns = {
             "quantity": (r"Nominale\s+(" + QTY + r")\s+Stück", 1),
             "ex_date": (r"Ex-Tag\s+(" + DAY + r")", 1),
@@ -197,15 +227,20 @@ class IngPlugin:
             "withholding_pot_before": (r"Verrechnungstopf\s+ausländ\.\s+Quellenst\.\s+vor\s+Ertrag\s+(" + AMOUNT + r")\s+EUR", 1),
             "withholding_pot_after": (r"Verrechnungstopf\s+ausländ\.\s+Quellenst\.\s+nach\s+Ertrag\s+(" + AMOUNT + r")\s+EUR", 1),
         }
+        values = self._matched_attributes(text, patterns, ev)
+        if values.get("gross_currency") and values["gross_currency"] != "EUR" and values.get("fx_rate"):
+            values["original_amount"] = values["gross_income"]
+            values["original_currency"] = values["gross_currency"]
+        return values
+
+    @staticmethod
+    def _matched_attributes(text, patterns, ev):
         values = {}
         for field, (pattern, group) in patterns.items():
             match = re.search(pattern, text)
             if match:
                 ev(field, match.group(0))
                 values[field] = match.group(group)
-        if values.get("gross_currency") and values["gross_currency"] != "EUR" and values.get("fx_rate"):
-            values["original_amount"] = values["gross_income"]
-            values["original_currency"] = values["gross_currency"]
         return values
 
     def _event(self, document, handler, depot_id, ev):
@@ -344,6 +379,7 @@ class IngPlugin:
             price=price if price is not None else MissingValue.UNKNOWN,
             price_currency="EUR" if price is not None else MissingValue.UNKNOWN,
             market_value=gross if gross is not None else MissingValue.UNKNOWN,
+            gross_amount=gross if gross is not None else MissingValue.UNKNOWN,
             settlement_amount=amount,
             settlement_currency="EUR",
             depot_id=depot_id,

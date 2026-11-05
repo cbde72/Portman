@@ -46,6 +46,9 @@ def test_trade_tax_is_not_counted_as_fee():
     result = default_registry().parse(document, default_registry().select(document))
     event = result.events[0]
     assert event.fee_events[0].amount == Decimal("1.00")
+    assert event.trades[0].gross_amount == Decimal("100.00")
+    assert result.attributes["order_id"] == "123.456"
+    assert result.attributes["execution_time"] == "11:22:33"
     assert event.tax_events[0].actually_withheld_tax == Decimal("0.50")
 
 
