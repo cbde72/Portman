@@ -112,11 +112,13 @@ def metadata_registry() -> PluginRegistry:
 
 
 def default_registry() -> PluginRegistry:
-    from portman_parsers.plugins import BankOfScotlandPlugin, ComdirectPlugin, ComdirectFinanzreportPlugin, ComdirectPPPlugin, FnzFinvestoPlugin
+    from portman_parsers.plugins import BankOfScotlandPlugin, ComdirectPlugin, ComdirectFinanzreportPlugin, ComdirectPPPlugin, FnzFinvestoPlugin, DekaQuartalsberichtPlugin
     registry = PluginRegistry()
     for metadata in APPROVED_PLUGINS:
         if metadata.plugin_id == "user.bank-of-scotland-kontoauszug":
             plugin = BankOfScotlandPlugin()
+        elif metadata.plugin_id == "user.deka-quartalsbericht":
+            plugin = DekaQuartalsberichtPlugin()
         elif metadata.plugin_id == "fnz.finvesto":
             plugin = FnzFinvestoPlugin()
         elif metadata.plugin_id == "user.comdirect-ertraege":

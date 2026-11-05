@@ -5,8 +5,8 @@ from portman_parsers.registry import default_registry
 def test_allowlist_exposes_explicit_handler_readiness():
     handlers = [handler for plugin in APPROVED_PLUGINS for handler in plugin.handlers]
     assert len(handlers) == 42
-    assert sum(handler.readiness == "IMPLEMENTED" for handler in handlers) == 22
-    assert sum(handler.readiness == "METADATA_ONLY" for handler in handlers) == 20
+    assert sum(handler.readiness == "IMPLEMENTED" for handler in handlers) == 23
+    assert sum(handler.readiness == "METADATA_ONLY" for handler in handlers) == 19
     assert {handler.readiness for handler in handlers} <= {"IMPLEMENTED", "PARTIAL", "METADATA_ONLY", "DISABLED"}
 
 
