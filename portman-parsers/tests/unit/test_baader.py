@@ -97,7 +97,9 @@ Zu Gunsten Konto 3128164005 Valuta: 15.02.2024 EUR 0,78
     plugin = BaaderPlugin()
     original = document(template.format(reference="524443206", storno=""), "original")
     reversal = document(template.format(reference="526758625", storno="STORNO"), "reversal")
-    first = plugin.parse(original, plugin.detect(original)[0]).events[0]
+    first_result = plugin.parse(original, plugin.detect(original)[0])
+    assert first_result.attributes["quantity"] == "4.125"
+    first = first_result.events[0]
     second = plugin.parse(reversal, plugin.detect(reversal)[0]).events[0]
     assert first.cash_movements[0].amount == Decimal("0.78")
     assert second.cash_movements[0].amount == Decimal("-0.78")

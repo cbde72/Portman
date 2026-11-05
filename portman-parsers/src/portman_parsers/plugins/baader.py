@@ -116,6 +116,9 @@ class BaaderPlugin:
             events, snapshots = (), (self._snapshot(document, detection.handler_id, depot_id, evidence),)
         else:
             events, snapshots = (self._event(document, detection.handler_id, depot_id, evidence),), ()
+        attributes = {}
+        if detection.handler_id in {"dividende", "vorabpauschale"}:
+            attributes["quantity"] = str(money(required(SEC, document.text, "Wertpapierkopf").group(3)))
         return ParsedDocument(
             stable_id("result", document.document_id, self.metadata.version),
             document.document_id,
@@ -126,6 +129,7 @@ class BaaderPlugin:
             evidence=tuple(evidences),
             depots=(depot,),
             depot_snapshots=snapshots,
+            attributes=attributes,
         )
 
     def _snapshot(self, document, handler, depot_id, ev):
