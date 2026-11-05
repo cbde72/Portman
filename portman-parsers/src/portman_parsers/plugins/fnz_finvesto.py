@@ -1,4 +1,4 @@
-"""Independent FNZ/finvesto turnover and depot-statement parser."""
+"""Unabhängiger Parser für FNZ-/finvesto-Umsatzabrechnungen und Depotauszüge."""
 
 from datetime import datetime
 from decimal import Decimal
@@ -21,6 +21,7 @@ TURNOVER = re.compile(r"Umsatzabrechnung\s+f.r\s+Ihr\s+finvesto\s+Depot", re.I)
 STATEMENT = re.compile(r"Depotauszug\s+f.r\s+Ihr\s+finvesto\s+Depot", re.I)
 DEPOT_NO = re.compile(r"Depot-Nr\.\s*(\d+)", re.I)
 REFERENCE = re.compile(r"Ref\.\s*Nr\.\s*(?P<ref>\d+/\d+)\s*,?\s*Buchungsdatum\s*(?P<date>" + DATE + r")", re.I)
+COURSE_DATE = re.compile(r"Kursdatum\s*(?P<date>" + DATE + r")", re.I)
 MARKER = re.compile(
     r"(?P<dividend>Fondsertrag\s*\(Aussch.ttung\).*?Depotposition\s*\d+\.\d+)"
     r"|(?P<reinvest>Wiederanlage\s+Fondsertrag\s*" + MONEY + r"\s*[A-Z]{3}.*?Depotposition\s*\d+\.\d+)"
@@ -73,19 +74,29 @@ class FnzFinvestoPlugin:
             return ()
         label = next(item.document_type for item in self.metadata.handlers if item.handler_id == handler)
         return (Detection(self.metadata.plugin_id, self.metadata.version, handler, label,
-                          Decimal("0.99"), "FNZ/finvesto title and depot number recognized"),)
+                          Decimal("0.99"), "FNZ-/finvesto-Titel und Depotnummer erkannt"),)
 
     def parse(self, document: PdfDocument, detection: Detection) -> ParsedDocument:
         depot_match = DEPOT_NO.search(document.text)
         if not depot_match:
-            raise FnzFinvestoParseError("FNZ depot number missing")
+            raise FnzFinvestoParseError("FNZ-Depotnummer fehlt")
         evidence: list[Evidence] = []
         evidence_pages: dict[str, int] = {}
 
-        def ev(field: str, excerpt: str) -> str:
-            page = next((p.number for p in document.pages if excerpt in p.text), None)
+        page_offsets = []
+        offset = 0
+        for page_item in document.pages:
+            page_offsets.append((offset, offset + len(page_item.text), page_item))
+            offset += len(page_item.text) + 1
+
+        def ev(field: str, excerpt: str, source_offset: int | None = None) -> str:
+            source = next((page_item for start, end, page_item in page_offsets
+                           if source_offset is not None and start <= source_offset <= end), None)
+            page = source.number if source else next((p.number for p in document.pages if excerpt in p.text), None)
             if page is None:
-                raise FnzFinvestoParseError("FNZ evidence is not present on any PDF page: " + field)
+                raise FnzFinvestoParseError("FNZ-Evidence ist auf keiner PDF-Seite vorhanden: " + field)
+            if excerpt not in next(p.text for p in document.pages if p.number == page):
+                raise FnzFinvestoParseError("FNZ-Evidence ist nicht auf der angegebenen PDF-Seite vorhanden: " + field)
             identity = stable_id("evidence", document.document_id, page, field, excerpt)
             if identity not in evidence_pages:
                 evidence.append(Evidence(identity, document.document_id, page, field, excerpt,
@@ -120,23 +131,29 @@ class FnzFinvestoPlugin:
             body = text[marker.start():markers[index + 1].start() if index + 1 < len(markers) else len(text)]
             reference, row = REFERENCE.search(body), TRADE_ROW.search(body)
             if not reference or not row or reference.group("ref") in seen:
-                raise FnzFinvestoParseError("FNZ turnover lacks a unique reference or security row")
+                raise FnzFinvestoParseError("FNZ-Umsatz besitzt keine eindeutige Referenz oder Wertpapierzeile")
             seen.add(reference.group("ref"))
             kind = "DIVIDEND" if marker.group("dividend") else "BUY" if marker.group("buy") else "SELL" if marker.group("sell") else "REINVESTMENT"
             qty, gross = _number(row.group("qty")), _number(row.group("amount"))
             booked = _date(reference.group("date")); currency = row.group("currency")
             price = _number(row.group("price"))
             if qty <= 0 or gross <= 0 or price <= 0:
-                raise FnzFinvestoParseError("FNZ turnover contains non-positive quantity, price or amount")
+                raise FnzFinvestoParseError("FNZ-Umsatz enthält eine nicht positive Stückzahl, einen nicht positiven Kurs oder Betrag")
             calculated = qty * price
             if row.group("price_currency") == currency and abs(calculated - gross) > Decimal("0.01"):
-                raise FnzFinvestoParseError("FNZ quantity and price do not match gross amount")
+                raise FnzFinvestoParseError("FNZ-Stückzahl und Kurs stimmen nicht mit dem Bruttobetrag überein")
             if row.group("price_currency") != currency and not row.group("fx"):
-                raise FnzFinvestoParseError("FNZ foreign-currency trade lacks an exchange rate")
+                raise FnzFinvestoParseError("FNZ-Fremdwährungsgeschäft besitzt keinen Wechselkurs")
             payment = PAYMENT.search(body); fee = FEE.search(body); tax_components = TAX_COMPONENTS.search(body)
             tax = None if tax_components else TAX.search(body)
-            evidence_matches = (marker, reference, row, payment, fee, tax_components or tax)
-            evidence_ids = tuple(ev("transaction", match.group(0).strip()) for match in evidence_matches if match)
+            evidence_matches = ((marker, marker.start()),
+                                (reference, marker.start() + reference.start()),
+                                (row, marker.start() + row.start()),
+                                (payment, marker.start() + payment.start() if payment else None),
+                                (fee, marker.start() + fee.start() if fee else None),
+                                (tax_components or tax, marker.start() + (tax_components or tax).start() if (tax_components or tax) else None))
+            evidence_ids = tuple(ev("transaction", match.group(0).strip(), source_offset)
+                                 for match, source_offset in evidence_matches if match)
             row_evidence = evidence_ids[2]
             event_id = stable_id("event", depot_id, reference.group("ref"), kind, row.group("isin"))
             security = () if kind == "DIVIDEND" else (
@@ -149,12 +166,12 @@ class FnzFinvestoPlugin:
                 settlement = _number(payment.group("amount"))
                 expected = gross + fee_amount + tax_amount if kind in {"BUY", "REINVESTMENT"} else gross - fee_amount - tax_amount
                 if payment.group("currency") != currency or abs(settlement - expected) > Decimal("0.01"):
-                    raise FnzFinvestoParseError("FNZ settlement does not reconcile with gross, fees and taxes")
+                    raise FnzFinvestoParseError("FNZ-Abrechnungsbetrag stimmt nicht mit Brutto, Gebühren und Steuern überein")
             fees: tuple[FeeEvent, ...] = ()
             taxes: tuple[TaxEvent, ...] = ()
             cash: tuple[CashMovement, ...] = ()
             trades: tuple[SecurityTrade, ...] = ()
-            # A documented settlement is expected, never promoted to an actual account booking.
+            # Ein ausgewiesener Abrechnungsbetrag bleibt erwartet und wird nie zur tatsächlichen Kontobuchung.
             if payment:
                 cash_value = _number(payment.group("amount"))
                 sign = 1 if kind in {"DIVIDEND", "SELL"} else -1
@@ -179,7 +196,7 @@ class FnzFinvestoPlugin:
                                              ("SOLIDARITY_SURCHARGE", "solidarity"),
                                              ("CHURCH_TAX", "church")))
                     if abs(sum((item.amount for item in components), Decimal()) - tax_amount) > Decimal("0.01"):
-                        raise FnzFinvestoParseError("FNZ tax components do not reconcile with documented total")
+                        raise FnzFinvestoParseError("FNZ-Steuerkomponenten stimmen nicht mit dem ausgewiesenen Gesamtbetrag überein")
                 else:
                     components = (TaxComponent("TOTAL_WITHHOLDING", tax_amount, tax.group("currency")),)
                 taxes = (TaxEvent(stable_id("tax", event_id), event_id, "WITHHOLDING_TAX",
@@ -187,9 +204,10 @@ class FnzFinvestoPlugin:
                                   isin=row.group("isin"), bank_id="fnz", currency=(tax_components or tax).group("currency"),
                                   actually_withheld_tax=tax_amount),)
             if kind in {"BUY", "SELL", "REINVESTMENT"}:
+                course_date = COURSE_DATE.search(marker.group(0))
                 trades = (SecurityTrade(stable_id("trade", event_id), event_id,
                                         "SELL" if kind == "SELL" else "BUY", isin=row.group("isin"),
-                                        quantity=qty, trade_date=booked, price=price,
+                                        quantity=qty, trade_date=_date(course_date.group("date")) if course_date else MissingValue.UNKNOWN,
                                         price_currency=row.group("price_currency"), market_value=gross,
                                         gross_amount=gross,
                                         exchange_rate=_number(row.group("fx")) if row.group("fx") else MissingValue.UNKNOWN,
@@ -200,14 +218,14 @@ class FnzFinvestoPlugin:
                                          taxes, fee_events=fees, trades=trades, evidence_ids=evidence_ids,
                                          security_isin=row.group("isin"), security_identity_evidence_ids=(row_evidence,)))
         if not events:
-            raise FnzFinvestoParseError("No supported FNZ turnover found")
+            raise FnzFinvestoParseError("Kein unterstützter FNZ-Umsatz gefunden")
         return tuple(events)
 
     def _snapshot(self, document: PdfDocument, depot_id: str, complete: bool, ev, field):
         header = POSITION_HEADER.search(document.text)
         if not header:
             if complete:
-                raise FnzFinvestoParseError("FNZ holdings section missing")
+                raise FnzFinvestoParseError("FNZ-Bestandsabschnitt fehlt")
             return None, ()
         positions = []
         rows = list(POSITION_ROW.finditer(document.text, header.end()))
@@ -228,7 +246,7 @@ class FnzFinvestoPlugin:
                                            market_value=pdf(_number(values["value"])), currency=pdf("EUR"),
                                            price=pdf(_number(values["price"])), price_date=pdf(_date(values["date"]))))
         if not positions:
-            raise FnzFinvestoParseError("No FNZ depot position recognized")
+            raise FnzFinvestoParseError("Keine FNZ-Depotposition erkannt")
         total = TOTAL.search(document.text)
         total_ev = ev("depot_total", total.group(0)) if total else None
         total_value = field(_number(total.group("amount")), total_ev) if total else FieldValue.unknown()
@@ -243,9 +261,9 @@ class FnzFinvestoPlugin:
             reported = _number(total.group("amount"))
             if calculated != reported:
                 issues.append(Issue(stable_id("issue", snapshot.snapshot_id, "total"), "DEPOT_TOTAL_MISMATCH",
-                                    IssueSeverity.ERROR, f"Position sum differs by {reported - calculated} EUR",
+                                    IssueSeverity.ERROR, f"Positionssumme weicht um {reported - calculated} EUR ab",
                                     evidence_id=total_ev, nature=IssueNature.MATHEMATICAL_INCONSISTENCY))
         elif complete:
             issues.append(Issue(stable_id("issue", snapshot.snapshot_id, "total-missing"), "DEPOT_TOTAL_MISSING",
-                                IssueSeverity.WARNING, "Depot total is missing.", nature=IssueNature.MISSING_INFORMATION))
+                                IssueSeverity.WARNING, "Depotgesamtwert fehlt.", nature=IssueNature.MISSING_INFORMATION))
         return snapshot, tuple(issues)

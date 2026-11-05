@@ -100,3 +100,29 @@ DE0008474511
     assert result.depots[0].depot_number.page_number == 2
     assert position.quantity.page_number == 2
     assert all(item.page_number == 2 for item in result.evidence)
+
+
+def test_transaction_evidence_uses_actual_page_and_trade_date_is_not_booking_date():
+    text = (FIXTURES / "turnover.txt").read_text(encoding="utf-8")
+    split = text.index("Wiederanlage")
+    first, second = text[:split], text[split:].replace(
+        "Buchungsdatum 22.12.2025", "Buchungsdatum 23.12.2025", 1)
+    source = PdfDocument("pages", "d" * 64, (PdfPage(1, first), PdfPage(2, second)), "pages.pdf")
+    plugin = FnzFinvestoPlugin()
+    result = plugin.parse(source, plugin.detect(source)[0])
+    reinvestment = result.events[1]
+    assert reinvestment.event_date.isoformat() == "2025-12-23"
+    assert reinvestment.trades[0].trade_date.isoformat() == "2025-12-22"
+    assert all(next(item for item in result.evidence if item.evidence_id == evidence_id).page_number == 2
+               for evidence_id in reinvestment.evidence_ids)
+
+
+def test_dividends_for_different_securities_are_not_possible_duplicates():
+    source = document("turnover.txt")
+    plugin = FnzFinvestoPlugin()
+    result = plugin.parse(source, plugin.detect(source)[0])
+    dividend = result.events[0]
+    other = type(dividend)(**{name: ("DE000A0BBBB1" if name == "security_isin" else getattr(dividend, name))
+                              for name in dividend.__dataclass_fields__})
+    from portman_parsers.validation.references import possible_duplicate_events
+    assert not possible_duplicate_events((dividend, other))
