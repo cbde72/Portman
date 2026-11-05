@@ -447,6 +447,14 @@ class IngPlugin:
         gross = re.search(r"Brutto\s+([A-Z]{3})\s+(" + AMOUNT + r")", text)
         fx = re.search(r"Umg\.\s*z\.\s*Dev\.-Kurs\s*\(([0-9.,]+)\)", text)
         issues = []
+        subtotal = re.search(r"Zwischensumme\s+([A-Z]{3})\s+(" + AMOUNT + r")", text)
+        if subtotal and fx and abs(number(subtotal.group(2)) / number(fx.group(1)) - amount) > Decimal("0.015"):
+            subtotal_ev = ev("subtotal", subtotal.group(0))[0]
+            issues.append(
+                self._issue(
+                    document, event_id, "ING_FX_ZWISCHENSUMME", "Gesamtbetrag passt nicht zu Zwischensumme und Devisenkurs; Original prüfen", subtotal_ev
+                )
+            )
         if gross and gross.group(1) != "EUR" and fx:
             expected = number(gross.group(2)) / number(fx.group(1))
             if abs(expected - amount - sum((x.amount for x in components), Decimal())) > Decimal("0.02"):

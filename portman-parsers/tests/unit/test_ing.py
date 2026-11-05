@@ -119,3 +119,24 @@ Anzahl Posten: 1
     wrong = source(text.replace("Gesamtkurswert 100,00", "Gesamtkurswert 101,00"), "wrong")
     with pytest.raises(ValueError, match="Positionssumme"):
         registry.parse(wrong, registry.select(wrong))
+
+
+def test_dividend_fx_subtotal_mismatch_remains_visible():
+    text = """ING-DiBa
+Dividendengutschrift
+Direkt-Depot Nr.: 1234567890
+ISIN (WKN) DE000BASF111 (BASF11)
+Wertpapierbezeichnung BASF SE
+Nominale 2,00 Stück
+Brutto USD 3,00
+Zwischensumme USD 3,00
+Umg. z. Dev.-Kurs (2,0000)
+Gesamtbetrag zu Ihren Gunsten EUR 2,00
+Abrechnungs-IBAN DE11 1111 1111 1111 1111 11
+Valuta 03.07.2026
+"""
+    document = source(text)
+    registry = default_registry()
+    result = registry.parse(document, registry.select(document))
+    assert any(issue.code == "ING_FX_ZWISCHENSUMME" for issue in result.issues)
+    assert result.events[0].cash_movements[0].amount == Decimal("2.00")
