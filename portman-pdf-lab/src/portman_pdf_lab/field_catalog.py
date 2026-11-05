@@ -110,11 +110,18 @@ DIVIDEND_FIELDS = (
     FieldDefinition("fee.amount", "events[0].fee_events[0].amount", "Gebührenbetrag", "Ausgewiesener Betrag einer Gebührenposition", "DECIMAL", requirement="OPTIONAL", editor="AMOUNT", order=72),
 )
 
+TAX_SETTLEMENT_FIELDS = (
+    FieldDefinition("settlement.date", "events[0].event_date", "Buchungsdatum", "Valuta der Steuerverrechnung", "DATE", requirement="REQUIRED", editor="DATE", order=10),
+    FieldDefinition("settlement.amount", "events[0].cash_movements[0].amount", "Erstattung oder Belastung", "Betrag mit Zahlungsrichtung", "DECIMAL", requirement="REQUIRED", editor="AMOUNT", order=20),
+    FieldDefinition("settlement.taxes", "events[0].tax_events[0].components", "Steuerkomponenten", "Ausgewiesene Steuerbeträge", "LIST", requirement="REQUIRED", order=30),
+)
+
 DEFAULT_FIELDS = TECHNICAL_FIELDS
 
 
 def fields_for_document(parser_id: str, document_type: str):
     value = f"{parser_id} {document_type}".casefold()
+    if "user.ing-wertpapiere" in value and "steuerverrechnung" in value: return TAX_SETTLEMENT_FIELDS + TECHNICAL_FIELDS
     if document_type == "*" and "comdirect" in parser_id.casefold(): return TRADE_FIELDS + TECHNICAL_FIELDS
     if "mifid" in value or "kosteninformation" in value: return MIFID_FIELDS + TECHNICAL_FIELDS
     if "finanzreport" in value or "kontoauszug" in value or "bank of scotland" in value: return ACCOUNT_FIELDS + TECHNICAL_FIELDS

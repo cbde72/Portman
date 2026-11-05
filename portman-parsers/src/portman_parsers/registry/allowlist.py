@@ -65,13 +65,13 @@ APPROVED_PLUGINS: tuple[PluginMetadata, ...] = (
         ("depotuebertrag", "Baader Depotein-/auslieferung"),
         ("wertpapierabrechnung", "Baader Wertpapierabrechnung"),
     )),
-    PluginMetadata("user.ing-wertpapiere", "ING", "1.0", _handlers(
-        ("dividendengutschrift", "ING Dividendengutschrift"),
-        ("kauf", "ING Wertpapierkauf"),
-        ("verkauf", "ING Wertpapierverkauf"),
-        ("vorabpauschale", "ING Vorabpauschale"),
-        ("steuerverrechnung", "ING Steuerverrechnung"),
-        ("jahresdepotauszug", "ING Jahresdepotauszug"),
+    PluginMetadata("user.ing-wertpapiere", "ING", "2.0", (
+        HandlerMetadata("dividendengutschrift", "ING Dividendengutschrift", True),
+        HandlerMetadata("kauf", "ING Wertpapierkauf", True),
+        HandlerMetadata("verkauf", "ING Wertpapierverkauf", True),
+        HandlerMetadata("vorabpauschale", "ING Vorabpauschale", True),
+        HandlerMetadata("steuerverrechnung", "ING Steuerverrechnung", True),
+        HandlerMetadata("jahresdepotauszug", "ING Jahresdepotauszug", True),
     )),
     PluginMetadata("user.deka-quartalsbericht", "Deka", "1.0", (
         HandlerMetadata("quartalsbericht", "Deka Quartalsbericht/Jahresdepotauszug", True),
