@@ -1,7 +1,4 @@
-"""Independent Deka quartalsbericht / jahresdepotauszug parser.
-
-No portfolio_v5, database, OCR or GUI dependency.
-"""
+"""Unabhängiger Parser für Deka-Quartalsberichte und Jahresdepotauszüge."""
 from datetime import datetime
 from decimal import Decimal
 import re
@@ -54,22 +51,25 @@ class DekaQuartalsberichtPlugin:
             return ()
         return (Detection(self.metadata.plugin_id, self.metadata.version, "quartalsbericht",
                           "Deka Quartalsbericht/Jahresdepotauszug", Decimal("0.95"),
-                          "Deka report title and depot overview"),)
+                          "Deka-Berichtstitel und Depotübersicht erkannt"),)
 
     def parse(self, document, detection):
         if detection.handler_id != "quartalsbericht":
-            raise DekaParseError("Unsupported Deka handler")
+            raise DekaParseError("Nicht unterstützter Deka-Handler")
         title, depot_match = TITLE.search(document.text), DEPOT.search(document.text)
         if not title or not depot_match:
-            raise DekaParseError("Deka report date or depot number missing")
+            raise DekaParseError("Deka-Berichtsstichtag oder Depotnummer fehlt")
         as_of, depot_number = date(title.group(2)), depot_match.group(1)
         depot_id = stable_id("depot", "deka", depot_number)
         evidence, issues, events, positions = [], [], [], []
 
-        def ev(field, excerpt):
-            page = next((p.number for p in document.pages if excerpt in p.text), None)
+        def ev(field, excerpt, source_page=None):
+            page = source_page or next((p.number for p in document.pages if excerpt in p.text), None)
             if page is None:
-                raise DekaParseError("Evidence not present on any PDF page: " + field)
+                raise DekaParseError("Evidence ist auf keiner PDF-Seite vorhanden: " + field)
+            source = next((p for p in document.pages if p.number == page), None)
+            if source is None or excerpt not in source.text:
+                raise DekaParseError("Evidence ist nicht auf der angegebenen PDF-Seite vorhanden: " + field)
             identifier = stable_id("evidence", document.document_id, page, field, excerpt)
             if not any(item.evidence_id == identifier for item in evidence):
                 evidence.append(Evidence(identifier, document.document_id, page, field,
@@ -78,8 +78,8 @@ class DekaQuartalsberichtPlugin:
                                          self.metadata.version))
             return page, identifier
 
-        def pdf(field, excerpt, value):
-            page, eid = ev(field, excerpt)
+        def pdf(field, excerpt, value, source_page=None):
+            page, eid = ev(field, excerpt, source_page)
             return FieldValue.from_pdf(value, page, eid)
 
         depot_evidence = pdf("depot_number", depot_match.group(0), depot_number)
@@ -90,25 +90,28 @@ class DekaQuartalsberichtPlugin:
         rows = list(ROW.finditer(overview))
         match_total = TOTAL.search(overview)
         if not rows or not match_total:
-            raise DekaParseError("Deka positions or documented total missing")
+            raise DekaParseError("Deka-Positionen oder ausgewiesener Gesamtwert fehlen")
         expected = number(match_total.group(1))
         if sum((number(r.group(4)) for r in rows), Decimal(0)) != expected:
-            raise DekaParseError("Deka overview holdings do not reconcile to stated total")
+            raise DekaParseError("Deka-Positionswerte stimmen nicht mit dem Gesamtwert überein")
 
-        # Repeated sub-depot headers on following pages belong to the same account.
+        # Wiederholte Unterdepotköpfe auf Folgeseiten gehören zum selben Bestand.
         turnovers = {}
-        turnover_text = "\n".join(page.text for page in document.pages if TURNOVER.search(page.text))
-        blocks = list(BLOCK.finditer(turnover_text))
-        for index, block in enumerate(blocks):
-            end = blocks[index + 1].start() if index + 1 < len(blocks) else len(turnover_text)
-            key = (block.group(1), block.group(2))
-            turnovers.setdefault(key, []).append(turnover_text[block.start():end])
+        current_key = None
+        for page in (item for item in document.pages if TURNOVER.search(item.text)):
+            blocks = list(BLOCK.finditer(page.text))
+            if not blocks and current_key:
+                turnovers.setdefault(current_key, []).append((page.number, page.text))
+            for index, block in enumerate(blocks):
+                end = blocks[index + 1].start() if index + 1 < len(blocks) else len(page.text)
+                current_key = (block.group(1), block.group(2))
+                turnovers.setdefault(current_key, []).append((page.number, page.text[block.start():end]))
 
         for row in rows:
             isin, sub, name, value_text = row.groups()
             key, market_value = (isin, sub), number(value_text)
             parts = turnovers.get(key, [])
-            body = "\n".join(parts)
+            body = "\n".join(part for _, part in parts)
             matching = [m for m in STOCK.finditer(body) if date(m.group(1)) == as_of]
             quantity = FieldValue.unknown()
             price = FieldValue.unknown()
@@ -116,16 +119,18 @@ class DekaQuartalsberichtPlugin:
             if len(matching) == 1:
                 stock = matching[0]
                 if number(stock.group(2)) != market_value:
-                    raise DekaParseError("Deka sub-depot market value mismatch")
-                quantity = pdf("quantity", stock.group(0), number(stock.group(4)))
-                price = pdf("price", stock.group(0), number(stock.group(3)))
+                    raise DekaParseError("Deka-Unterdepotwert stimmt nicht mit der Übersicht überein")
+                stock_page = next(page for page, part in parts if stock.group(0) in part)
+                quantity = pdf("quantity", stock.group(0), number(stock.group(4)), stock_page)
+                price = pdf("price", stock.group(0), number(stock.group(3)), stock_page)
                 valuation = VALUATION.search(body, stock.end())
                 if valuation:
-                    price_date = pdf("price_date", valuation.group(0), date(valuation.group(1)))
+                    valuation_page = next(page for page, part in parts if valuation.group(0) in part)
+                    price_date = pdf("price_date", valuation.group(0), date(valuation.group(1)), valuation_page)
             else:
                 issues.append(Issue(stable_id("issue", document.document_id, isin, sub, "quantity"),
                                     "DEKA_QUANTITY_UNVERIFIED", IssueSeverity.WARNING,
-                                    "Sub-depot quantity at report date is not uniquely evidenced.",
+                                    "Stückzahl des Unterdepots zum Berichtsstichtag ist nicht eindeutig belegt.",
                                     nature=IssueNature.MISSING_INFORMATION))
             positions.append(DepotPosition(
                 stable_id("position", depot_id, isin, sub),
@@ -135,23 +140,22 @@ class DekaQuartalsberichtPlugin:
                 currency=FieldValue.manual("EUR"), price=price, price_date=price_date,
             ))
 
-            # Preserve the old parser's economic semantics: distribution and reinvestment
-            # are distinct linked EXPECTED movements, never actual account postings.
-            for part in parts:
+            # Ausschüttung und Wiederanlage bleiben getrennte EXPECTED-Vorgänge.
+            for source_page, part in parts:
                 for line in DATED.finditer(part):
                     dist = DISTRIBUTION.search(line.group(1))
                     if not dist:
                         issues.append(Issue(stable_id("issue", document.document_id, isin, sub, line.group(1)),
                                             "DEKA_TURNOVER_UNSUPPORTED", IssueSeverity.WARNING,
-                                            "Non-distribution turnover line not imported.",
+                                            "Nicht unterstützte Umsatzzeile wurde nicht importiert.",
                                             nature=IssueNature.MISSING_INFORMATION))
                         continue
                     amount, shares = number(dist.group(1)), number(dist.group(3).lstrip("+"))
                     if not dist.group(3).startswith("+") or shares <= 0 or amount <= 0:
-                        raise DekaParseError("Invalid Deka reinvestment amount or quantity")
+                        raise DekaParseError("Ungültiger Deka-Wiederanlagebetrag oder ungültige Stückzahl")
                     when = date(dist.group(4))
                     excerpt = line.group(1)
-                    _, eid = ev("distribution", excerpt)
+                    _, eid = ev("distribution", excerpt, source_page)
                     basis = stable_id("deka-event", depot_id, sub, isin, when, amount, shares)
                     dividend_id = stable_id("event", basis, "dividend")
                     buy_id = stable_id("event", basis, "reinvestment")
@@ -173,6 +177,14 @@ class DekaQuartalsberichtPlugin:
                                                              isin, shares, (eid,), depot_id=depot_id),),
                         evidence_ids=(eid,), security_isin=isin,
                         security_identity_evidence_ids=(eid,)))
+
+        if "Informationen über Kosten und Nebenkosten" in document.text:
+            excerpt = "Informationen über Kosten und Nebenkosten"
+            _, cost_evidence = ev("cost_information", excerpt)
+            issues.append(Issue(stable_id("issue", document.document_id, "cost-information"),
+                                "DEKA_COST_INFORMATION_NOT_IMPORTED", IssueSeverity.WARNING,
+                                "Vorhandene Informationen über Kosten und Nebenkosten wurden nicht importiert.",
+                                evidence_id=cost_evidence, nature=IssueNature.MISSING_INFORMATION))
 
         snapshot = DepotSnapshot(
             stable_id("snapshot", depot_id, as_of, document.document_id), depot_id,

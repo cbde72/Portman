@@ -57,7 +57,7 @@ def test_distribution_and_reinvestment_do_not_book_actual_cash():
 def test_mismatched_overview_is_rejected():
     plugin = DekaQuartalsberichtPlugin()
     source = document(total="110,00")
-    with pytest.raises(ValueError, match="market value mismatch"):
+    with pytest.raises(ValueError, match="Unterdepotwert stimmt nicht"):
         plugin.parse(source, plugin.detect(source)[0])
 
 
@@ -91,3 +91,32 @@ def test_turnover_block_continues_on_following_page_without_repeated_subdepot_he
     result = plugin.parse(source, plugin.detect(source)[0])
     assert result.depot_snapshots[0].positions[0].quantity.value == Decimal("10.000")
     assert [event.kind for event in result.events] == ["DIVIDEND", "REINVESTMENT"]
+    distribution = next(item for item in result.evidence if item.field == "distribution")
+    assert distribution.page_number == 3
+
+
+def test_identical_distribution_text_keeps_actual_source_page():
+    second_isin = "DE000A0BBBB1"
+    overview = (
+        "Deka\nQuartalsbericht per 31.03.2026\nDepot: 12345678\nDepotübersicht\n"
+        f"{ISIN} 01 Musterfonds 100,00 +0,00\n"
+        f"{second_isin} 02 Zweitfonds 100,00 +0,00\nGesamt in EUR 200,00 +0,00\n"
+    )
+    line = "Ausschüttung / Kauf aus Ertrag 10,00 10,000 +1,000 20.03.2026 21.03.2026"
+    pages = (PdfPage(1, overview),
+             PdfPage(2, f"Umsatzübersicht\nISIN: {ISIN} Unterdepot: 01\nBestand am 31.03.2026 100,00 10,000 10,000\n{line}\n"),
+             PdfPage(3, f"Umsatzübersicht\nISIN: {second_isin} Unterdepot: 02\nBestand am 31.03.2026 100,00 10,000 10,000\n{line}\n"))
+    source = PdfDocument("deka-pages", "b" * 64, pages, "Deka.pdf")
+    plugin = DekaQuartalsberichtPlugin()
+    result = plugin.parse(source, plugin.detect(source)[0])
+    assert [item.page_number for item in result.evidence if item.field == "distribution"] == [2, 3]
+
+
+def test_cost_information_remains_visible_as_warning():
+    source = document()
+    pages = (*source.pages, PdfPage(3, "Informationen über Kosten und Nebenkosten"))
+    source = PdfDocument(source.document_id, source.source_hash, pages, source.filename)
+    plugin = DekaQuartalsberichtPlugin()
+    result = plugin.parse(source, plugin.detect(source)[0])
+    issue = next(item for item in result.issues if item.code == "DEKA_COST_INFORMATION_NOT_IMPORTED")
+    assert issue.evidence_id
