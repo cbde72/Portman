@@ -57,13 +57,15 @@ APPROVED_PLUGINS: tuple[PluginMetadata, ...] = (
         HandlerMetadata("wertpapierverkauf", "PP comdirect Wertpapierverkauf", True),
         HandlerMetadata("finanzreport", "PP comdirect Finanzreport", True),
     )),
-    PluginMetadata("baader.pdf", "Baader", "1.0", _handlers(
-        ("quartalsaufstellung", "Baader Quartalsaufstellung"),
-        ("jahresdepotauszug", "Baader Jahresdepotauszug"),
-        ("dividende", "Baader Dividendenabrechnung"),
-        ("vorabpauschale", "Baader Vorabpauschale"),
-        ("depotuebertrag", "Baader Depotein-/auslieferung"),
-        ("wertpapierabrechnung", "Baader Wertpapierabrechnung"),
+    PluginMetadata("baader.pdf", "Baader", "2.0", tuple(
+        HandlerMetadata(handler, label, True) for handler, label in (
+            ("quartalsaufstellung", "Baader Quartalsaufstellung"),
+            ("jahresdepotauszug", "Baader Jahresdepotauszug"),
+            ("dividende", "Baader Dividendenabrechnung"),
+            ("vorabpauschale", "Baader Vorabpauschale"),
+            ("depotuebertrag", "Baader Depotein-/auslieferung"),
+            ("wertpapierabrechnung", "Baader Wertpapierabrechnung"),
+        )
     )),
     PluginMetadata("user.ing-wertpapiere", "ING", "2.0", (
         HandlerMetadata("dividendengutschrift", "ING Dividendengutschrift", True),

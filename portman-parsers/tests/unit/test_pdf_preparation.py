@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import json
 from pathlib import Path
 import sys
 import threading
@@ -87,6 +88,46 @@ def test_embedded_u_letters_are_not_removed():
     text, diagnostics = _normalize(value)
     assert text == value
     assert "ISOLATED_REPEATED_U_GLYPH_LINE_REMOVED" not in diagnostics
+
+
+def test_baader_uses_selected_pdfium_page_for_layout_and_evidence(monkeypatch, tmp_path):
+    from portman_parsers.extraction import pdf as extraction
+    from portman_parsers.extraction import preparation
+    from portman_parsers.plugins import BaaderPlugin
+
+    header = "Baader Bank AG\nDepot-Nr.: 1234567890\nQuartalsaufstellung\nMIFID II per 30.06.2026\n"
+    corrected = "Stück 10 WKN: BASF11 EUR 50,000 500,00 EUR\nISIN: DE000BASF111\nBASF SE\nDepotwert 500,00 EUR\n"
+    damaged = corrected.replace("DE000BASF111", "DE000BASF1\ufffd1")
+
+    class Page:
+        def __init__(self, value):
+            self.value = value
+
+        def extract_text(self, **_kwargs):
+            return self.value
+
+    class Reader:
+        is_encrypted = False
+        pages = (Page(header), Page(damaged))
+
+    path = tmp_path / "baader-fallback.pdf"
+    path.write_bytes(b"synthetic PDF bytes")
+    monkeypatch.setattr(extraction, "PdfReader", lambda *_args, **_kwargs: Reader())
+    monkeypatch.setattr(preparation, "_pdfium_page", lambda _path, page: (corrected, (), "test-pdfium") if page == 2 else None)
+
+    document = extract_pdf(path)
+    assert document.pages[0].extraction_method == "pypdf:ok"
+    assert document.pages[1].extraction_method == "pdfium:ok"
+    assert "DE000BASF111" in document.pages[1].text
+    assert "\ufffd" not in document.pages[1].text
+    selected = json.loads(document.metadata["text_preparation_json"])["pages"][1]
+    assert selected["extractor_id"] == "pdfium"
+    assert selected["layout_text"] == document.pages[1].text
+    plugin = BaaderPlugin()
+    result = plugin.parse(document, plugin.detect(document)[0])
+    assert result.depot_snapshots[0].positions[0].security_id.value == "DE000BASF111"
+    assert all(item.excerpt in document.pages[item.page_number - 1].text for item in result.evidence)
+    assert any(item.page_number == 2 and item.field == "depot_position" for item in result.evidence)
 
 
 def test_embedded_u_font_artifacts_trigger_pdfium_fallback(monkeypatch, tmp_path):
