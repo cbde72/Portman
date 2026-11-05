@@ -126,8 +126,29 @@ EINLIEFERUNG-123.45
 
 
 def test_krypto_document_is_not_selected():
-    source = document("Baader Bank AG\nDepot-Nr.: 1234567890\nWertpapierabrechnung: Kauf\nBitcoin")
+    source = document("Baader Bank AG\nDepot-Nr.: 1234567890\nAbrechnung über den Kauf von Kryptowerten\nBitcoin")
     assert not BaaderPlugin().detect(source)
+
+
+def test_crypto_related_security_name_does_not_exclude_regular_documents():
+    plugin = BaaderPlugin()
+    source = document(trade().replace("DE000BASF111 WKN: BASF11", "DE000A1TNV91 WKN: A1TNV9").replace("BASF SE", "Bitcoin Group SE"))
+    assert plugin.detect(source)[0].handler_id == "wertpapierabrechnung"
+    assert plugin.parse(source, plugin.detect(source)[0]).events[0].security_isin == "DE000A1TNV91"
+    quarter = document(
+        """Baader Bank AG
+Depot-Nr.: 1234567890
+Quartalsaufstellung
+MIFID II per 30.06.2026
+Stück 10 WKN: A1TNV9 EUR 50,000 500,00 EUR
+ISIN: DE000A1TNV91
+Bitcoin Group SE
+Depotwert 500,00 EUR
+""",
+        "crypto-name-quarter",
+    )
+    assert plugin.detect(quarter)[0].handler_id == "quartalsaufstellung"
+    assert plugin.parse(quarter, plugin.detect(quarter)[0]).depot_snapshots[0].positions[0].security_id.value == "DE000A1TNV91"
 
 
 def test_trade_rejects_unverified_storno_and_preserves_wkn():
@@ -165,3 +186,30 @@ Zu Lasten Konto 1234567005 Valuta: 03.07.2026 EUR 2,00
     plugin = BaaderPlugin()
     with pytest.raises(ValueError, match="Steuerkomponenten"):
         plugin.parse(source, plugin.detect(source)[0])
+
+
+def test_zero_advance_tax_keeps_tax_event_and_evidenced_basis():
+    source = document(
+        """Baader Bank AG
+Depot-Nr.: 1234567890
+Vorabpauschale
+Referenz-Nr.: 12345
+Nominale ISIN: DE000BASF111 WKN: BASF11
+STK 2 BASF SE
+Bemessungsgrundlage zur Kapitalertragsteuer EUR 2,00 EUR 1,40
+Zu Lasten Konto 1234567005 Valuta: 03.07.2026 EUR 0,00
+""",
+        "zero-advance",
+    )
+    plugin = BaaderPlugin()
+    result = plugin.parse(source, plugin.detect(source)[0])
+    event = result.events[0]
+    assert event.cash_movements[0].amount == 0
+    assert event.tax_events[0].kind == "ADVANCE_TAX"
+    assert event.tax_events[0].components == ()
+    assert event.tax_events[0].taxable_basis == Decimal("1.40")
+    assert event.tax_events[0].actually_withheld_tax == 0
+    assert event.tax_events[0].tax_year == 2026
+    basis_id = event.tax_events[0].evidence_ids[0]
+    assert next(item for item in result.evidence if item.evidence_id == basis_id).excerpt.startswith("Bemessungsgrundlage")
+    assert not [issue for issue in validate_parsed_document(result) if issue.severity.value == "ERROR"]

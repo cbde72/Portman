@@ -35,6 +35,7 @@ SEC = re.compile(r"Nominale\s+ISIN:\s*([A-Z0-9]{12})\s+WKN:\s*(\w{6})[^\n]*\n\s*
 POS = re.compile(r"(?m)^\s*Stück\s+(" + NUM + r")\s+WKN:\s*(\w{6})\s+([A-Z]{3})\s+(" + NUM + r")\s+(" + NUM + r")\s+(?:([A-Z]{3})\s*)?$")
 TOTAL = re.compile(r"Depotwert\s+(" + NUM + r")\s+EUR")
 REVERSAL = {"26172813": ("524443206", "526758625", "US0378331005", Decimal("4.125"), Decimal("0.78"), Decimal("0.14"))}
+CRYPTO_TITLE = re.compile(r"Abrechnung\s+über\s+den\s+Kauf\s+von\s+Kryptowerten", re.I)
 
 
 def money(value):
@@ -57,7 +58,7 @@ class BaaderPlugin:
 
     def detect(self, document):
         text = document.text
-        if "Baader Bank" not in text or not DEPOT.search(text) or re.search(r"Krypto|Bitcoin|Ethereum", text, re.I):
+        if "Baader Bank" not in text or not DEPOT.search(text) or CRYPTO_TITLE.search(text):
             return ()
         pairs = (
             ("quartalsaufstellung", "Quartalsaufstellung"),
@@ -259,7 +260,8 @@ class BaaderPlugin:
             evidence_ids=(settle_ev,),
             movement_type=CashMovementType.REVERSAL if reversal else CashMovementType.DIVIDEND_CREDIT if handler == "dividende" else CashMovementType.TAX_DEBIT,
         )
-        bases = re.findall(r"Bemessungsgrundlage\s+zur\s+Kapitalertragsteuer\s+EUR\s+(" + NUM + r")\s+EUR\s+(" + NUM + r")", text)
+        bases = list(re.finditer(r"Bemessungsgrundlage\s+zur\s+Kapitalertragsteuer\s+EUR\s+(" + NUM + r")\s+EUR\s+(" + NUM + r")", text))
+        basis_ev = ev("taxable_basis", bases[-1].group(0))[0] if bases else None
         taxes = (
             (
                 TaxEvent(
@@ -267,9 +269,9 @@ class BaaderPlugin:
                     event_id,
                     "WITHHOLDING_TAX" if handler == "dividende" else "ADVANCE_TAX",
                     tuple(components),
-                    taxable_basis=money(bases[-1][1]) if bases else None,
+                    taxable_basis=money(bases[-1].group(2)) if bases else None,
                     cash_movement_id=cash_id,
-                    evidence_ids=tuple(tax_evs or (settle_ev,)),
+                    evidence_ids=tuple(x for x in (*tax_evs, basis_ev) if x) or (settle_ev,),
                     depot_id=depot_id,
                     isin=isin,
                     tax_year=when.year,
@@ -280,7 +282,7 @@ class BaaderPlugin:
                     actually_withheld_tax=tax_total,
                 ),
             )
-            if components
+            if components or handler == "vorabpauschale"
             else ()
         )
         return FinancialEvent(
@@ -291,7 +293,7 @@ class BaaderPlugin:
             cash_movements=(cash,),
             tax_events=taxes,
             reversal_of_event_id=reversal_of,
-            evidence_ids=(sec_ev, settle_ev, ref_ev, *tax_evs),
+            evidence_ids=tuple(x for x in (sec_ev, settle_ev, ref_ev, basis_ev, *tax_evs) if x),
             security_name=name,
             security_wkn=wkn,
             security_isin=isin,
@@ -313,7 +315,7 @@ class BaaderPlugin:
         if not valid_isin(isin):
             raise ValueError("Ungültige ISIN in der Baader-Abrechnung")
         wkn_match = required(r"WKN:\s*(\w{6})", text, "WKN")
-        nominal = required(r"^\s*STK\s+(" + NUM + r")\s+(.+?)\s{2,}([A-Z]{3})\s+(" + NUM + r")\s*$", text, "Nominale")
+        nominal = required(r"^\s*STK\s+(" + NUM + r")\s+(.+?)\s+([A-Z]{3})\s+(" + NUM + r")\s*$", text, "Nominale")
         quantity, price = money(nominal.group(1)), money(nominal.group(4))
         if quantity <= 0:
             raise ValueError("Ungültige Stückzahl in der Baader-Abrechnung")

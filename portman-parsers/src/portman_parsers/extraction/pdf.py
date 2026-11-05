@@ -47,7 +47,9 @@ def extract_pdf(path: str | Path, password: str | None = None) -> PdfDocument:
         for page in prepared.pages:
             extraction_method = (f"{page.extractor_id}:{page.quality.lower()}"
                                  if page.normalized_text.strip() else "ocr_required")
-            pages.append(PdfPage(page.page_number, raw_pages[page.page_number - 1] if baader_layout else page.normalized_text,
+            selected_text = ((page.layout_text or page.normalized_text) if baader_layout and page.fallback_used
+                             else raw_pages[page.page_number - 1] if baader_layout else page.normalized_text)
+            pages.append(PdfPage(page.page_number, selected_text,
                                  f"{source.name}#page={page.page_number}", extraction_method,
                                  1.0 if page.quality == "OK" else 0.65 if page.quality == "SUSPICIOUS" else 0.25))
     except PasswordProtectedPdfError:
