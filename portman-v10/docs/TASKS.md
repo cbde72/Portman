@@ -2,7 +2,7 @@
 
 Stand: 6. November 2026. Grundlage: Bauplan 3.2. Empfohlener Ablageort: `portman-v10/docs/TASKS.md`.
 
-Status: [x] nachweislich vorbereitet; [ ] offen. Vorbereitung ist keine fertige Implementierung. Branch, Repositoryintegration und produktive Migration sind noch nicht erfolgt. Aktuellen lokalen/GitHub-Stand vor Beginn prüfen.
+Status: [x] nachweislich vorbereitet/umgesetzt; [ ] offen. Das V10-Paket liegt auf Branch `codex/portman-v10-foundation` mit Draft-PR #69. Vorbereitung und Prototyp sind keine produktive Anwendung oder Migration. Parser-PR #68 bleibt separat zu entscheiden.
 
 ## Arbeitsweise
 
@@ -22,7 +22,7 @@ Ein Auftrag umfasst eine Aufgabe oder einen eng zusammengehörigen Block. IDs bl
 - [x] V10-02 **Vorbereitungspaket integrieren.** Eigenes Paket `portman-v10/`, Regeln, Bauplan und diese Aufgabenliste aufnehmen. Fertig: unabhängige Installation/Tests; keine V09-Abhängigkeit und keine Regelduplikate.
 - [x] V10-03 **Zugriffsgrenzen festlegen.** Agent im V10-Verzeichnis starten; für echte Sperre Sandbox/Dateirechte konfigurieren. Fertig: tatsächlicher erlaubter Bereich geprüft; Branch/AGENTS.md nicht als technische Sperre ausgegeben. Geprüft: Dateisystemzugriff ist uneingeschränkt; es besteht keine technische Sandbox.
 - [x] V10-04 **Parservertrag vollständig prüfen.** Installierbare Version, Lizenz, Entry-Points, DTO-Felder, ausführbare Handler und Referenztests prüfen. Fertig: konkrete unterstützte Anbindung dokumentiert, keine erfundene API. Nachweis: `docs/Parserpruefung.md`, Version 0.7.0 auf vollständigem lokalem Commit; 268 Parser-Tests bestanden.
-- [ ] V10-05 **Exakte Zahlendarstellung entscheiden.** Präzision, SQLite-Roundtrip, Betragssuche, Summen, Kryptomengen mit mindestens 18 Nachkommastellen und große Werte vergleichen. Fertig: gemessene Entscheidung ohne Float-/Überlauf-/Decimal-Kontextverlust.
+- [x] V10-05 **Exakte Zahlendarstellung entscheiden.** Kanonische Dezimalstrings, indexierte SQLite-Dezimal-Collation und ganzzahlige Koeffizientensummen als Prototyp festgelegt; keine produktive Migration. Nachweis und Messgrenzen in `docs/Datenmodell.md`.
 - [ ] V10-06 **Vier Referenzvorgänge modellieren.** Kauf, Ausschüttung, Geldtransfer und Depotübertrag samt Gebühren/Steuern und unbekannten Kosten. Fertig: erwartete Geld-/Mengenwirkungen, Datumsbasis und Quellen eindeutig festgelegt.
 - [ ] V10-07 **Anwendungsschnittstelle vervollständigen.** DTOs für Konten, Jobs, Vorschau, Commit, Suche, Dokumente, Rücknahme, Stichtag und Freistellung. Fertig: typisiert, revisionsfähig, unbekannte Werte ausdrücklich, keine Parser-/Qt-/SQL-Objekte im Vertrag.
 - [ ] V10-08 **FakeService und Vertragstests ergänzen.** Fertig: wichtige Ansichten ohne Datenbank entwickelbar; Fehler, Dezimalserialisierung und Seitenlogik geprüft.
@@ -84,7 +84,7 @@ V09-Komplettmigration, eigene Parser, automatische Übernahme unsicherer Kandida
 
 ## Nächster Auftrag
 
-V10-01 bis V10-04: Arbeitsbereich isolieren, Vorbereitung integrieren, tatsächliche Parseranbindung verifizieren. Anschließend V10-05 bis V10-10 als Fundament abschließen. Kein offener Punkt gilt durch diese Liste als bereits umgesetzt.
+V10-06 bis V10-10 als Fundament abschließen; V10-05 ist als gemessene Formatentscheidung mit Prototyp dokumentiert. Kein offener Punkt gilt durch diese Liste als bereits umgesetzt.
 
 
 ## Ergänzende Aufgaben – Nutzerprüfung
@@ -104,5 +104,6 @@ Diese Aufgaben gehören zur Grundversion: V10-36 zusammen mit Suche/Oberfläche,
 | V10-02 | Vorbereitungspaket im isolierten Worktree als lokaler Foundation-Commit integriert | eigene `.venv`, Editable-Installation und 4 Unittests bestanden | ausstehend |
 | V10-03 | tatsächliche Grenze in README dokumentiert | uneingeschränkten Dateisystemzugriff festgestellt; keine Sandbox behauptet | ausstehend |
 | V10-04 | Parser 0.7.0 auf `227eaafb4fb49e4357006546a0855ea7a0668c0a` im offenen PR #68; Remote- und lokaler Pin dokumentiert | 268 Parser-Tests bestanden; frische Remote-Installation und 4 V10-Tests bestanden; Review ohne offene mittlere/blockierende Befunde | ausstehend |
+| V10-05 | Prototyp in `domain.values` und SQLite-Collation in `infrastructure.sqlite_decimal` | 6 V10-Tests bestanden; 100.000 Werte, indexierte Bereichssuche Median 0,563 ms; SQLite-INTEGER-Überlauf bestätigt | ausstehend |
 
 Nur bei tatsächlichem Abschluss eine Zeile ergänzen. Keine Nutzerprüfung automatisch abhaken. Aktueller Paketstand: Grundgerüst und Dokumente; keine produktive Anwendung, keine Nutzerabnahme.
