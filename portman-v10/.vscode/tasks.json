@@ -4,7 +4,7 @@
     {
       "label": "V10: Grundger\u00fcst pr\u00fcfen",
       "type": "process",
-      "command": "python",
+      "command": "${workspaceFolder}/.venv/Scripts/python.exe",
       "args": [
         "-m",
         "unittest",

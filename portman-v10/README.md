@@ -5,13 +5,14 @@ Stand: 6. November 2026. Enthält Anweisungen, Konfiguration und vorbereitetes G
 ## Lokaler Integrationsstand
 
 Das Paket ist im separaten Worktree
-`C:\Users\chris\Desktop\programming\PortmanNL-portman-v10-foundation` auf dem
+`C:\Users\chris\Desktop\programming\PortmanV10` auf dem
 lokalen Branch `codex/portman-v10-foundation` integriert. Ausgangsstand ist
 `origin/main` bei `816034a`; es wurde nichts veröffentlicht oder gemergt. Die
 Ausführungsumgebung besitzt uneingeschränkten Dateisystemzugriff. Worktree,
 Branch und diese Regeln sind organisatorische Grenzen, keine technische
-Sandbox. Die tatsächlich installierte Parserquelle und deren abweichender
-Quellstand sind in `docs/Parserpruefung.md` dokumentiert.
+Sandbox. Der für V10 fixierte Parserstand und die bewusst noch nicht
+übernommenen Änderungen des neueren Ausgangs-Checkouts sind in
+`docs/Parserpruefung.md` dokumentiert.
 
 ## Einrichten
 
@@ -34,12 +35,15 @@ Quellstand sind in `docs/Parserpruefung.md` dokumentiert.
 
 Windows PowerShell aus dem Paketordner:
 
+    python -m venv .venv
+    .\.venv\Scripts\python.exe -m pip install -e .
+    .\.venv\Scripts\python.exe -m pip install -r requirements-parser.txt
     powershell -NoProfile -File scripts/Run-Checks.ps1
 
 Oder direkt:
 
     $env:PYTHONPATH = 'src'
-    python -m unittest discover -s tests -v
+    .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 
 Linux:
 

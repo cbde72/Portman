@@ -21,7 +21,7 @@ Ein Auftrag umfasst eine Aufgabe oder einen eng zusammengehörigen Block. IDs bl
 - [x] V10-01 **Branch und Arbeitsverzeichnis einrichten.** `codex/portman-v10-foundation` und eigenen Worktree aus geprüftem Ausgangsstand anlegen; bestehende Änderungen erhalten. Fertig: V10-Änderungen isoliert nachvollziehbar, V09 unverändert.
 - [x] V10-02 **Vorbereitungspaket integrieren.** Eigenes Paket `portman-v10/`, Regeln, Bauplan und diese Aufgabenliste aufnehmen. Fertig: unabhängige Installation/Tests; keine V09-Abhängigkeit und keine Regelduplikate.
 - [x] V10-03 **Zugriffsgrenzen festlegen.** Agent im V10-Verzeichnis starten; für echte Sperre Sandbox/Dateirechte konfigurieren. Fertig: tatsächlicher erlaubter Bereich geprüft; Branch/AGENTS.md nicht als technische Sperre ausgegeben. Geprüft: Dateisystemzugriff ist uneingeschränkt; es besteht keine technische Sandbox.
-- [x] V10-04 **Parservertrag vollständig prüfen.** Installierbare Version, Lizenz, Entry-Points, DTO-Felder, ausführbare Handler und Referenztests prüfen. Fertig: konkrete unterstützte Anbindung dokumentiert, keine erfundene API. Nachweis: `docs/Parserpruefung.md`, 268 Parser-Tests bestanden.
+- [x] V10-04 **Parservertrag vollständig prüfen.** Installierbare Version, Lizenz, Entry-Points, DTO-Felder, ausführbare Handler und Referenztests prüfen. Fertig: konkrete unterstützte Anbindung dokumentiert, keine erfundene API. Nachweis: `docs/Parserpruefung.md`, fixierter Commit mit 196 bestandenen und einem optional übersprungenen Parser-Test.
 - [ ] V10-05 **Exakte Zahlendarstellung entscheiden.** Präzision, SQLite-Roundtrip, Betragssuche, Summen, Kryptomengen mit mindestens 18 Nachkommastellen und große Werte vergleichen. Fertig: gemessene Entscheidung ohne Float-/Überlauf-/Decimal-Kontextverlust.
 - [ ] V10-06 **Vier Referenzvorgänge modellieren.** Kauf, Ausschüttung, Geldtransfer und Depotübertrag samt Gebühren/Steuern und unbekannten Kosten. Fertig: erwartete Geld-/Mengenwirkungen, Datumsbasis und Quellen eindeutig festgelegt.
 - [ ] V10-07 **Anwendungsschnittstelle vervollständigen.** DTOs für Konten, Jobs, Vorschau, Commit, Suche, Dokumente, Rücknahme, Stichtag und Freistellung. Fertig: typisiert, revisionsfähig, unbekannte Werte ausdrücklich, keine Parser-/Qt-/SQL-Objekte im Vertrag.
@@ -101,8 +101,8 @@ Diese Aufgaben gehören zur Grundversion: V10-36 zusammen mit Suche/Oberfläche,
 |---|---|---|---|
 | Beispiel-ID | offen | offen | ausstehend |
 | V10-01 | lokaler Branch `codex/portman-v10-foundation`, Basis `816034a`, separater Worktree | `git status`, `git worktree list` | ausstehend |
-| V10-02 | Vorbereitungspaket im isolierten Worktree als lokaler Foundation-Commit integriert | Editable-Installation und 4 Unittests bestanden | ausstehend |
+| V10-02 | Vorbereitungspaket im isolierten Worktree als lokaler Foundation-Commit integriert | eigene `.venv`, Editable-Installation und 4 Unittests bestanden | ausstehend |
 | V10-03 | tatsächliche Grenze in README dokumentiert | uneingeschränkten Dateisystemzugriff festgestellt; keine Sandbox behauptet | ausstehend |
-| V10-04 | Parservertrag in `docs/Parserpruefung.md` dokumentiert | 268 Parser-Tests bestanden | ausstehend |
+| V10-04 | Parsercommit `816034a` in `requirements-parser.txt` fixiert; Vertrag in `docs/Parserpruefung.md` dokumentiert | 196 Parser-Tests bestanden, 1 optionaler PDFium-Test übersprungen | ausstehend |
 
 Nur bei tatsächlichem Abschluss eine Zeile ergänzen. Keine Nutzerprüfung automatisch abhaken. Aktueller Paketstand: Grundgerüst und Dokumente; keine produktive Anwendung, keine Nutzerabnahme.

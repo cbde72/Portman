@@ -1,0 +1,2 @@
+# Parserstand des geprüften origin/main-Basiscommits; nicht editable installieren.
+portman-parsers @ git+https://github.com/cbde72/Portman.git@816034a09bd71d092fed4fc30e245a4baadfe3f0#subdirectory=portman-parsers
