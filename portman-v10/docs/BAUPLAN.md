@@ -104,6 +104,11 @@ Fertig, wenn Kauf, Ausschüttung, Geldtransfer und Depotübertrag eindeutig mit 
 
 Tatsächlich verfügbare portman-parsers-API und Paketversion prüfen. Mit einem freigegebenen comdirect-Dokumenttyp beginnen. Der Adapter übersetzt Strukturen und ergänzt keine Bankextraktion. Unvollständige Konto-/Instrumentzuordnung wird sichtbar zurückgehalten.
 
+Geprüfter Paketstand für die weitere Adapterarbeit ist `portman-parsers` 0.7.0
+auf Commit `0c860ccbd91e7f6b4bec15743ce8e360b8050772`. API 0.6 und Ergebnisschema
+1.6.0 bleiben unverändert. Bis zur Veröffentlichung wird derselbe Commit lokal
+nicht-editable installiert; die Remote-Pin-URL ist vorher nicht auflösbar.
+
 Vorgesehene Auswahl bleibt comdirect, Baader/finanzen.zero, ING, Deka, FNZ/Finvesto, Renault, Bank of Scotland und generischer Dokument-Fallback. Freigabe je Dokumenttyp anhand echter Referenzen; keine Reifegradbehauptung aus der Auswahlliste. pbb direkt und Baader-Kryptowährungen bleiben ausgeschlossen. Generischer Fallback erzeugt ohne ausreichende Fakten keine Buchung.
 
 Fertig, wenn Vorschauwerte unmittelbar mit dem Original vergleichbar sind und noch keine produktiven Buchungen entstanden sind.

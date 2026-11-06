@@ -37,7 +37,8 @@ Windows PowerShell aus dem Paketordner:
 
     python -m venv .venv
     .\.venv\Scripts\python.exe -m pip install -e .
-    .\.venv\Scripts\python.exe -m pip install -r requirements-parser.txt
+    # Solange der Parsercommit nur lokal existiert:
+    .\.venv\Scripts\python.exe -m pip install -r requirements-parser-local.txt
     powershell -NoProfile -File scripts/Run-Checks.ps1
 
 Oder direkt:
@@ -50,6 +51,11 @@ Linux:
     PYTHONPATH=src python3 -m unittest discover -s tests -v
 
 Python >=3.11 erforderlich. Vier vorhandene Tests prüfen nur erste Vertragsgrundlagen. Sie sind kein Nachweis für Import, Rücknahme oder Geschwindigkeit. Der Python-Testlauf wurde bei der Paketerstellung unter Linux ausgeführt; PowerShell-Skript und VS-Code-Aufgabe dort nicht ausgeführt.
+
+`requirements-parser.txt` enthält den vorgesehenen vollständigen Remote-Pin.
+Der Commit ist noch nicht veröffentlicht und daher derzeit nur über
+`requirements-parser-local.txt` aus dem separaten Parser-Worktree installierbar.
+Beide Varianten bauen ein Wheel und erzeugen keine editable Parserabhängigkeit.
 
 ## Bewusst keine weiteren Toolkonfigurationen
 

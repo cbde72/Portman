@@ -1,2 +1,5 @@
-# Parserstand des geprüften origin/main-Basiscommits; nicht editable installieren.
-portman-parsers @ git+https://github.com/cbde72/Portman.git@816034a09bd71d092fed4fc30e245a4baadfe3f0#subdirectory=portman-parsers
+# Vorgesehener Remote-Pin für portman-parsers 0.7.0. Der Commit ist noch nicht
+# veröffentlicht und deshalb bis zu einem ausdrücklich beauftragten Push nicht
+# über diese URL installierbar. Für die lokale Verifikation gilt die getrennte
+# requirements-parser-local.txt.
+portman-parsers @ git+https://github.com/cbde72/Portman.git@0c860ccbd91e7f6b4bec15743ce8e360b8050772#subdirectory=portman-parsers

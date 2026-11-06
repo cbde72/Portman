@@ -1,93 +1,83 @@
 # Parserprüfung – 6. November 2026
 
-## Fixierter V10-Stand
+## Versionierter Funktionsstand
 
-V10 bindet `portman-parsers` reproduzierbar an den vollständigen Commit
-`816034a09bd71d092fed4fc30e245a4baadfe3f0`, den nach einem Fetch aktuellen
-Stand von `origin/main`. Die Bindung steht in `requirements-parser.txt` als
-Git-URL mit `subdirectory=portman-parsers`. In der V10-Umgebung wird daraus eine
-nicht-editable Installation erzeugt; es besteht kein Verweis auf den
-veränderlichen ursprünglichen Checkout `PortmanNL`.
+V10 verwendet den vollständig geprüften Parserfunktionsstand aus
+`bdc8eb82ea2bd68a760f62716546e898a30023a6`. Darauf liegt ausschließlich der
+Versionierungscommit `0c860ccbd91e7f6b4bec15743ce8e360b8050772`:
 
-Das Paket hat Version `0.6.0`, verlangt Python >=3.11 und deklariert
-`pypdf>=6,<7` sowie `PyYAML>=6,<7`. Die Projektlizenz ist MIT. Für
-`plugins/comdirect_pp.py` gilt gemäß `NOTICE_COMDIRECT_PP.md` die mitgelieferte
-EPL-1.0. Es gibt keine Python-Paket-Entry-Points oder Konsolenskripte. Der
-öffentliche Einstieg ist programmatisch:
+- Paketversion `0.7.0` in `pyproject.toml` und `portman_parsers.__version__`,
+- aktualisierte README mit 35 ausführbaren und 7 reinen Metadaten-Handlern,
+- Vertragstest für die Paketversion.
 
-```python
-from portman_parsers.registry import default_registry
+Die öffentliche `API_VERSION` bleibt `0.6`, das serialisierte Ergebnisschema
+bleibt `1.6.0`. Zwischen der zuvor geprüften API und dem neuen Funktionsstand
+wurden keine DTO- oder Serialisierungsverträge geändert; eine Erhöhung wäre
+daher irreführend. Paketversion 0.7.0 kennzeichnet die zusätzlichen und
+gehärteten Parserimplementierungen.
 
-registry = default_registry()
-detection = registry.select(document)
-result = registry.parse(document, detection) if detection is not None else None
-```
+## Reproduzierbare Bindung
 
-`default_registry()` registriert deterministisch eine feste Allowlist.
-`select()` verwendet standardmäßig `Decimal("0.70")` als Mindestkonfidenz und
-meldet gleich starke Treffer verschiedener Handler als Mehrdeutigkeit.
-`parse()` lehnt unbekannte und nur als Metadaten vorhandene Handler ausdrücklich
-ab.
+`requirements-parser.txt` enthält den vorgesehenen Pin auf den vollständigen
+Commit über `https://github.com/cbde72/Portman`. Der Commit ist nur lokal und
+wurde bewusst weder gepusht noch getaggt. Eine Abfrage des Remotes lieferte
+keinen Treffer; die Remote-Anforderung ist daher derzeit nicht installierbar.
 
-## Handler auf `origin/main`
+Für die lokale Prüfung bindet `requirements-parser-local.txt` denselben Commit
+über den separaten Git-Worktree
+`C:\Users\chris\Desktop\programming\PortmanParsers070`. Pip baut daraus ein
+normales Wheel. Es entsteht weder eine editable Parserinstallation noch ein
+Verweis auf den veränderlichen ursprünglichen Worktree `PortmanNL`.
 
-Die fixierte Allowlist enthält 42 Handler in zehn Plugin-IDs. Davon sind 22 als
-`IMPLEMENTED` registriert und über konkrete Plugin-Klassen ausführbar:
+## Ausführbare Handler
 
-- `user.comdirect-ertraege` 2.0: neun Handler.
-- `comdirect.finanzreport` 3.0: `finanzreport`.
-- `portfolio-performance.comdirect` `pp-c08d5053`: neun Handler.
-- `fnz.finvesto` 2.0: `umsatzabrechnung` und `depotauszug`.
-- `user.bank-of-scotland-kontoauszug` 1.0: `kontoauszug`.
+Die feste Allowlist enthält 42 Handler. In 0.7.0 sind 35 ausführbar:
 
-Baader, ING, Deka, Renault und der generische Kontoauszug sind in diesem Stand
-nur Metadaten. `pbb_direkt` und `baader_krypto` sind blockiert.
+- comdirect: neun Wertpapier-/Steuerhandler, Finanzreport und neun
+  Portfolio-Performance-informierte Handler,
+- Baader: Quartals- und Jahresdepotauszug, Dividende, Vorabpauschale,
+  Depotübertrag und Wertpapierabrechnung,
+- ING: Dividende, Kauf, Verkauf, Vorabpauschale, Steuerverrechnung und
+  Jahresdepotauszug,
+- Deka: Quartalsbericht/Jahresdepotauszug,
+- FNZ/finvesto: Umsatzabrechnung und Depotauszug,
+- Bank of Scotland: Kontoauszug.
 
-## Unterschied zum ursprünglichen Checkout
+Renaults sechs Handler und der generische Kontoauszug bleiben Metadaten.
+`pbb_direkt` und `baader_krypto` bleiben blockiert. Ausführbar bedeutet eine
+konkret registrierte und getestete Implementierung, nicht eine pauschale Zusage
+für jedes historische Layout. Issues, Evidence und explizit unbekannte Werte
+müssen im späteren V10-Adapter erhalten bleiben.
 
-Der ursprüngliche Arbeitsbereich steht auf `bdc8eb8`. Gegenüber dem fixierten
-Stand enthält er 19 geänderte Parser-/Testdateien mit 2.901 Ergänzungen und 94
-Entfernungen. Fachlich relevant sind insbesondere:
+## Vertrag und Abhängigkeiten
 
-- ausführbare Baader-Handler aus `70b2da1`,
-- ausführbare ING-Handler aus `3252b56`,
-- ein unabhängiger Deka-Handler aus `e01ee08`,
-- strengere FNZ-Evidence-Validierung aus `29d0fff`,
-- mehrere comdirect-Korrekturen für historische Finanzreports, Evidence,
-  Gebühren, Schriftentschlüsselung und Mengenextraktion.
+Eingabe ist `PdfDocument`, die Erkennung liefert `Detection`, das Ergebnis
+`ParsedDocument`. Relevante DTOs sind unter anderem `FinancialEvent`,
+`CashMovement`, `SecurityMovement`, `SecurityTrade`, `TaxEvent`, `FeeEvent`,
+`AccountBalance` und `DepotSnapshot`. Beträge und Mengen sind `Decimal`.
+Steuer-/Kostenkomponenten erzeugen nicht selbstständig Geldbewegungen und
+Bestandsnachweise keine synthetischen Käufe.
 
-Diese Änderungen werden nicht pauschal übernommen. Für V10-01 bis V10-04 genügt
-`origin/main`, weil noch kein produktiver Parseradapter implementiert wird. Vor
-V10-12 muss für den zuerst angebundenen Dokumenttyp gezielt entschieden werden,
-welche der oben genannten Commits benötigt werden; dieser Parserstand ist dann
-separat auf einen vollständigen Commit zu fixieren und erneut zu testen.
+Pflichtabhängigkeiten bleiben `pypdf>=6,<7` und `PyYAML>=6,<7`. Das optionale
+Extra `pypdfium2>=4,<6` unterstützt die Textfallback-Extraktion. Der synthetische
+Baader-PDFium-Test ist bestanden. Eine Prüfung mit autorisierten realen,
+beschädigten Baader-PDFs steht weiterhin aus; solche PDFs oder Kontodaten werden
+nicht in Git aufgenommen.
 
-## Öffentlicher Vertrag
+## Prüfungen
 
-`API_VERSION` ist `0.6`. Eingabe ist ein `PdfDocument`; Erkennung liefert eine
-`Detection`. `ParsedDocument` enthält Events, Snapshots, Evidence, Issues,
-Konten, Depots, Salden, Depotstände, Kontoverknüpfungen und
-Vorabpauschalen-Daten. Relevante DTOs sind insbesondere `FinancialEvent`,
-`CashMovement`, `SecurityMovement`, `SecurityTrade`, `TaxEvent`, `TaxComponent`,
-`FeeEvent`, `CostEvent`, `AccountBalance` und `DepotSnapshot`.
+Im separaten Parser-Worktree wurde mit Python 3.14.3 in einer eigenen `.venv`
+ausgeführt:
 
-Beträge und Mengen sind `Decimal`. Fehlende Werte werden durch `MissingValue`
-oder `FieldValue` dargestellt, nicht als Nullbetrag. Steuer- und
-Kostenkomponenten erzeugen nicht selbstständig eine Geldbewegung;
-Bestandsnachweise sind keine synthetischen Käufe. Evidence-IDs sowie Dokument-
-und Parseridentitäten müssen beim Mapping erhalten bleiben. Ein späterer
-V10-Adapter gehört ausschließlich in `infrastructure`; Parser-DTOs dürfen nicht
-in Domain oder Anwendungsschnittstelle durchsickern.
+- vollständige Parsersuite mit installiertem PDFium-Extra: 268 bestanden,
+- Wheel-Build: `portman_parsers-0.7.0-py3-none-any.whl` erfolgreich,
+- Versionsprüfung: Paket 0.7.0, API 0.6, Schema 1.6.0,
+- Ruff für die tatsächlich geänderten Python-Dateien: bestanden.
 
-## Ausgeführte Prüfung
-
-Installation und Prüfungen liefen mit
-`C:\Users\chris\Desktop\programming\PortmanV10\portman-v10\.venv\Scripts\python.exe`.
-Der installierte Parser liegt unter `.venv\Lib\site-packages\portman_parsers`;
-`direct_url.json` weist exakt den oben genannten Commit und das Unterverzeichnis
-`portman-parsers` aus.
-
-Die Parser-Suite des fixierten Worktrees ergab 196 bestandene und einen
-übersprungenen Test in 4,45 Sekunden. Übersprungen wurde ausschließlich der
-optionale PDFium-Test, weil `pypdfium2` nicht installiert ist. Die vier
-vorhandenen V10-Vertragstests sind ebenfalls bestanden.
+Der vollständige Ruff-Lauf meldet 181 bereits im Basiscommit vorhandene
+Pyflakes-Befunde, vor allem wegen des Sternimports in `comdirect.py` und
+ungenutzter Altimporte. Sie wurden nicht im Versionierungsauftrag refaktoriert;
+die vollständige Testsuite bleibt grün. Das unabhängige lesende Review fand
+keine blockierenden oder mittleren Befunde. Sein niedriger Befund zur fehlenden
+Kopplung von `__version__` und Distributionsmetadaten wurde im finalen Commit
+durch einen zusätzlichen Vertragstest behoben.
