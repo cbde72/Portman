@@ -21,10 +21,25 @@ def canonical_decimal(text: str) -> str:
 
 
 def compare_decimal_text(left: str, right: str) -> int:
-    """Vergleicht Dezimalstrings ohne Float und ohne Decimal-Arithmetik-Kontext."""
-    left_value = Decimal(canonical_decimal(left))
-    right_value = Decimal(canonical_decimal(right))
-    return (left_value > right_value) - (left_value < right_value)
+    """Vergleicht endliche Dezimalstrings stellenweise, ohne Float oder Decimal-Kontext."""
+    left = canonical_decimal(left)
+    right = canonical_decimal(right)
+
+    def magnitude(value: str) -> tuple[int, str, str]:
+        integer, separator, fraction = value.lstrip("-").partition(".")
+        return len(integer), integer, fraction if separator else ""
+
+    left_negative = left.startswith("-")
+    right_negative = right.startswith("-")
+    if left_negative != right_negative:
+        return -1 if left_negative else 1
+    left_magnitude = magnitude(left)
+    right_magnitude = magnitude(right)
+    scale = max(len(left_magnitude[2]), len(right_magnitude[2]))
+    left_key = (left_magnitude[0], left_magnitude[1], left_magnitude[2].ljust(scale, "0"))
+    right_key = (right_magnitude[0], right_magnitude[1], right_magnitude[2].ljust(scale, "0"))
+    result = (left_key > right_key) - (left_key < right_key)
+    return -result if left_negative else result
 
 
 def sum_decimal_text(values: list[str] | tuple[str, ...]) -> str:
