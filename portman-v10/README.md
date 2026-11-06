@@ -1,6 +1,6 @@
 # Portman V10 – vollständiges Startpaket
 
-Stand: 6. November 2026. Enthält Anweisungen, Konfiguration und vorbereitetes Grundgerüst. Noch keine startbare Portfolio- oder Webanwendung und keine technische V09-Sandbox. Der Parserbranch wurde gepusht und PR #68 gegen `main` eröffnet; kein Merge oder Release-Tag.
+Stand: 6. November 2026. Enthält Anweisungen, Konfiguration und einen schmalen geprüften Importprototyp für genau einen Dokumenttyp. Noch keine startbare Portfolio- oder Webanwendung und keine technische V09-Sandbox. Der Parserbranch wurde gepusht und PR #68 gegen `main` eröffnet; kein Merge oder Release-Tag.
 
 ## Lokaler Integrationsstand
 
@@ -27,7 +27,7 @@ der V10-Pin wurde in einer frischen Umgebung geprüft. Details stehen in
 - CLAUDE.md: importiert AGENTS.md, keine doppelte Architekturpflege.
 - docs/BAUPLAN.md: konsolidierter Bauplan 3.2 einschließlich aller aktuellen Anforderungen.
 - docs/TASKS.md: priorisierte Aufgaben mit Fertigkriterien und getrenntem Prüfnachweis.
-- docs/Schnittstelle.md, Datenmodell.md, Parserpruefung.md: vorbereitete fachliche Verträge, keine fertige Implementierung.
+- docs/Schnittstelle.md, Datenmodell.md, Parserpruefung.md: fachliche Verträge und Grenzen der Teilimplementierung.
 - pyproject.toml, src/, tests/: eigenständiges Python-Grundgerüst ohne zusätzliche Laufzeitabhängigkeiten.
 - scripts/Run-Checks.ps1: Windows-Prüfskript. .vscode/tasks.json: entsprechende VS-Code-Testaufgabe. .gitignore: Laufzeitdaten und Buildausgaben ausschließen.
 
@@ -45,11 +45,40 @@ Oder direkt:
     $env:PYTHONPATH = 'src'
     .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 
+### Synthetischer Stammdaten- und Eröffnungsablauf
+
+Mit der eigenen V10-Umgebung aus dem Paketordner:
+
+    $env:PYTHONPATH = 'src'
+    .\.venv\Scripts\python.exe scripts/demo_master_data.py
+
+Das Terminalbeispiel legt in einer temporären SQLite-Datei Giro-, Tagesgeld-, Depot- und Kryptokonto sowie ein Wertpapier und einen Coin an. Es speichert Geld- und Mengeneröffnungen, schließt den Zugriff durch Wegwerfen des Stores und liest über eine neue Store-Instanz wieder. Jede Zeile zeigt erwarteten und tatsächlich gespeicherten Wert. Die temporäre Datenbank wird danach gelöscht. Es werden keine echten Daten verwendet.
+
+### Echte comdirect-PDF-Vorschau (ohne Buchung)
+
+Nach Installation des fest gepinnten Parsers in der eigenen V10-.venv:
+
+    $env:PYTHONPATH = 'src'
+    .\.venv\Scripts\python.exe scripts/demo_import_preview.py --pdf 'C:\Pfad\zum\Beleg.pdf'
+
+Ohne `--data-dir` erstellt der Befehl ein isoliertes temporäres Datenverzeichnis. Für eine ausdrücklich gewünschte lokale Wiederöffnung kann ein separates Testverzeichnis angegeben werden. Das Original wird nur gelesen; in V10 werden Kopie, Job und normalisierte Vorschau gespeichert. Vorhandene Dateien im gewählten Datenverzeichnis werden nicht gelöscht.
+
+Geprüfter synthetischer comdirect-Wertpapierkauf zeigt beispielsweise:
+
+    Job: needs_review (1/1 Dokumente, Fortschritt 100%)
+    Beleg: purchase.pdf | Typ: comdirect Wertpapierkauf | Paket/API: 0.7.0/0.6 | Plugin: user.comdirect-ertraege 2.0 | Handler: wertpapierkauf | Schema: 1.6.0 | Ergebnis: needs_review
+    Wirkung cash: -126.5 EUR
+    Wirkung quantity: 0.125 DE0008474511
+    Detail fee/provision: 1.5 EUR (INCLUDED_IN_SETTLEMENT; keine zusätzliche Geld-/Mengenwirkung)
+    Keine Buchung übernommen; es wurden keine produktiven Geld- oder Mengenpositionen angelegt.
+
+Reale Dokumente wurden nicht zur Prüfung herangezogen. Bei unbekannter Konto-/Instrumentkennung bleibt die Zuordnung offen. Nur comdirect Wertpapierkauf hat den vollständigen Bewegungspfad; comdirect MiFID-Kosteninformation wird ausschließlich ohne Buchungsbewegung angezeigt, weitere erkannte Dokumenttypen bleiben nicht freigegeben.
+
 Linux:
 
     PYTHONPATH=src python3 -m unittest discover -s tests -v
 
-Python >=3.11 erforderlich. Vier vorhandene Tests prüfen nur erste Vertragsgrundlagen. Sie sind kein Nachweis für Import, Rücknahme oder Geschwindigkeit. Der Python-Testlauf wurde bei der Paketerstellung unter Linux ausgeführt; PowerShell-Skript und VS-Code-Aufgabe dort nicht ausgeführt.
+Python >=3.11 erforderlich. Die Unittests decken Verträge, Referenzfälle, den SQLite-Persistenzprototyp und den echten synthetischen comdirect-PDF-Vorschaupfad ab. Sie sind kein Nachweis für produktive Übernahme, fachlichen Dublettenabgleich, Rücknahme, produktive Indexpflege oder Geschwindigkeit.
 
 `requirements-parser.txt` bindet den vollständigen Commit aus dem offenen
 Parser-PR. `requirements-parser-local.txt` bietet denselben Inhalt aus dem

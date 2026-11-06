@@ -108,7 +108,9 @@ Geprüfter Paketstand für die weitere Adapterarbeit ist `portman-parsers` 0.7.0
 auf Commit `227eaafb4fb49e4357006546a0855ea7a0668c0a` im offenen PR gegen
 `main`. API 0.6 und Ergebnisschema 1.6.0 bleiben unverändert.
 
-Vorgesehene Auswahl bleibt comdirect, Baader/finanzen.zero, ING, Deka, FNZ/Finvesto, Renault, Bank of Scotland und generischer Dokument-Fallback. Freigabe je Dokumenttyp anhand echter Referenzen; keine Reifegradbehauptung aus der Auswahlliste. pbb direkt und Baader-Kryptowährungen bleiben ausgeschlossen. Generischer Fallback erzeugt ohne ausreichende Fakten keine Buchung.
+Die Bibliothek registriert weitere Handler für comdirect, Baader/finanzen.zero, ING, Deka, FNZ/Finvesto, Renault, Bank of Scotland und Portfolio-Performance; die Liste ist keine V10-Freigabe. Im ersten V10-Weg ist nur comdirect Wertpapierkauf end-to-end angebunden. pbb direkt und Baader-Kryptowährungen bleiben ausgeschlossen. Generischer Fallback erzeugt ohne ausreichende Fakten keine Buchung.
+
+V10-12/13 legen PDF-Bytes intern unter Hashnamen ab, lassen die echte Parser-Extraktion/Registry/Validierung laufen und persistieren eine verständliche, normalisierte Vorschau. Nur comdirect Wertpapierkauf liefert Bewegungskandidaten; comdirect MiFID-Kosteninformation ist ausdrücklich informationsneutral. Andere Handler bleiben `unsupported`. Unbekannte Konten/Instrumente bleiben offen; nur exakte kontextbezogene Kennungen führen zu Zuordnungsvorschlägen. Ein SHA-256-Treffer verhindert eine zweite Datei, ist aber kein fachlicher Dublettenabgleich. Vorschau, Job und Prüfentscheidung sind keine Buchung. Gebühren-/Steuer-/Handelsdetails zählen nicht zusätzlich zu den Parser-Geldbewegungen. Abbruch während eines Parseraufrufs wird erst nach dessen Rückkehr umgesetzt; wartende/laufende Jobs werden nach Neustart als unterbrochen fehlgeschlagen markiert und nicht automatisch wiederholt. Prüfbefehl: `python scripts/demo_import_preview.py --pdf <PDF-Pfad>` (temporäre Testablage); Details in README und Datenmodell.
 
 Fertig, wenn Vorschauwerte unmittelbar mit dem Original vergleichbar sind und noch keine produktiven Buchungen entstanden sind.
 
