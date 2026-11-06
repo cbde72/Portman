@@ -1,2 +1,2 @@
-# Lokale, nicht-editable Installation exakt des noch unveröffentlichten Commits.
-portman-parsers @ git+file:///C:/Users/chris/Desktop/programming/PortmanParsers070@0c860ccbd91e7f6b4bec15743ce8e360b8050772#subdirectory=portman-parsers
+# Lokale, nicht-editable Installation desselben geprüften Commitinhalts.
+portman-parsers @ git+file:///C:/Users/chris/Desktop/programming/PortmanParsers070Main@227eaafb4fb49e4357006546a0855ea7a0668c0a#subdirectory=portman-parsers

@@ -1,18 +1,18 @@
 # Portman V10 – vollständiges Startpaket
 
-Stand: 6. November 2026. Enthält Anweisungen, Konfiguration und vorbereitetes Grundgerüst. Noch keine startbare Portfolio- oder Webanwendung, kein angelegter Remote-Branch und keine technische V09-Sandbox.
+Stand: 6. November 2026. Enthält Anweisungen, Konfiguration und vorbereitetes Grundgerüst. Noch keine startbare Portfolio- oder Webanwendung und keine technische V09-Sandbox. Der Parserbranch wurde gepusht und PR #68 gegen `main` eröffnet; kein Merge oder Release-Tag.
 
 ## Lokaler Integrationsstand
 
 Das Paket ist im separaten Worktree
 `C:\Users\chris\Desktop\programming\PortmanV10` auf dem
 lokalen Branch `codex/portman-v10-foundation` integriert. Ausgangsstand ist
-`origin/main` bei `816034a`; es wurde nichts veröffentlicht oder gemergt. Die
+`origin/main` bei `816034a`; V10 wurde nicht veröffentlicht oder gemergt. Die
 Ausführungsumgebung besitzt uneingeschränkten Dateisystemzugriff. Worktree,
 Branch und diese Regeln sind organisatorische Grenzen, keine technische
-Sandbox. Der für V10 fixierte Parserstand und die bewusst noch nicht
-übernommenen Änderungen des neueren Ausgangs-Checkouts sind in
-`docs/Parserpruefung.md` dokumentiert.
+Sandbox. Der für V10 fixierte Parserstand ist im offenen Parser-PR enthalten;
+der V10-Pin wurde in einer frischen Umgebung geprüft. Details stehen in
+`docs/Parserpruefung.md`.
 
 ## Einrichten
 
@@ -37,8 +37,7 @@ Windows PowerShell aus dem Paketordner:
 
     python -m venv .venv
     .\.venv\Scripts\python.exe -m pip install -e .
-    # Solange der Parsercommit nur lokal existiert:
-    .\.venv\Scripts\python.exe -m pip install -r requirements-parser-local.txt
+    .\.venv\Scripts\python.exe -m pip install -r requirements-parser.txt
     powershell -NoProfile -File scripts/Run-Checks.ps1
 
 Oder direkt:
@@ -52,10 +51,10 @@ Linux:
 
 Python >=3.11 erforderlich. Vier vorhandene Tests prüfen nur erste Vertragsgrundlagen. Sie sind kein Nachweis für Import, Rücknahme oder Geschwindigkeit. Der Python-Testlauf wurde bei der Paketerstellung unter Linux ausgeführt; PowerShell-Skript und VS-Code-Aufgabe dort nicht ausgeführt.
 
-`requirements-parser.txt` enthält den vorgesehenen vollständigen Remote-Pin.
-Der Commit ist noch nicht veröffentlicht und daher derzeit nur über
-`requirements-parser-local.txt` aus dem separaten Parser-Worktree installierbar.
-Beide Varianten bauen ein Wheel und erzeugen keine editable Parserabhängigkeit.
+`requirements-parser.txt` bindet den vollständigen Commit aus dem offenen
+Parser-PR. `requirements-parser-local.txt` bietet denselben Inhalt aus dem
+separaten Parser-Worktree für Offline- oder lokale Prüfungen. Beide Varianten
+bauen ein Wheel und erzeugen keine editable Parserabhängigkeit.
 
 ## Bewusst keine weiteren Toolkonfigurationen
 

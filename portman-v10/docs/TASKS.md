@@ -103,6 +103,6 @@ Diese Aufgaben gehören zur Grundversion: V10-36 zusammen mit Suche/Oberfläche,
 | V10-01 | lokaler Branch `codex/portman-v10-foundation`, Basis `816034a`, separater Worktree | `git status`, `git worktree list` | ausstehend |
 | V10-02 | Vorbereitungspaket im isolierten Worktree als lokaler Foundation-Commit integriert | eigene `.venv`, Editable-Installation und 4 Unittests bestanden | ausstehend |
 | V10-03 | tatsächliche Grenze in README dokumentiert | uneingeschränkten Dateisystemzugriff festgestellt; keine Sandbox behauptet | ausstehend |
-| V10-04 | Parser 0.7.0 auf `0c860ccbd91e7f6b4bec15743ce8e360b8050772`; Remote-Pin und lokaler Prüfinstall getrennt dokumentiert | 268 Parser-Tests einschließlich PDFium-Extra bestanden; unabhängiges Review ohne offene mittlere/blockierende Befunde | ausstehend |
+| V10-04 | Parser 0.7.0 auf `227eaafb4fb49e4357006546a0855ea7a0668c0a` im offenen PR #68; Remote- und lokaler Pin dokumentiert | 268 Parser-Tests bestanden; frische Remote-Installation und 4 V10-Tests bestanden; Review ohne offene mittlere/blockierende Befunde | ausstehend |
 
 Nur bei tatsächlichem Abschluss eine Zeile ergänzen. Keine Nutzerprüfung automatisch abhaken. Aktueller Paketstand: Grundgerüst und Dokumente; keine produktive Anwendung, keine Nutzerabnahme.

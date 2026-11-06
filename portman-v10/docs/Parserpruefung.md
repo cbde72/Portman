@@ -3,8 +3,10 @@
 ## Versionierter Funktionsstand
 
 V10 verwendet den vollständig geprüften Parserfunktionsstand aus
-`bdc8eb82ea2bd68a760f62716546e898a30023a6`. Darauf liegt ausschließlich der
-Versionierungscommit `0c860ccbd91e7f6b4bec15743ce8e360b8050772`:
+`bdc8eb82ea2bd68a760f62716546e898a30023a6`. Der geprüfte Parserdiff wurde auf
+`main` aufgesetzt und liegt im offenen PR #68 auf Branch
+`codex/portman-parsers-0.7.0-main`, Kopfcommit
+`227eaafb4fb49e4357006546a0855ea7a0668c0a`:
 
 - Paketversion `0.7.0` in `pyproject.toml` und `portman_parsers.__version__`,
 - aktualisierte README mit 35 ausführbaren und 7 reinen Metadaten-Handlern,
@@ -18,16 +20,22 @@ gehärteten Parserimplementierungen.
 
 ## Reproduzierbare Bindung
 
-`requirements-parser.txt` enthält den vorgesehenen Pin auf den vollständigen
-Commit über `https://github.com/cbde72/Portman`. Der Commit ist nur lokal und
-wurde bewusst weder gepusht noch getaggt. Eine Abfrage des Remotes lieferte
-keinen Treffer; die Remote-Anforderung ist daher derzeit nicht installierbar.
+`requirements-parser.txt` enthält den Pin auf den vollständigen PR-Kopfcommit
+über `https://github.com/cbde72/Portman`. Der Branch wurde gepusht und der
+Commit ist remote auflösbar. Ein Release-Tag wurde nicht angelegt.
 
 Für die lokale Prüfung bindet `requirements-parser-local.txt` denselben Commit
 über den separaten Git-Worktree
-`C:\Users\chris\Desktop\programming\PortmanParsers070`. Pip baut daraus ein
+`C:\Users\chris\Desktop\programming\PortmanParsers070Main`. Pip baut daraus ein
 normales Wheel. Es entsteht weder eine editable Parserinstallation noch ein
 Verweis auf den veränderlichen ursprünglichen Worktree `PortmanNL`.
+
+Der Remote-Pin wurde in einer frischen Umgebung
+`C:\Users\chris\AppData\Local\Temp\portman-v10-pr68-verify` installiert.
+Pip löste den vollständigen Commit auf GitHub auf und installierte ein Wheel
+`portman-parsers-0.7.0`. `direct_url.json` bestätigt URL
+`https://github.com/cbde72/Portman.git` und Commit
+`227eaafb4fb49e4357006546a0855ea7a0668c0a`.
 
 ## Ausführbare Handler
 
@@ -72,7 +80,12 @@ ausgeführt:
 - vollständige Parsersuite mit installiertem PDFium-Extra: 268 bestanden,
 - Wheel-Build: `portman_parsers-0.7.0-py3-none-any.whl` erfolgreich,
 - Versionsprüfung: Paket 0.7.0, API 0.6, Schema 1.6.0,
+- frische Remote-Installation in V10-`.venv` und 4 V10-Vertragstests bestanden,
 - Ruff für die tatsächlich geänderten Python-Dateien: bestanden.
+
+Die frische Remote-Umgebung verwendete Python 3.14.3 unter
+`C:\Users\chris\AppData\Local\Temp\portman-v10-pr68-verify`. `direct_url.json`
+bestätigt den Remote-Commit; der Import erfolgt aus deren `Lib\site-packages`.
 
 Der vollständige Ruff-Lauf meldet 181 bereits im Basiscommit vorhandene
 Pyflakes-Befunde, vor allem wegen des Sternimports in `comdirect.py` und
