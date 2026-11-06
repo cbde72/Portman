@@ -1,0 +1,11 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "portman-v10"
+version = "0.0.1"
+requires-python = ">=3.11"
+description = "Unabhängige Vorbereitung von Portman V10"
+dependencies = []
+[tool.setuptools.packages.find]
+where = ["src"]
