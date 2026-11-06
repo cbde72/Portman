@@ -20,7 +20,7 @@ class SQLiteStoreTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="portman-v10-sqlite-")
         self.database = Path(self.temporary.name) / "test.sqlite"
         self.store = SQLiteStore(self.database)
-        self.assertEqual(self.store.migrate(), ("0001_initial.sql", "0002_opening_balances.sql", "0003_master_data_context.sql", "0004_import_workflow.sql"))
+        self.assertEqual(self.store.migrate(), ("0001_initial.sql", "0002_opening_balances.sql", "0003_master_data_context.sql", "0004_import_workflow.sql", "0005_import_commit.sql"))
         self.assertEqual(self.store.migrate(), ())
         self._seed_reference_entities()
 
@@ -235,7 +235,7 @@ class SQLiteStoreTests(unittest.TestCase):
             self.assertTrue({"data_revision", "value_decimal", "value_rational", "as_of"}.issubset(index_columns))
             contribution_columns = {row["name"] for row in connection.execute("PRAGMA table_info(import_contributions)")}
             self.assertTrue({"import_id", "document_id", "source_kind", "field_name", "previous_value_text", "value_text"}.issubset(contribution_columns))
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 5)
         finally:
             connection.close()
 

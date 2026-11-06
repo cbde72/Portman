@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {% if job.state in ('queued', 'running') %}<meta http-equiv="refresh" content="2">{% endif %}
+  <title>Importvorschau · Portman V10</title>
+  <style>
+    body { max-width: 76rem; margin: 2rem auto; padding: 0 1rem; color: #17212b; font: 1rem/1.5 system-ui, sans-serif; }
+    .banner { padding: 1rem; border: 2px solid #a54b00; background: #fff5e8; font-weight: 700; }
+    .warning { padding: .7rem; background: #fff5e8; border-left: .3rem solid #a54b00; }
+    .error { padding: .7rem; background: #fff0f0; border-left: .3rem solid #a11; }
+    table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+    th, td { text-align: left; vertical-align: top; border: 1px solid #bbc4cc; padding: .5rem; }
+    details { margin: .7rem 0; }
+    footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid #bbc4cc; color: #46535f; font-size: .9rem; }
+  </style>
+</head>
+<body>
+  <h1>Importprüfung</h1>
+  <p class="banner">Importvorschau – noch nicht gebucht</p>
+  {% if job.state in ('queued', 'running') %}
+    <p id="job-feedback" role="status" aria-live="polite">{% for document in documents %}{{ document.name }}{% if not loop.last %}, {% endif %}{% endfor %} hochgeladen. Importvorschau wird erstellt …</p>
+  {% elif job.state == 'needs_review' %}
+    <p id="job-feedback" role="status" aria-live="polite">Vorschau bereit – Angaben müssen geprüft werden.</p>
+  {% elif job.state == 'completed' %}
+    <p id="job-feedback" role="status" aria-live="polite">Vorschau bereit.</p>
+  {% elif job.state == 'failed' %}
+    <p id="job-feedback" class="error" role="alert">Import fehlgeschlagen{% if job.error_code %}: {{ job.error_code.value }}{% endif %}. Bitte erneut versuchen.</p>
+    <p><a class="retry-upload" href="{{ url_for('index') }}">Erneut versuchen (PDF neu auswählen)</a></p>
+  {% elif job.state == 'cancelled' %}
+    <p id="job-feedback" class="error" role="alert">Import abgebrochen. Bitte erneut versuchen.</p>
+    <p><a class="retry-upload" href="{{ url_for('index') }}">Erneut versuchen (PDF neu auswählen)</a></p>
+  {% endif %}
+  <p>Jobstatus: <strong>{{ status_labels.get(job.state, job.state) }}</strong></p>
+  <progress max="100" value="{{ job.progress }}">{{ job.progress }}%</progress>
+  <p>{{ job.completed_documents }} von {{ job.document_count }} Dokumenten · {{ job.progress }} %</p>
+  {% if job.error_code %}<p class="error">{{ job.error_code.value }}</p>{% endif %}
+
+  <h2>Belege</h2>
+  {% for document in documents %}
+    <section>
+      <h3>{{ document.name }}</h3>
+      <p>{{ document.document_type or "Dokumenttyp noch nicht erkannt" }} · {{ status_labels.get(document.status, document.status) }}</p>
+      <p>Parser: {{ document.parser_package_version or "Unbekannt" }} · Handler: {{ document.handler_id or "Keiner" }} · Schema: {{ document.parser_schema_version or "Unbekannt" }}</p>
+      <p><a href="{{ url_for('open_document', document_id=document.document_id) }}" target="_blank" rel="noopener">Original-PDF öffnen</a></p>
+      {% if document.status == "unsupported" %}<p class="warning">Dieser Dokumenttyp ist für die V10-Vorschau nicht freigegeben. Es wurde keine Bewegung erkannt oder erzeugt.</p>{% endif %}
+      {% if document.error_code %}<p class="error">{{ document.error_code.value }}: {{ document.warning_messages|join("; ") }}</p>{% endif %}
+      {% for warning in document.warning_messages %}<p class="warning">{{ warning }}</p>{% endfor %}
+    </section>
+  {% else %}
+    <p>Noch keine Dokumentergebnisse.</p>
+  {% endfor %}
+
+  <h2>Erkannte Vorschauwerte</h2>
+  {% if has_preview %}<p>Prüfsumme: Vorschauversion {{ preview_revision }} · Kandidaten {{ summary.events }} · Geldbewegungen {{ summary.cash }} · Mengenbewegungen {{ summary.quantity }} · offene Konflikte/Zuordnungen {{ summary.unresolved }}</p>{% endif %}
+  {% if preview %}
+    {% for item in preview %}
+      <section>
+        <h3>{{ item.kind }} · {{ status_labels.get(item.status, item.status) }}</h3>
+        {% if item.movements %}
+          <table>
+            <thead><tr><th>Bewegung</th><th>Datum</th><th>Konto/Depot</th><th>Instrument</th><th>Betrag oder Stückzahl</th><th>Zuordnung</th></tr></thead>
+            <tbody>
+              {% for movement in item.movements %}
+                <tr>
+                  <td>{{ movement.type }}</td>
+                  <td>{{ movement.date }}</td>
+                  <td>{{ movement.account }}{% if movement.account_reference %}<br>Belegkennung: {{ movement.account_reference }}{% endif %}</td>
+                  <td>{{ movement.instrument }}</td>
+                  <td>{{ movement.amount }} {{ movement.unit }}</td>
+                  <td>{{ movement.assignment }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% else %}<p>Keine Geld- oder Mengenbewegung erkannt.</p>{% endif %}
+        {% if item.missing %}<p class="warning">Offen: {{ item.missing|join("; ") }}</p>{% endif %}
+        <form method="post" action="{{ url_for('review_item', import_id=job.import_id) }}">
+          <input type="hidden" name="candidate_id" value="{{ item.candidate_id }}">
+          <button name="decision" value="accept" type="submit">Kandidat prüfen / annehmen</button>
+          {% if item.related_event %}<button name="decision" value="link" type="submit">Als Ergänzungsbeleg zuordnen</button>{% endif %}
+          <button name="decision" value="ignore" type="submit">Ignorieren</button>
+        </form>
+        <details>
+          <summary>Details, Referenzen, Quellen und Warnungen</summary>
+          <h4>Datumsangaben</h4>
+          <ul>{% for value in item.dates %}<li>{{ value.meaning }}: {{ value.value }}{% if value.reason %} ({{ value.reason }}){% endif %}</li>{% else %}<li>Keine weiteren Datumsangaben</li>{% endfor %}</ul>
+          <h4>Gebühren, Steuern und weitere Details</h4>
+          <ul>{% for value in item.components %}<li>{{ value.category }}/{{ value.kind }}: {{ value.amount }} {{ value.currency }} · {{ value.effect }} · keine zusätzliche Bewegung</li>{% else %}<li>Keine Detailkomponenten</li>{% endfor %}</ul>
+          <h4>Referenzen</h4>
+          <ul>{% for key, value in item.references %}<li>{{ key }}: {{ value }}</li>{% else %}<li>Keine Referenzen</li>{% endfor %}</ul>
+          <h4>Quellen</h4>
+          <ul>{% for value in item.evidence %}<li>Seite {{ value.page }} · {{ value.field }}: {{ value.excerpt }}</li>{% else %}<li>Keine Quellenangaben</li>{% endfor %}</ul>
+          <h4>Warnungen</h4>
+          <ul>{% for value in item.warnings %}<li>{{ value.severity }}/{{ value.code }}: {{ value.message }}</li>{% else %}<li>Keine Warnungen</li>{% endfor %}</ul>
+          {% if item.original_text %}<h4>Erkannter Originaltext</h4><pre>{{ item.original_text }}</pre>{% endif %}
+        </details>
+      </section>
+    {% endfor %}
+  {% elif has_preview %}
+    <p>Für dieses Dokument gibt es keine Buchungskandidaten.</p>
+  {% else %}
+    <p>Die Vorschau wird erstellt. Diese Seite aktualisiert sich während der Verarbeitung automatisch.</p>
+  {% endif %}
+
+  {% if commit_report %}
+    <h2>Übernahmebericht</h2>
+    <p>Gespeicherte Vorgänge: {{ commit_report.event_ids|join(", ") or "keine" }} · Datenrevision {{ commit_report.data_revision }}</p>
+  {% elif has_preview and job.state == 'needs_review' %}
+    <form method="post" action="{{ url_for('commit_import', import_id=job.import_id) }}">
+      <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+      <input type="hidden" name="request_id" value="web-{{ job.import_id }}-{{ preview_revision }}">
+      <button type="submit" {% if summary.unresolved or summary.events == 0 %}disabled{% endif %}>Übernehmen</button>
+      {% if summary.unresolved %}<p class="warning">Vor der Übernahme müssen alle unvollständigen Kandidaten, offenen Zuordnungen und Konflikte geklärt sein.</p>{% endif %}
+    </form>
+  {% endif %}
+  <p><a href="{{ url_for('index') }}">Weiteres PDF prüfen</a></p>
+  <footer>Branch: {{ branch }} · Commit: {{ commit }} · Datenbankprofil: {{ profile }}</footer>
+</body>
+</html>

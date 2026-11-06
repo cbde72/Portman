@@ -1,13 +1,13 @@
 # Portman V10 – vollständiges Startpaket
 
-Stand: 6. November 2026. Enthält Anweisungen, Konfiguration und einen schmalen geprüften Importprototyp für genau einen Dokumenttyp. Noch keine startbare Portfolio- oder Webanwendung und keine technische V09-Sandbox. Der Parserbranch wurde gepusht und PR #68 gegen `main` eröffnet; kein Merge oder Release-Tag.
+Stand: 6. November 2026. Enthält einen schmalen Importprototyp und eine lokale Web-Testoberfläche für genau diesen Vorschaupfad. Noch keine Portfolioanwendung und keine technische V09-Sandbox. Der V10-Branch ist auf `origin` gepusht; es gibt kein Release und keinen Merge. Parser-PR #68 ist separat.
 
 ## Lokaler Integrationsstand
 
 Das Paket ist im separaten Worktree
 `C:\Users\chris\Desktop\programming\PortmanV10` auf dem
-lokalen Branch `codex/portman-v10-foundation` integriert. Ausgangsstand ist
-`origin/main` bei `816034a`; V10 wurde nicht veröffentlicht oder gemergt. Die
+Branch `codex/portman-v10-foundation` integriert. Ausgangsstand ist
+`origin/main` bei `816034a`; der V10-Branch wurde gepusht, aber nicht gemergt oder als Release veröffentlicht. Die
 Ausführungsumgebung besitzt uneingeschränkten Dateisystemzugriff. Worktree,
 Branch und diese Regeln sind organisatorische Grenzen, keine technische
 Sandbox. Der für V10 fixierte Parserstand ist im offenen Parser-PR enthalten;
@@ -74,11 +74,25 @@ Geprüfter synthetischer comdirect-Wertpapierkauf zeigt beispielsweise:
 
 Reale Dokumente wurden nicht zur Prüfung herangezogen. Bei unbekannter Konto-/Instrumentkennung bleibt die Zuordnung offen. Nur comdirect Wertpapierkauf hat den vollständigen Bewegungspfad; comdirect MiFID-Kosteninformation wird ausschließlich ohne Buchungsbewegung angezeigt, weitere erkannte Dokumenttypen bleiben nicht freigegeben.
 
+### Lokale Web-Testoberfläche
+
+Voraussetzungen in der V10-`.venv`: installierter Parser-Pin und Flask-Webabhängigkeit. Falls Flask fehlt, zuerst im Paketordner ausführen:
+
+    .\.venv\Scripts\python.exe -m pip install -e '.[web]'
+
+Start aus dem Paketordner mit PowerShell:
+
+    .\start_v10_web.ps1
+
+Das Skript nutzt nur `.venv`, prüft Flask und `portman-parsers`, startet ausschließlich auf `127.0.0.1:8765` und öffnet den Browser erst nach erfolgreicher Health-Prüfung. Es legt beziehungsweise verwendet `data/web-test/v10.sqlite` und `data/web-test/documents/`; vorhandene Dateien werden nicht gelöscht. Branch, Commit und Profil sind in der Seite sichtbar. Strg+C beendet den Server.
+
+Prüfanleitung: Starten → Kauf-PDF auswählen → erkannte Geld-/Mengenwerte und Gebühr vergleichen → Original-PDF öffnen. Für eine Übernahme müssen Kandidaten ausdrücklich geprüft werden; offene Konflikte blockieren sie. Die Oberfläche ist ein isoliertes Testprofil. Fachliche Referenzzuordnung, transaktionaler Commit und Importbericht sind enthalten; vollständige Kontenübersicht, Buchungssuche und Rücknahme (V10-16) fehlen. Eine fehlende erkannte Bankreferenz bleibt bewusst offen.
+
 Linux:
 
     PYTHONPATH=src python3 -m unittest discover -s tests -v
 
-Python >=3.11 erforderlich. Die Unittests decken Verträge, Referenzfälle, den SQLite-Persistenzprototyp und den echten synthetischen comdirect-PDF-Vorschaupfad ab. Sie sind kein Nachweis für produktive Übernahme, fachlichen Dublettenabgleich, Rücknahme, produktive Indexpflege oder Geschwindigkeit.
+Python >=3.11 erforderlich. Die Unittests decken Verträge, Referenzfälle, den SQLite-Persistenzprototyp und den echten synthetischen comdirect-PDF-Vorschaupfad ab. Importcommit und Indexpflege sind mit synthetischen SQLite-Integrationsfällen geprüft, nicht produktiv freigegeben. Rücknahme und Nutzerabnahme bleiben offen.
 
 `requirements-parser.txt` bindet den vollständigen Commit aus dem offenen
 Parser-PR. `requirements-parser-local.txt` bietet denselben Inhalt aus dem
@@ -89,6 +103,6 @@ bauen ein Wheel und erzeugen keine editable Parserabhängigkeit.
 
 Keine erfundenen Modellnamen, API-Schlüssel, automatischen Multiagentenketten oder pauschal freigegebenen Shellrechte. OpenCode-/Claude-Berechtigungen und eine echte Sandbox werden passend zur installierten Version und Umgebung eingerichtet. Prompt-Caching wird nicht über diese Markdown-Dateien eingeschaltet; kompakte stabile Regeln unterstützen effiziente Kontextnutzung.
 
-## Spätere Testbarkeit
+## Grenzen der lokalen Web-Testoberfläche
 
-Nach jedem abgeschlossenen Schritt Referenzablauf und kurze Prüfanleitung. Sobald der Webserver implementiert ist, wird ein echter Ein-Klick-Starter ergänzt, der die Testdatenbank nutzt und den Browser öffnet. Einen funktionslosen Webstarter enthält dieses Paket ausdrücklich nicht.
+Der Webstarter unter `start_v10_web.ps1` öffnet den Import-, Prüf- und Übernahmeablauf mit getrenntem Testprofil. Kontenübersicht, Buchungssuche, vollständige Import-Rücknahme (V10-16) und Nutzerabnahme sind weiterhin offen.

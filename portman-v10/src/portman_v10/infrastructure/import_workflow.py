@@ -8,7 +8,7 @@ from threading import Event, RLock
 from uuid import uuid4
 
 from portman_v10.application.contracts import (
-    ApplicationError, ConflictDecision, DocumentUpload, DocumentUploadResult,
+    ApplicationError, CommitImport, Conflict, ConflictDecision, DocumentUpload, DocumentUploadResult,
     ErrorCode, ImportDocumentResult, ImportJob, ImportPreview, ImportStart,
     RecordedDecision,
 )
@@ -141,6 +141,23 @@ class ImportWorkflow:
         if decision.decision == "assign_account":
             if not decision.account_id or not self.store.account_exists(decision.account_id):
                 raise ApplicationError(ErrorCode.UNRESOLVED_ACCOUNT, "Zielkonto unbekannt")
+            assigned = replace(candidate, movements=tuple(replace(value, account_id=decision.account_id, account_assignment="user_hint") if value.account_id is None else value for value in candidate.movements),
+                               missing_fields=tuple(value for value in candidate.missing_fields if "Kontozuordnung" not in value and "Konto" not in value))
+            preview = replace(preview, items=tuple(assigned if item.candidate_id == candidate.candidate_id else item for item in preview.items))
+            from portman_v10.infrastructure.preview_codec import encode_preview
+            try:
+                raw_preview = self.store.load_import_preview_json(import_id)
+                from portman_v10.infrastructure.preview_codec import decode_preview
+                decoded = decode_preview(raw_preview, revision=preview.revision, data_revision=preview.data_revision)
+                normalized = replace(decoded, items=tuple(assigned if item.candidate_id == candidate.candidate_id else item for item in decoded.items))
+                self.store.save_review_decision(import_id, decision.candidate_id, expected_revision, decision.candidate_revision,
+                                                json.dumps({"candidate_id": decision.candidate_id, "decision": decision.decision,
+                                                            "target_id": decision.target_id, "account_id": decision.account_id,
+                                                            "candidate_revision": decision.candidate_revision}, sort_keys=True),
+                                                preview_json=encode_preview(normalized))
+            except (TypeError, sqlite3.Error, ValueError) as error:
+                raise ApplicationError(ErrorCode.STORAGE_ERROR, "Kontozuordnung konnte nicht gespeichert werden") from error
+            return self.get_import_preview(import_id)
         try:
             self.store.save_review_decision(import_id, decision.candidate_id, expected_revision, decision.candidate_revision,
                                             json.dumps({"candidate_id": decision.candidate_id, "decision": decision.decision,
@@ -151,6 +168,18 @@ class ImportWorkflow:
         except sqlite3.Error as error:
             raise ApplicationError(ErrorCode.STORAGE_ERROR, "Prüfentscheidung konnte nicht gespeichert werden") from error
         return self.get_import_preview(import_id)
+
+    def commit_import(self, command: CommitImport):
+        try:
+            preview = self.get_import_preview(command.import_id)
+            if preview.revision != command.preview_revision:
+                # Replay wird im Store vor der Revisionsprüfung aufgelöst.
+                return self.store.commit_import(command, preview, ())
+            return self.store.commit_import(command, preview, preview.decisions)
+        except ApplicationError:
+            raise
+        except Exception as error:
+            raise ApplicationError(ErrorCode.STORAGE_ERROR, "Import konnte nicht atomar übernommen werden") from error
 
     def _data_revision(self) -> int:
         connection = self.store.connect()
@@ -223,7 +252,7 @@ class ImportWorkflow:
                     job = latest[0]
                 job = replace(job, progress=min(99, int((index + 1) * 100 / len(document_ids))), revision=job.revision + 1,
                               completed_documents=index + 1, cancel_requested=self._cancel_requested(job.job_id, cancel))
-                partial = ImportPreview(job.import_id, 1, self._data_revision(), tuple(items), tuple(results))
+                partial = ImportPreview(job.import_id, 1, self._data_revision(), tuple(self._classify_candidates(items)), tuple(results))
                 self.store.save_import_progress(job, tuple(results), encode_preview(partial), partial.data_revision)
         was_cancelled = self._cancel_requested(job.job_id, cancel)
         state = "cancelled" if was_cancelled else "needs_review" if any(r.status in {"parsed", "needs_review", "information", "unsupported", "duplicate_file"} for r in results) else "failed"
@@ -234,8 +263,72 @@ class ImportWorkflow:
                 job = latest[0]
             final = replace(job, state=state, progress=100, revision=job.revision + 1,
                             completed_documents=len(results), cancel_requested=was_cancelled, error_code=error_code)
-            preview = ImportPreview(final.import_id, 1, self._data_revision(), tuple(items), tuple(results))
+            preview = ImportPreview(final.import_id, 1, self._data_revision(), tuple(self._classify_candidates(items)), tuple(results))
             self.store.save_import_progress(final, tuple(results), encode_preview(preview), preview.data_revision)
+
+    def _classify_candidates(self, items):
+        """Nur sichere Kontokontext+erkannte Bankreferenzen klassifizieren."""
+        by_key = {}
+        result = []
+        for item in sorted(items, key=lambda value: (value.document_id, value.candidate_id)):
+            connection = self.store.connect()
+            try:
+                linked_events = connection.execute("SELECT event_id FROM event_documents WHERE document_id=? ORDER BY event_id", (item.document_id,)).fetchall()
+            finally:
+                connection.close()
+            if linked_events:
+                event_ids = tuple(value[0] for value in linked_events)
+                if len(event_ids) == 1:
+                    result.append(replace(item, disposition="conflict", conflicts=(*item.conflicts, Conflict(ErrorCode.POSSIBLE_DUPLICATE, "Dieser Dateiinhalt ist bereits einem Vorgang zugeordnet", item.candidate_id, event_ids[0]))))
+                else:
+                    result.append(replace(item, disposition="conflict", conflicts=(*item.conflicts, Conflict(ErrorCode.POSSIBLE_DUPLICATE, "Dieser Beleg ist mehreren Vorgängen zugeordnet; Zielentscheidung erforderlich", item.candidate_id))))
+                continue
+            reference = dict(item.references).get("bank_reference")
+            reference_status = dict(item.references).get("bank_reference_status")
+            cash_accounts = sorted({movement.account_id for movement in item.movements if movement.movement_type == "cash" and movement.account_id})
+            key = (cash_accounts[0], reference.strip()) if reference and reference_status == "RECOGNIZED" and len(cash_accounts) == 1 else None
+            if key is not None:
+                connection = self.store.connect()
+                try:
+                    rows = connection.execute("SELECT event_id,kind FROM events WHERE reference_context=? AND bank_reference=?", (key[0], key[1])).fetchall()
+                    if rows:
+                        same = len(rows) == 1 and rows[0]["kind"] == item.kind
+                        disposition = "complement" if same else "conflict"
+                        code = ErrorCode.POSSIBLE_DUPLICATE if same else ErrorCode.SOURCE_CONFLICT
+                        message = "Sichere Bankreferenz gehört zu einem vorhandenen Vorgang" if same else "Sichere Bankreferenz widerspricht einem vorhandenen Vorgang"
+                        result.append(replace(item, disposition=disposition, conflicts=(*item.conflicts, Conflict(code, message, item.candidate_id, rows[0]["event_id"]))))
+                        continue
+                finally:
+                    connection.close()
+            reference = dict(item.references).get("bank_reference")
+            reference_status = dict(item.references).get("bank_reference_status")
+            cash_accounts = sorted({movement.account_id for movement in item.movements if movement.movement_type == "cash" and movement.account_id})
+            key = (cash_accounts[0], reference.strip()) if reference and reference_status == "RECOGNIZED" and len(cash_accounts) == 1 else None
+            if key is None:
+                result.append(item)
+                continue
+            previous = by_key.get(key)
+            if previous is None:
+                by_key[key] = item
+                result.append(item)
+                continue
+            if self._business_signature(previous) != self._business_signature(item):
+                result.append(replace(item, disposition="conflict", conflicts=(*item.conflicts, Conflict(ErrorCode.SOURCE_CONFLICT, "Gleiche sichere Bankreferenz mit abweichenden Fachwerten", item.candidate_id, previous.candidate_id))))
+            else:
+                # Gleiche Referenz+gleiche Transaktion: mehrere Belege gehören zu einem Kandidaten.
+                merged = replace(previous, document_id="|".join(sorted({previous.document_id, item.document_id})),
+                                    document_name="; ".join(sorted({previous.document_name, item.document_name})),
+                                    source_evidence=tuple(sorted(set((*previous.source_evidence, *item.source_evidence)), key=lambda value: (value.evidence_id, value.field or ""))),
+                                    warnings=tuple(sorted(set((*previous.warnings, *item.warnings)), key=lambda value: (value.code, value.message))),
+                                    components=tuple(sorted(set((*previous.components, *item.components)), key=lambda value: (value.category, value.kind, value.amount.text if value.amount else "", value.currency or ""))))
+                result[result.index(previous)] = merged
+                by_key[key] = merged
+        return tuple(sorted(result, key=lambda value: (value.document_id, value.candidate_id)))
+
+    @staticmethod
+    def _business_signature(item):
+        movements = tuple(sorted((value.movement_type, value.account_id, value.currency, value.instrument_id, value.amount.text if value.amount else None, value.date.isoformat() if value.date else None, value.direction) for value in item.movements))
+        return item.kind, movements
 
     def wait(self, job_id: str, timeout: float | None = None) -> ImportJob:
         future = self._futures.get(job_id)

@@ -424,6 +424,8 @@ class CommitReport:
     event_ids: tuple[str, ...]
     data_revision: int
     replayed: bool
+    created_event_ids: tuple[str, ...] = ()
+    linked_event_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

@@ -7,7 +7,7 @@ import unittest
 from pypdf import PdfWriter
 
 from portman_v10.application.contracts import (
-    AccountIdentifier, AccountInput, ApplicationError, ConflictDecision,
+    AccountIdentifier, AccountInput, ApplicationError, CommitImport, Conflict, ConflictDecision,
     DocumentUpload, ErrorCode, ImportDocumentResult, ImportJob, ImportStart,
     InstrumentInput,
 )
@@ -47,6 +47,152 @@ class ImportWorkflowTests(unittest.TestCase):
 
     def _upload(self, text=COMDIRECT_BUY, name="comdirect.pdf"):
         return self.workflow.upload_document(DocumentUpload(name, make_text_pdf(text)))
+
+    def _ready_preview(self, text=COMDIRECT_BUY, name="comdirect.pdf"):
+        uploaded = self._upload(text, name)
+        job = self.workflow.wait(self.workflow.start_import(ImportStart((uploaded.document.document_id,))).job_id, 10)
+        preview = self.workflow.get_import_preview(job.import_id)
+        self.assertEqual(len(preview.items), 1)
+        item = preview.items[0]
+        from dataclasses import replace
+        candidate = replace(item, review_status="complete_candidate", missing_fields=(), disposition="unclassified",
+                            movements=tuple(replace(value, account_assignment="exact_identifier") for value in item.movements))
+        from portman_v10.infrastructure.preview_codec import encode_preview
+        self.store.replace_import_preview_items(job.import_id, preview.revision, encode_preview(replace(preview, items=(candidate,))))
+        preview = self.workflow.get_import_preview(job.import_id)
+        decision = ConflictDecision(candidate.candidate_id, "accept", candidate_revision=candidate.revision)
+        updated = self.workflow.resolve_import_item(job.import_id, decision, preview.revision)
+        item = updated.items[0]
+        return uploaded, job, updated
+
+    def test_atomic_import_commit_replay_revision_and_reopen_index(self):
+        uploaded, job, preview = self._ready_preview()
+        command = CommitImport(job.import_id, preview.revision, "commit-once")
+        report = self.workflow.commit_import(command)
+        self.assertEqual(len(report.created_event_ids), 1)
+        replay = self.workflow.commit_import(command)
+        self.assertTrue(replay.replayed)
+        self.assertEqual(report.event_ids, replay.event_ids)
+        with self.assertRaises(ApplicationError) as reused:
+            self.workflow.commit_import(CommitImport(job.import_id, preview.revision + 1, "commit-once"))
+        self.assertEqual(reused.exception.code, ErrorCode.REQUEST_ID_REUSED)
+        self.workflow.close()
+        self.workflow = ImportWorkflow(SQLiteStore(self.root / "v10.sqlite"), self.root)
+        reopened = self.store.load_event(report.event_ids[0])
+        self.assertEqual(reopened.document_ids, (uploaded.document.document_id,))
+        self.assertTrue(reopened.contributions)
+        connection = self.store.connect()
+        try:
+            revision = connection.execute("SELECT data_revision FROM app_state").fetchone()[0]
+            self.assertEqual(connection.execute("SELECT count(*) FROM events").fetchone()[0], 1)
+            self.assertEqual(connection.execute("SELECT count(*) FROM positions").fetchone()[0], 2)
+            self.assertTrue(all(row[0] == revision for row in connection.execute("SELECT data_revision FROM balance_index")))
+            self.assertEqual(connection.execute("SELECT count(*) FROM balance_index").fetchone()[0], 2)
+        finally:
+            connection.close()
+
+    def test_identical_real_purchases_without_safe_reference_remain_separate(self):
+        first, job_a, preview_a = self._ready_preview(name="first.pdf")
+        second, job_b, preview_b = self._ready_preview(name="second.pdf")
+        self.workflow.commit_import(CommitImport(job_a.import_id, preview_a.revision, "buy-a"))
+        # Zwei zuvor angezeigte Vorschauen werden vor zweiter Übernahme neu berechnet;
+        # unterschiedliche, ungeprüfte Imports bekommen aktuelle Datenrevisionen.
+        for job, preview in ((job_b, preview_b),):
+            current_revision = self.workflow._data_revision()
+            raw = self.store.load_import_preview_json(job.import_id)
+            from portman_v10.infrastructure.preview_codec import decode_preview, encode_preview
+            decoded = decode_preview(raw, revision=preview.revision, data_revision=current_revision)
+            self.store.replace_import_preview_items(job.import_id, preview.revision, encode_preview(decoded))
+            with self.store.transaction() as write:
+                write.execute("UPDATE import_previews SET data_revision=? WHERE import_id=?", (current_revision, job.import_id))
+        preview_b = self.workflow.get_import_preview(job_b.import_id)
+        self.workflow.commit_import(CommitImport(job_b.import_id, preview_b.revision, "buy-b"))
+        connection = self.store.connect()
+        try:
+            self.assertEqual(connection.execute("SELECT count(*) FROM events").fetchone()[0], 2)
+            self.assertEqual(connection.execute("SELECT count(*) FROM positions").fetchone()[0], 4)
+        finally:
+            connection.close()
+
+    def test_second_evidence_links_existing_event_without_duplicate_positions(self):
+        first_upload, first_job, first_preview = self._ready_preview(name="primary.pdf")
+        first_report = self.workflow.commit_import(CommitImport(first_job.import_id, first_preview.revision, "primary-commit"))
+        second_upload, second_job, second_preview = self._ready_preview(name="confirmation.pdf")
+        item = second_preview.items[0]
+        from dataclasses import replace
+        from portman_v10.infrastructure.preview_codec import encode_preview
+        linked_candidate = replace(item, disposition="complement", conflicts=(Conflict(ErrorCode.POSSIBLE_DUPLICATE, "safe match", item.candidate_id, first_report.event_ids[0]),))
+        self.store.replace_import_preview_items(second_job.import_id, second_preview.revision, encode_preview(replace(second_preview, items=(linked_candidate,))))
+        second_preview = self.workflow.get_import_preview(second_job.import_id)
+        self.workflow.resolve_import_item(second_job.import_id, ConflictDecision(item.candidate_id, "link", target_id=first_report.event_ids[0], candidate_revision=item.revision), second_preview.revision)
+        second_preview = self.workflow.get_import_preview(second_job.import_id)
+        report = self.workflow.commit_import(CommitImport(second_job.import_id, second_preview.revision, "confirmation-commit"))
+        self.assertEqual(report.event_ids, first_report.event_ids)
+        stored = self.store.load_event(report.event_ids[0])
+        self.assertEqual(set(stored.document_ids), {first_upload.document.document_id, second_upload.document.document_id})
+        self.assertEqual(len(stored.positions), 2)
+        self.assertEqual(len([row for row in stored.components if row.component_type == "fee"]), 1)
+
+    def test_preview_candidate_order_is_canonical_and_reference_conflicts_are_held(self):
+        uploaded = self._upload(name="multi.pdf")
+        job = self.workflow.wait(self.workflow.start_import(ImportStart((uploaded.document.document_id,))).job_id, 10)
+        preview = self.workflow.get_import_preview(job.import_id)
+        self.assertEqual(len(preview.items), 1)
+        item = preview.items[0]
+        from dataclasses import replace
+        duplicate = replace(item, candidate_id="zz-second", references=tuple((key, "VALID-REF-0001" if key == "bank_reference" else "RECOGNIZED" if key == "bank_reference_status" else value) for key, value in item.references))
+        first = replace(item, references=tuple((key, "VALID-REF-0001" if key == "bank_reference" else "RECOGNIZED" if key == "bank_reference_status" else value) for key, value in item.references))
+        forward = self.workflow._classify_candidates((duplicate, first))
+        reverse = self.workflow._classify_candidates((first, duplicate))
+        self.assertEqual(tuple(value.candidate_id for value in forward), tuple(value.candidate_id for value in reverse))
+        self.assertEqual(sum(value.disposition == "conflict" for value in forward), 0)
+        mismatch = replace(duplicate, movements=tuple(replace(value, amount=type(value.amount)("-127") if value.movement_type == "cash" else value.amount) for value in duplicate.movements))
+        conflict_preview = self.workflow._classify_candidates((first, mismatch))
+        self.assertTrue(any(value.conflicts for value in conflict_preview))
+
+    def test_stale_preview_rejected_after_another_import_commit(self):
+        _, first, first_preview = self._ready_preview(name="one.pdf")
+        _, second, second_preview = self._ready_preview(name="two.pdf")
+        self.workflow.commit_import(CommitImport(first.import_id, first_preview.revision, "stale-first"))
+        with self.assertRaises(ApplicationError) as stale:
+            self.workflow.commit_import(CommitImport(second.import_id, second_preview.revision, "stale-second"))
+        self.assertEqual(stale.exception.code, ErrorCode.STALE_REVISION)
+        connection = self.store.connect()
+        try:
+            self.assertEqual(connection.execute("SELECT count(*) FROM events").fetchone()[0], 1)
+        finally:
+            connection.close()
+
+    def test_concurrent_commit_requests_with_same_request_id_commit_once(self):
+        _, job, preview = self._ready_preview()
+        command = CommitImport(job.import_id, preview.revision, "concurrent-request")
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = tuple(executor.map(self.workflow.commit_import, (command, command)))
+        self.assertEqual(sum(not value.replayed for value in results), 1)
+        connection = self.store.connect()
+        try:
+            self.assertEqual(connection.execute("SELECT count(*) FROM events").fetchone()[0], 1)
+            self.assertEqual(connection.execute("SELECT count(*) FROM operations WHERE request_id='concurrent-request'").fetchone()[0], 1)
+        finally:
+            connection.close()
+
+    def test_commit_fault_rolls_back_every_write(self):
+        _, job, preview = self._ready_preview()
+        original = self.store._insert_import_event
+        def fail_after_insert(*args, **kwargs):
+            original(*args, **kwargs)
+            raise RuntimeError("synthetic fault after event insert")
+        self.store._insert_import_event = fail_after_insert
+        with self.assertRaises(ApplicationError):
+            self.workflow.commit_import(CommitImport(job.import_id, preview.revision, "faulted"))
+        connection = self.store.connect()
+        try:
+            for table in ("events", "positions", "event_components", "event_documents", "import_contributions", "operations", "balance_index"):
+                self.assertEqual(connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0], 0, table)
+            self.assertEqual(connection.execute("SELECT status FROM imports WHERE import_id=?", (job.import_id,)).fetchone()[0], "preview")
+        finally:
+            connection.close()
 
     def test_real_pinned_comdirect_handler_upload_preview_and_reopen(self):
         other_context = self.store.save_account(AccountInput(

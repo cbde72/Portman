@@ -137,7 +137,7 @@ class MasterDataTests(unittest.TestCase):
         finally:
             connection.close()
         upgraded = SQLiteStore(prior_database)
-        self.assertEqual(upgraded.migrate(), ("0003_master_data_context.sql", "0004_import_workflow.sql"))
+        self.assertEqual(upgraded.migrate(), ("0003_master_data_context.sql", "0004_import_workflow.sql", "0005_import_commit.sql"))
         migrated = upgraded.get_instrument("migration-instrument")
         self.assertEqual(migrated.identifiers, (InstrumentIdentifier("legacy-provider", "ticker", "unspecified", "ABC"),))
 

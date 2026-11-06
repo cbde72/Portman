@@ -12,7 +12,7 @@ from typing import Iterator
 from uuid import uuid4
 
 from portman_v10.domain.rational import RationalAmount
-from portman_v10.domain.values import ExactValue, canonical_decimal
+from portman_v10.domain.values import ExactValue, canonical_decimal, sum_decimal_text
 from portman_v10.infrastructure.sqlite_decimal import register_decimal_collation, register_rational_collation
 from portman_v10.application.contracts import (
     Account, AccountIdentifier, AccountInput, AccountPage, ApplicationError,
@@ -346,6 +346,26 @@ class SQLiteStore:
         finally:
             connection.close()
 
+    def find_job_by_import(self, import_id: str) -> str | None:
+        connection = self.connect()
+        try:
+            row = connection.execute("SELECT job_id FROM import_jobs WHERE import_id=?", (import_id,)).fetchone()
+            return row[0] if row else None
+        finally:
+            connection.close()
+
+    def load_import_commit_report(self, import_id: str):
+        connection = self.connect()
+        try:
+            row = connection.execute("SELECT result_text FROM operations WHERE command_type='commit_import' ORDER BY completed_at DESC").fetchall()
+            for value in row:
+                report = json.loads(value[0])
+                if report.get("import_id") == import_id:
+                    return report
+            return None
+        finally:
+            connection.close()
+
     def load_import_preview_revision(self, import_id: str) -> tuple[int, int] | None:
         connection = self.connect()
         try:
@@ -358,7 +378,7 @@ class SQLiteStore:
         connection = self.connect()
         try:
             return tuple((row["candidate_id"], row["candidate_revision"], row["preview_revision"], row["decision_json"]) for row in connection.execute(
-                "SELECT candidate_id, candidate_revision, preview_revision, decision_json FROM import_review_decisions WHERE import_id=? ORDER BY preview_revision, candidate_id", (import_id,)))
+                "SELECT candidate_id, candidate_revision, preview_revision, decision_json FROM import_review_decisions WHERE import_id=? ORDER BY candidate_id, preview_revision DESC", (import_id,)))
         finally:
             connection.close()
 
@@ -371,13 +391,13 @@ class SQLiteStore:
             if row is None:
                 return None
             decisions = tuple((item["candidate_id"], item["candidate_revision"], item["preview_revision"], item["decision_json"]) for item in connection.execute(
-                "SELECT candidate_id, candidate_revision, preview_revision, decision_json FROM import_review_decisions WHERE import_id=? ORDER BY preview_revision, candidate_id", (import_id,)))
+                "SELECT candidate_id, candidate_revision, preview_revision, decision_json FROM import_review_decisions WHERE import_id=? ORDER BY candidate_id, preview_revision DESC", (import_id,)))
             connection.commit()
             return row["normalized_preview_json"], row["revision"], row["data_revision"], decisions
         finally:
             connection.close()
 
-    def save_review_decision(self, import_id: str, candidate_id: str, preview_revision: int, candidate_revision: int, decision_json: str) -> None:
+    def save_review_decision(self, import_id: str, candidate_id: str, preview_revision: int, candidate_revision: int, decision_json: str, *, preview_json: str | None = None) -> None:
         with self.transaction() as connection:
             current = connection.execute("SELECT revision FROM import_previews WHERE import_id=?", (import_id,)).fetchone()
             if current is None:
@@ -385,8 +405,258 @@ class SQLiteStore:
             if current[0] != preview_revision:
                 raise ValueError("stale preview revision")
             connection.execute("INSERT INTO import_review_decisions(import_id, candidate_id, candidate_revision, preview_revision, decision_json, created_at) VALUES (?, ?, ?, ?, ?, ?)", (import_id, candidate_id, candidate_revision, preview_revision, decision_json, datetime.now().astimezone().isoformat()))
-            connection.execute("UPDATE import_previews SET revision=revision+1 WHERE import_id=?", (import_id,))
+            connection.execute("UPDATE import_previews SET revision=revision+1, normalized_preview_json=COALESCE(?, normalized_preview_json) WHERE import_id=?", (preview_json, import_id))
             connection.execute("UPDATE imports SET preview_revision=preview_revision+1 WHERE import_id=?", (import_id,))
+
+    def replace_import_preview_items(self, import_id: str, expected_revision: int, preview_json: str) -> None:
+        with self.transaction() as connection:
+            row = connection.execute("SELECT revision FROM import_previews WHERE import_id=?", (import_id,)).fetchone()
+            if row is None or row[0] != expected_revision:
+                raise ValueError("stale preview revision")
+            connection.execute("UPDATE import_previews SET normalized_preview_json=? WHERE import_id=?", (preview_json, import_id))
+
+    def commit_import(self, command, preview, decisions):
+        """Revalidiert und übernimmt eine Vorschau atomar; BEGIN IMMEDIATE serialisiert Writer."""
+        from portman_v10.application.contracts import ApplicationError, CommitReport, ErrorCode
+
+        command_text = json.dumps({"import_id": command.import_id, "preview_revision": command.preview_revision}, sort_keys=True, separators=(",", ":"))
+        input_hash = sha256(command_text.encode()).hexdigest()
+        with self.transaction() as connection:
+            operation = connection.execute("SELECT command_type, input_hash, result_text FROM operations WHERE request_id=?", (command.request_id,)).fetchone()
+            if operation:
+                if operation["command_type"] != "commit_import" or operation["input_hash"] != input_hash:
+                    raise ApplicationError(ErrorCode.REQUEST_ID_REUSED, "request_id wurde bereits für eine andere Eingabe verwendet")
+                raw = json.loads(operation["result_text"])
+                return CommitReport(raw["import_id"], tuple(raw["event_ids"]), raw["data_revision"], True,
+                                    tuple(raw.get("created_event_ids", ())), tuple(raw.get("linked_event_ids", ())))
+
+            stored = connection.execute("SELECT revision, data_revision FROM import_previews WHERE import_id=?", (command.import_id,)).fetchone()
+            current_revision = connection.execute("SELECT data_revision FROM app_state WHERE singleton=1").fetchone()[0]
+            if stored is None or stored["revision"] != command.preview_revision or stored["data_revision"] != current_revision:
+                raise ApplicationError(ErrorCode.STALE_REVISION, "Vorschau oder Datenbestand hat sich geändert; bitte neu prüfen")
+            if preview.revision != stored["revision"] or preview.data_revision != stored["data_revision"]:
+                raise ApplicationError(ErrorCode.STALE_REVISION, "Übergebene Vorschau ist nicht mehr aktuell")
+            import_row = connection.execute("SELECT status, parser_version, schema_version FROM imports WHERE import_id=?", (command.import_id,)).fetchone()
+            if import_row is None or import_row["status"] != "preview":
+                raise ApplicationError(ErrorCode.VALIDATION_ERROR, "Dieser Import ist nicht übernahmebereit")
+            decision_rows = connection.execute("SELECT candidate_id, candidate_revision, preview_revision, decision_json FROM import_review_decisions WHERE import_id=? ORDER BY candidate_id, preview_revision DESC", (command.import_id,)).fetchall()
+            latest_decisions = {}
+            for row in decision_rows:
+                if row["candidate_id"] in latest_decisions:
+                    continue
+                latest_decisions[row["candidate_id"]] = (row["candidate_revision"], row["preview_revision"], json.loads(row["decision_json"]))
+            preview_items = {item.candidate_id: item for item in preview.items}
+            candidates = []
+            for candidate_id, item in sorted(preview_items.items()):
+                if item.review_status in {"information", "error", "duplicate_file"}:
+                    continue
+                decision_record = latest_decisions.get(candidate_id)
+                if not decision_record:
+                    raise ApplicationError(ErrorCode.VALIDATION_ERROR, "Jeder Buchungskandidat muss ausdrücklich angenommen oder ignoriert werden")
+                candidate_revision, decision_revision, decision = decision_record
+                if candidate_revision != item.revision or decision_revision > stored["revision"]:
+                    raise ApplicationError(ErrorCode.STALE_REVISION, "Kandidatenentscheidung ist nicht zur aktuellen Vorschau passend")
+                action = decision["decision"]
+                if action == "ignore":
+                    continue
+                repeated_document_link = action == "link" and any(value.code == ErrorCode.POSSIBLE_DUPLICATE and value.related_event_id for value in item.conflicts) and connection.execute("SELECT 1 FROM event_documents WHERE event_id=? AND document_id=?", (decision.get("target_id"), item.document_id)).fetchone() is not None
+                if repeated_document_link:
+                    if not decision.get("target_id"):
+                        raise ApplicationError(ErrorCode.VALIDATION_ERROR, "Wiederimport benötigt das bereits verknüpfte Zielereignis")
+                    candidates.append((item, action, decision.get("target_id")))
+                    continue
+                if item.conflicts and not (action == "link" and all(value.code in {ErrorCode.POSSIBLE_DUPLICATE, ErrorCode.SOURCE_CONFLICT} for value in item.conflicts)):
+                    raise ApplicationError(ErrorCode.VALIDATION_ERROR, "Widersprüchliche Kandidaten können nicht übernommen werden")
+                if item.missing_fields or item.review_status != "complete_candidate":
+                    raise ApplicationError(ErrorCode.VALIDATION_ERROR, "Unvollständige Kandidaten können nicht übernommen werden")
+                if action not in {"accept", "link"}:
+                    raise ApplicationError(ErrorCode.VALIDATION_ERROR, "Kandidat hat keine gültige Übernahmeentscheidung")
+                candidates.append((item, action, decision.get("target_id")))
+
+            by_reference = {}
+            for item, action, target_id in candidates:
+                reference = dict(item.references).get("bank_reference")
+                reference_status = dict(item.references).get("bank_reference_status")
+                account_ids = {movement.account_id for movement in item.movements if movement.movement_type == "cash" and movement.account_id}
+                if reference and reference_status == "RECOGNIZED" and account_ids:
+                    key = ("|".join(sorted(account_ids)), reference.strip())
+                    if key in by_reference:
+                        # Dieselbe Belegreferenz zweimal in einer Auswahl kann nicht zwei Events erzeugen.
+                        raise ApplicationError(ErrorCode.POSSIBLE_DUPLICATE, "Mehrere ausgewählte Belege teilen dieselbe sichere Bankreferenz")
+                    by_reference[key] = item.candidate_id
+                if action == "link" and not target_id:
+                    raise ApplicationError(ErrorCode.VALIDATION_ERROR, "Verknüpfungsentscheidung benötigt ein Zielereignis")
+
+            created, linked = [], []
+            now = datetime.now().astimezone().isoformat()
+            for item, action, target_id in candidates:
+                reference = dict(item.references).get("bank_reference")
+                reference_status = dict(item.references).get("bank_reference_status")
+                cash_accounts = {movement.account_id for movement in item.movements if movement.movement_type == "cash" and movement.account_id}
+                context = "|".join(sorted(cash_accounts)) if reference and reference_status == "RECOGNIZED" and cash_accounts else None
+                existing = None
+                if reference and context:
+                    rows = connection.execute("SELECT event_id FROM events WHERE reference_context=? AND bank_reference=? ORDER BY event_id", (context, reference.strip())).fetchall()
+                    if len(rows) > 1:
+                        raise ApplicationError(ErrorCode.SOURCE_CONFLICT, "Bankreferenz ist im Kontokontext nicht eindeutig")
+                    existing = rows[0][0] if rows else None
+                if action == "link":
+                    if existing and existing != target_id:
+                        raise ApplicationError(ErrorCode.SOURCE_CONFLICT, "Sichere Referenz zeigt auf ein anderes Ereignis als die Entscheidung")
+                    event_id = target_id
+                    stored_event = connection.execute("SELECT kind FROM events WHERE event_id=?", (event_id,)).fetchone()
+                    if stored_event is None or stored_event["kind"] != item.kind:
+                        raise ApplicationError(ErrorCode.SOURCE_CONFLICT, "Verknüpfungsziel fehlt oder hat einen anderen Vorgangstyp")
+                    self._link_complement(connection, item, event_id, command.import_id, now)
+                    linked.append(event_id)
+                elif item.disposition in {"conflict", "complement", "existing"}:
+                    related = next((value.related_event_id for value in item.conflicts if value.related_event_id), None)
+                    if not related:
+                        raise ApplicationError(ErrorCode.POSSIBLE_DUPLICATE, "Vorschau enthält einen ungeklärten Dublettenhinweis")
+                    event_id = related
+                    self._link_complement(connection, item, event_id, command.import_id, now)
+                    linked.append(event_id)
+                elif existing:
+                    self._link_complement(connection, item, existing, command.import_id, now)
+                    linked.append(existing)
+                else:
+                    event_id = uuid4().hex
+                    self._insert_import_event(connection, item, event_id, command.import_id, now, reference, context, import_row)
+                    created.append(event_id)
+
+            revision = self._bump_metadata_revision(connection, refresh_index_revision=False)
+            self._refresh_touched_balance_index(connection, candidates, created, revision)
+            report = CommitReport(command.import_id, tuple(dict.fromkeys((*created, *linked))), revision, False, tuple(created), tuple(linked))
+            result = json.dumps({"import_id": report.import_id, "event_ids": report.event_ids, "data_revision": report.data_revision,
+                                 "created_event_ids": report.created_event_ids, "linked_event_ids": report.linked_event_ids}, sort_keys=True)
+            connection.execute("INSERT INTO operations(request_id, command_type, input_hash, result_text, completed_at) VALUES (?, 'commit_import', ?, ?, ?)", (command.request_id, input_hash, result, now))
+            connection.execute("UPDATE imports SET status='committed' WHERE import_id=?", (command.import_id,))
+            return report
+
+    def _insert_import_event(self, connection, item, event_id, import_id, now, reference, context, import_row):
+        dates = {date.meaning: date.value for date in item.dates}
+        dates.update({"event_date": next((movement.date for movement in item.movements if movement.date), None)})
+        booking_date = dates.get("event_date") or next((value for value in dates.values() if value), None)
+        if booking_date is None:
+            raise ValueError("Übernommener Vorgang benötigt ein belegtes Buchungsdatum")
+        completeness = "complete" if not item.missing_fields else "incomplete"
+        connection.execute("INSERT INTO events(event_id, kind, booking_date, trade_date, value_date, original_text, completeness, revision, bank_reference, reference_context) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+                           (event_id, item.kind, booking_date.isoformat(), self._date(dates.get("trade_date")), self._date(dates.get("value_date")), item.original_text, completeness, reference.strip() if reference else None, context))
+        for movement in item.movements:
+            if movement.account_id is None or movement.date is None or movement.amount is None:
+                raise ValueError("Unvollständige Bewegung trotz Übernahmefreigabe")
+            position_id = uuid4().hex
+            connection.execute("INSERT INTO positions(position_id,event_id,account_id,currency,amount_decimal,instrument_id,quantity_decimal,effective_date) VALUES (?,?,?,?,?,?,?,?)",
+                               (position_id, event_id, movement.account_id, movement.currency if movement.movement_type == "cash" else None,
+                                self._decimal(movement.amount) if movement.movement_type == "cash" else None,
+                                movement.instrument_id if movement.movement_type == "quantity" else None,
+                                self._decimal(movement.amount) if movement.movement_type == "quantity" else None, movement.date.isoformat()))
+        for component in item.components:
+            if component.category not in {"fee", "tax"}:
+                continue
+            component_type = "fee" if component.category == "fee" else "tax"
+            connection.execute("INSERT INTO event_components(component_id,event_id,component_type,amount_decimal,currency) VALUES (?,?,?,?,?)",
+                               (uuid4().hex, event_id, component_type, self._decimal(component.amount), component.currency))
+        document = connection.execute("SELECT * FROM documents WHERE document_id=?", (item.document_id,)).fetchone()
+        if document is None:
+            raise ValueError("Quellbeleg fehlt")
+        connection.execute("INSERT OR IGNORE INTO event_documents(event_id,document_id,source_role) VALUES (?,?,?)", (event_id, item.document_id, "primary"))
+        connection.execute("INSERT INTO import_contributions(contribution_id,import_id,event_id,document_id,source_kind,target_type,field_name,action,value_text,created_at) VALUES (?,?,?,?,'import','event','event','create',?,?)",
+                           (uuid4().hex, import_id, event_id, item.document_id, json.dumps({"candidate_id": item.candidate_id}), now))
+
+    def _link_complement(self, connection, item, event_id, import_id, now):
+        event = connection.execute("SELECT kind, bank_reference, reference_context FROM events WHERE event_id=?", (event_id,)).fetchone()
+        if event is None or event["kind"] != item.kind:
+            raise ValueError("Ergänzungsbeleg passt nicht zum vorhandenen Vorgang")
+        existing_positions = connection.execute("SELECT account_id,currency,amount_decimal,instrument_id,quantity_decimal,effective_date FROM positions WHERE event_id=? ORDER BY account_id,currency,instrument_id,effective_date", (event_id,)).fetchall()
+        existing_signature = {(row["account_id"], row["currency"], row["amount_decimal"], row["instrument_id"], row["quantity_decimal"], row["effective_date"]) for row in existing_positions}
+        incoming_signature = set()
+        for movement in item.movements:
+            account_id = movement.account_id
+            if not account_id or movement.amount is None or movement.date is None:
+                raise ValueError("Ergänzungsbeleg enthält keine vollständige Bewegung")
+            signature = (account_id, movement.currency if movement.movement_type == "cash" else None,
+                         self._decimal(movement.amount) if movement.movement_type == "cash" else None,
+                         movement.instrument_id if movement.movement_type == "quantity" else None,
+                         self._decimal(movement.amount) if movement.movement_type == "quantity" else None, movement.date.isoformat())
+            incoming_signature.add(signature)
+        if existing_signature and incoming_signature != existing_signature:
+            raise ValueError("Ergänzungsbeleg widerspricht den vorhandenen Geld-/Mengenpositionen")
+        if existing_signature:
+            existing_documents = {row[0] for row in connection.execute("SELECT document_id FROM event_documents WHERE event_id=?", (event_id,))}
+            if item.document_id in existing_documents:
+                connection.execute("INSERT INTO import_contributions(contribution_id,import_id,event_id,document_id,source_kind,target_type,field_name,action,value_text,created_at) VALUES (?,?,?,?,'import','event','evidence','link',?,?)",
+                                   (uuid4().hex, import_id, event_id, item.document_id, json.dumps({"candidate_id": item.candidate_id, "duplicate_file": True}), now))
+                return
+        stored_components = {(row["component_type"], row["amount_decimal"], row["currency"]) for row in connection.execute("SELECT component_type,amount_decimal,currency FROM event_components WHERE event_id=?", (event_id,))}
+        for component in item.components:
+            if component.category not in {"fee", "tax"} or component.amount is None:
+                continue
+            key = (component.category, self._decimal(component.amount), component.currency)
+            if key in stored_components:
+                continue
+            same_kind = {value for value in stored_components if value[0] == component.category and value[2] == component.currency}
+            if same_kind:
+                raise ValueError("Gebühren- oder Steuerbeleg widerspricht einem bereits gespeicherten Wert")
+            connection.execute("INSERT INTO event_components(component_id,event_id,component_type,amount_decimal,currency) VALUES (?,?,?,?,?)", (uuid4().hex, event_id, component.category, key[1], key[2]))
+            stored_components.add(key)
+        connection.execute("INSERT OR IGNORE INTO event_documents(event_id,document_id,source_role) VALUES (?,?,?)", (event_id, item.document_id, "complement"))
+        if item.original_text:
+            current = connection.execute("SELECT original_text FROM events WHERE event_id=?", (event_id,)).fetchone()[0]
+            if current and current != item.original_text:
+                raise ValueError("Ergänzungsbeleg hat abweichenden Originaltext; keine automatische Überschreibung")
+            if not current:
+                connection.execute("UPDATE events SET original_text=?, completeness='complete', revision=revision+1 WHERE event_id=?", (item.original_text, event_id))
+        if reference := dict(item.references).get("bank_reference"):
+            context = event["reference_context"]
+            if event["bank_reference"] and event["bank_reference"] != reference:
+                raise ValueError("Ergänzungsbeleg enthält eine abweichende Bankreferenz")
+            if not event["bank_reference"]:
+                cash_accounts = sorted({movement.account_id for movement in item.movements if movement.movement_type == "cash" and movement.account_id})
+                context = "|".join(cash_accounts) if cash_accounts else None
+                if context:
+                    connection.execute("UPDATE events SET bank_reference=?, reference_context=?, revision=revision+1 WHERE event_id=?", (reference, context, event_id))
+        connection.execute("INSERT INTO import_contributions(contribution_id,import_id,event_id,document_id,source_kind,target_type,field_name,action,value_text,created_at) VALUES (?,?,?,?,'import','event','evidence','link',?,?)",
+                           (uuid4().hex, import_id, event_id, item.document_id, json.dumps({"candidate_id": item.candidate_id}), now))
+
+    def _refresh_touched_balance_index(self, connection, candidates, created_event_ids, revision):
+        touched = set()
+        for item, _action, _target_id in candidates:
+            for movement in item.movements:
+                if not movement.account_id:
+                    continue
+                asset_key = f"CURRENCY:{movement.currency}" if movement.movement_type == "cash" else f"INSTRUMENT:{movement.instrument_id}"
+                touched.add((movement.account_id, asset_key, movement.currency if movement.movement_type == "cash" else None, movement.instrument_id if movement.movement_type == "quantity" else None))
+        for account_id, asset_key, currency, instrument_id in touched:
+            opening_rows = connection.execute("SELECT o.effective_date,o.cost_basis_status,p.amount_decimal,p.quantity_decimal FROM opening_entries o JOIN positions p ON p.position_id=o.position_id WHERE p.account_id=? AND ((? IS NOT NULL AND p.currency=?) OR (? IS NOT NULL AND p.instrument_id=?)) ORDER BY o.effective_date", (account_id, currency, currency, instrument_id, instrument_id)).fetchall()
+            rows = connection.execute("SELECT p.effective_date,p.amount_decimal,p.quantity_decimal,e.completeness FROM positions p JOIN events e ON e.event_id=p.event_id LEFT JOIN opening_entries o ON o.event_id=e.event_id WHERE p.account_id=? AND o.event_id IS NULL AND ((? IS NOT NULL AND p.currency=?) OR (? IS NOT NULL AND p.instrument_id=?)) ORDER BY p.effective_date,p.position_id", (account_id, currency, currency, instrument_id, instrument_id)).fetchall()
+            completeness = {}
+            dates = sorted({row["effective_date"] for row in (*opening_rows, *rows)})
+            by_date = {}
+            for row in opening_rows:
+                by_date.setdefault(row["effective_date"], []).append({"amount_decimal": row["amount_decimal"], "quantity_decimal": row["quantity_decimal"], "completeness": "complete", "is_opening": True})
+            for row in rows:
+                by_date.setdefault(row["effective_date"], []).append(row)
+            for day in dates:
+                day_complete = True
+                for row in by_date[day]:
+                    value = row["amount_decimal"] if currency else row["quantity_decimal"]
+                    if value is None:
+                        day_complete = False
+                    day_complete &= row["completeness"] == "complete"
+                completeness[day] = "complete" if day_complete else "incomplete"
+            connection.execute("DELETE FROM balance_index WHERE account_id=? AND asset_key=?", (account_id, asset_key))
+            running = "0"
+            known = False
+            for day in dates:
+                if any("is_opening" in row.keys() and row["is_opening"] for row in by_date[day]):
+                    known = True
+                day_values = [row["amount_decimal"] if currency else row["quantity_decimal"] for row in by_date[day] if (row["amount_decimal"] if currency else row["quantity_decimal"]) is not None]
+                if day_values:
+                    running = sum_decimal_text([running, *day_values])
+                value = running if known else None
+                status = "complete" if all(completeness[prior] == "complete" for prior in dates[:dates.index(day) + 1]) else "incomplete"
+                connection.execute("INSERT INTO balance_index(account_id,asset_key,currency,instrument_id,as_of,value_decimal,value_rational,completeness,data_revision) VALUES (?,?,?,?,?,?,NULL,?,?)", (account_id, asset_key, currency, instrument_id, day, value, status, revision))
 
     @staticmethod
     def _is_canonical_decimal(value: object) -> int:
