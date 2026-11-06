@@ -1,7 +1,8 @@
 """Independent comdirect handlers; no V09 compatibility layer."""
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
+from itertools import product
 import re
 from portman_parsers.api import *
 from portman_parsers.registry.allowlist import APPROVED_PLUGINS
@@ -17,7 +18,7 @@ ISIN_CANDIDATE=re.compile(r"[A-Z]{2}[A-Z0-9]{9}[0-9]")
 WKN_CANDIDATE=re.compile(r"(?<![A-Z0-9])[A-Z0-9]{6}")
 IDENTITY_HEADER=re.compile(r"Wertpapier\s*-?\s*Bezeichnung.*?(?:WKN|WPKNR)\s*/\s*ISIN",re.I)
 IDENTITY_ROW_STOP=re.compile(r"^(?:Emissionsland|zahlbar|Abrechnung|Bruttobetrag|Zu\s+Ihren|Verrechnung|Information|Ihre\s+comdirect|Gesch(?:ä|ae)ftstag|Schlusstag|Ausf(?:ü|ue)hrungstag|Ausf(?:ü|ue)hrung|Depot|IBAN|Valuta|Kurs|Kurswert|Provision|Steuer|Referenz|F(?:ä|ae)lligkeit|Nennwert|Gesch(?:ä|ae)ftsnummer|Rechnungsnummer|Kundennr|BLZ|Telefon)\b",re.I)
-IDENTITY_ROW_PREFIX=re.compile(r"^\s*(?:per\s+\d{2}\.\d{2}\.\d{4}|(?:STK|Stk)\.?\s*-?\s*[\d.,]+)\s*",re.I)
+IDENTITY_ROW_PREFIX=re.compile(r"^\s*(?:p\s*e\s*r\s+\d{2}\.\d{2}\.\d{4}|(?:S\s*T\s*K)\.?\s*-?\s*[\d.,]+)\s*",re.I)  # Layouttext trennt Buchstaben ("p er", "S TK")
 IDENTITY_REASON={"PARTIAL":"nur WKN oder Name erkannt","AMBIGUOUS":"mehrere Kennungen im selben Wertpapierblock","INVALID":"ISIN-Prüfziffer oder ISIN-Format ungültig"}
 QTY=re.compile(r"(?:Stk\.?|STK)\s*("+A+r")",re.I); NENNWERT_QTY=re.compile(r"Nennwert\s*Zum\s*(?:Misch)?Kurs\s*von\s*(?:St\.?|Stk\.?)\s*("+A+r")",re.I); VALUTA=re.compile(r"(?:Valuta|zahlbar\s+ab)\s*("+D+r")",re.I)
 WKN=re.compile(r"\bWKN\s*:?[ \t]*([A-Z0-9]{6})\b",re.I)
@@ -34,7 +35,109 @@ FX=re.compile(r"(?:Devisenkurs|Umrechnungskurs)\s*:?[ \t]*("+A+r")",re.I)
 NAME=re.compile(r"(?:Wertpapierbezeichnung|Bezeichnung)\s*:?[ \t]*(.+)",re.I)
 SETTLE=re.compile(r"(?:Zu\s*Ihren\s*(?P<dir>Lasten|Gunsten)|(?:^|\n)Gutschrift|(?:^|\n)Zahlungsbetrag).{0,80}?(?P<cur>[A-Z]{3})\s*-?\s*(?P<a>"+A+r")",re.I|re.S)
 TAX=(("CAPITAL_GAINS_TAX",r"Kapitalertragsteuer\s*(?:EUR)?\s*-?("+A+r")"),("SOLIDARITY_SURCHARGE",r"Solidarit.tszuschlag\s*(?:EUR)?\s*-?("+A+r")"),("CHURCH_TAX",r"Kirchensteuer\s*(?:EUR)?\s*-?("+A+r")"),("WITHHOLDING_TAX",r"Quellensteuer\s*(?:[A-Z]{3})?\s*-?("+A+r")"))
-FEE=(("provision",r"Provision\s*:?\s*(?:EUR)?\s*-?("+A+r")"),("foreign_expenses",r"(?:Fremdspesen|fremde\s+Spesen)\s*:?\s*(?:EUR)?\s*-?("+A+r")"),("exchange_fee",r"(?:B.rsenplatz.*Entgelt|B.rsengeb.hr)\s*:?\s*(?:EUR)?\s*-?("+A+r")"))
+FEE=(("provision",r"Provision\s*:?\s*(?:EUR)?\s*-?("+A+r")"),("foreign_expenses",r"(?:Fremdspesen|fremde\s+Spesen)\s*:?\s*(?:EUR)?\s*-?("+A+r")"),("exchange_fee",r"(?:B.rsenplatz.*Entgelt|B.rsengeb.hr)\s*:?\s*(?:EUR)?\s*-?("+A+r")"),("clearing_fee",r"Abwickl\S*entgelt\s*Clearstream\s*:?\s*(?:EUR)?\s*-?("+A+r")"))
+# Gebührenzeilen in defekter Schrift: Bezeichnung lesbar (bzw. mit verschobenen Großbuchstaben), Doppelpunkt, "EUR" und Betrag verschlüsselt.
+CIPHER_FEE_LABELS=(("provision",r"P?rovision"),("clearing_fee",r"\Sbwickl\Sentgelt{sp}\Slearstream"),("exchange_fee",r"\S.rsenplatzabh.ng\S{sp}\Sntgelt"))
+CIPHER_TRADE=re.compile(r"Nennwert\s*Zum\s*(?:Misch)?[Kk]urs\s*von\s*\n\s*St\S(?P<sp>\S)(?P=sp)*(?P<qty>(?:(?!(?P=sp))\S)+)(?P=sp)+\SUR(?P=sp)+(?P<price>\S+?)(?P=sp)*\n"
+                        r"(?P=sp)*Kurswert(?P=sp)+\S(?P=sp)\SUR(?P=sp)+(?P<market>\S+?)(?P=sp)*\n")
+CIPHER_ACCOUNT=re.compile(r"Steuern\s*\nDE(?P<iban>\S+?)(?P<sp>\S)\SUR(?P=sp)+(?P<valuta>\S{10})")
+NUMBER_TEXT=re.compile(r"\d{1,3}(?:\.\d{3})*(?:,\d+)?")
+CIPHER_DATE=re.compile(r"ftstag(\S)\1*\S\1(\S{10})"); CIPHER_NUMBER=re.compile(r"nummer(\S)\1*\S\1((?:(?!\1)\S)+)\1((?:(?!\1)\S)+)")
+
+
+def _cipher_trade(head,tail):
+  """Entschlüsselt Stückzahl, Kurs und Kurswert aus Seite 1 mit defekter Schrift.
+
+  comdirect bettet je Dokument eine Schrift ohne Unicode-Zuordnung ein; die Zeichen
+  sind aufsteigend sortiert, aber je Variante verschoben. Der Schlüssel wird aus dem
+  lesbaren Steuerabschnitt gewonnen; bis zu zwei fehlende Ziffern werden über die
+  Sortierung eingegrenzt. Werte gelten nur bei genau einer Lösung mit Stück x Kurs = Kurswert.
+  """
+  trade=CIPHER_TRADE.search(head)
+  if not trade: return None
+  line=TRADE_LINE.search(tail); settle=re.search(r"Lasten\s*vor\s*Steuern:?\s*EUR\s*-?("+A+r")",tail,re.I)
+  day=re.search(r"\bvom\s*("+D+r")",tail); number=re.search(r"\bNr\.\s*(\d{6,})",tail)
+  coded_day=CIPHER_DATE.search(head); coded_number=CIPHER_NUMBER.search(head)
+  account=re.search(r"Valuta\s*("+D+r")\s*auf\s*Konto\s*EUR\s*mit\s*der\s*IBAN\s*DE(\d[\d ]*\d)",tail); coded_account=CIPHER_ACCOUNT.search(head)
+  plain_qty=line and line.group("qty")
+  # Der Steuerabschnitt ergänzt Nachkommanullen ("2,230" statt "2,23"); auf ganze Stück gekürzte Werte sind kein belegter Anker.
+  while plain_qty and len(plain_qty)>len(trade["qty"]) and "," in plain_qty and plain_qty.endswith("0"): plain_qty=plain_qty[:-1]
+  pairs=((trade["qty"],plain_qty),(coded_day and coded_day.group(2),day and day.group(1)),
+         (coded_number and coded_number.group(2)+coded_number.group(3),number and number.group(1)),
+         (coded_account and coded_account["iban"].replace(coded_account["sp"],"")+coded_account["valuta"],
+          account and account.group(2).replace(" ","")+account.group(1)))
+  key={}
+  for coded,plain in pairs:
+   if coded and plain and len(coded)==len(plain):
+    for c,p in zip(coded,plain):
+     if key.setdefault(c,p)!=p: return None
+
+  def solve(key):
+   # Der Kurswert hat immer zwei Nachkommastellen; damit ist das Komma-Zeichen bekannt.
+   key=dict(key)
+   if len(trade["market"])>3 and key.setdefault(trade["market"][-3],",")!=",": return []
+   if len(set(key.values()))!=len(key): return []
+   known={int(p):c for c,p in key.items() if p.isdigit()}
+   unknown=sorted({c for name in ("qty","price","market") for c in trade[name]}-set(key))
+   def candidates(code):
+    return [str(d) for d in range(10) if d not in known
+            and all(c<code for k,c in known.items() if k<d) and all(c>code for k,c in known.items() if k>d)]
+   solutions=[]
+   for digits in product(*(candidates(code) for code in unknown)) if len(unknown)<=2 else ():
+    if len(set(digits))<len(digits): continue
+    trial={**key,**dict(zip(unknown,digits))}
+    try:
+     texts=["".join(trial[c] for c in trade[name]) for name in ("qty","price","market")]
+     # dec() entfernt Punkte; ein als Ziffer geratener Tausenderpunkt darf deshalb nicht durchrutschen.
+     if not all(NUMBER_TEXT.fullmatch(t) for t in texts): continue
+     qty,price,market=(dec(t) for t in texts)
+    except (KeyError,ArithmeticError,ValueError):
+     continue
+    if qty>0 and (qty*price).quantize(Decimal("0.01"),ROUND_HALF_UP)==market: solutions.append((qty,price,market,trial))
+   return solutions
+
+  solutions=solve(key)
+  # Die Belastung entspricht dem Kurswert nur ohne Entgelte; sie gilt daher nur, wenn der entschlüsselte Kurswert ihr exakt entspricht.
+  if len(solutions)!=1 and settle and len(settle.group(1))==len(trade["market"]):
+   hint=dict(zip(trade["market"],settle.group(1)))
+   if all(key.get(c,p)==p for c,p in hint.items()):
+    solutions=[x for x in solve({**hint,**key}) if x[2]==dec(settle.group(1))]
+  return solutions[0] if len(solutions)==1 else None
+
+
+def _cipher_fees(head,tail,cipher):
+  """Entschlüsselt Gebührenzeilen mit dem Schlüssel aus `_cipher_trade`.
+
+  Ein Wert gilt nur, wenn jedes Zeichen im belegten Schlüssel steht und der Kurswert
+  zuzüglich aller entschlüsselten Gebühren exakt der lesbaren Belastung vor Steuern
+  entspricht. Wie in `_cipher_trade` werden bis zu zwei unbekannte Ziffern nur über die
+  aufsteigende Sortierung der Schrift eingegrenzt; es muss genau eine Lösung bleiben.
+  Sonst bleiben die Gebühren leer; es werden keine Beträge abgeleitet.
+  """
+  trade=CIPHER_TRADE.search(head); settle=re.search(r"Lasten\s*vor\s*Steuern:?\s*EUR\s*-?("+A+r")",tail,re.I)
+  if not (cipher and trade and settle): return ()
+  sp=re.escape(trade["sp"]); key=cipher[3]; coded=[]
+  for kind,label in CIPHER_FEE_LABELS:
+   line=re.compile(r"(?:^|\n)"+sp+r"*(?:"+label.format(sp=sp)+r")"+sp+r"+\S"+sp+r"\SU\S?"+sp+r"+(?P<amt>(?:(?!"+sp+r")\S)+)"+sp+r"*(?:\n|$)")
+   coded+=[(kind,match["amt"]) for match in line.finditer(head)]
+  if not coded or len({k for k,_ in coded})!=len(coded): return ()
+  known={int(p):c for c,p in key.items() if p.isdigit()}
+  unknown=sorted({c for _,amount in coded for c in amount}-set(key))
+  if len(unknown)>2: return ()
+  def candidates(code):
+   return [str(d) for d in range(10) if d not in known
+           and all(c<code for k,c in known.items() if k<d) and all(c>code for k,c in known.items() if k>d)]
+  solutions=[]
+  for digits in product(*(candidates(code) for code in unknown)):
+   if len(set(digits))<len(digits): continue
+   trial={**key,**dict(zip(unknown,digits))}
+   texts=["".join(trial[c] for c in amount) for _,amount in coded]
+   if not all(re.fullmatch(r"\d{1,3}(?:\.\d{3})*,\d{2}",t) for t in texts): continue
+   fees=tuple((kind,dec(t)) for (kind,_),t in zip(coded,texts))
+   if cipher[2]+sum(a for _,a in fees)==dec(settle.group(1)): solutions.append(fees)
+  return solutions[0] if len(solutions)==1 else ()
+
+
 @dataclass(frozen=True)
 class _SecurityIdentity:
   name: str | None = None
@@ -242,6 +345,28 @@ def evidence_page(document,excerpt,offset=None,alternatives=()):
       if key in _squash(page.text): return page.number
   raise ValueError(f"evidence excerpt does not occur in any PDF page: {str(excerpt)[:60]!r}")
 
+def _original_excerpt(document,candidates):
+  """Return the first candidate as it literally occurs in a PDF page, else None.
+
+  Names are normalised (layout text, collapsed glyph spacing, row order), so a
+  candidate may differ from the page text only by whitespace.  In that case the
+  original page span is returned, never the normalised text and never a
+  substitute finding.
+  """
+  for candidate in candidates:
+    if not candidate or not str(candidate).strip(): continue
+    candidate=str(candidate)
+    for page in document.pages:
+      if candidate in page.text: return candidate
+    key=_squash(candidate)
+    if not key: continue
+    for page in document.pages:
+      positions=[i for i,ch in enumerate(page.text) if not ch.isspace()]
+      squashed="".join(page.text[i] for i in positions).lower()
+      start=squashed.find(key)
+      if start>=0: return page.text[positions[start]:positions[start+len(key)-1]+1]
+  return None
+
 def evidence_recorder(document,plugin_id,handler_id,plugin_version):
   """Evidence factory whose field values always share the evidence page.
 
@@ -332,11 +457,15 @@ class ComdirectPlugin:
   return self.transaction(doc,d,evidence,ev,fv,depots,depot_id,isin,eid,security_name,column_wkn,column_isin,identity)
  def transaction(self,doc,d,evidence,ev,fv,depots,depot_id,isin,eid,security_name=None,column_wkn=None,column_isin=None,identity=None):
   text=doc.text; h=d.handler_id; kind="BUY" if h=="wertpapierkauf" else "SELL" if h=="wertpapierverkauf" else "REDEMPTION" if h=="einloesung" else "DIVIDEND"
-  quantity_match=NENNWERT_QTY.search(text) or QTY.search(text)
+  # Werte aus der "Steuerlichen Behandlung" sind nur Ersatz, wenn die Abrechnung selbst keinen Wert liefert.
+  tax_section=re.search(r"Steuerliche\s*Behandlung",text); head=text[:tax_section.start()] if tax_section else text
+  quantity_match=NENNWERT_QTY.search(head) or QTY.search(head) or QTY.search(text)
   qty=dec(quantity_match.group(1)) if quantity_match and dec(quantity_match.group(1))>0 else None
   line_match=TRADE_LINE.search(text)
-  exec_match=TRADE_EXECUTION.search(text)
-  if quantity_match is None and line_match is not None:
+  exec_match=TRADE_EXECUTION.search(head)
+  cipher=None if exec_match else _cipher_trade(head,text[len(head):])
+  if cipher: qty=cipher[0]
+  if quantity_match is None and cipher is None and line_match is not None:
    candidate=dec(line_match.group("qty"))
    if candidate>0: qty=candidate
   if quantity_match is None and qty is None and exec_match is not None and exec_match.group("qty"):
@@ -349,6 +478,13 @@ class ComdirectPlugin:
   if labelled_wkn and not re.fullmatch(r"[A-Z0-9]{6}", labelled_wkn):
    labelled_wkn = None
   resolved_wkn = column_wkn or labelled_wkn or (line_match.group("wkn").upper() if line_match else None)
+  # Der Name stammt ggf. aus dem Layouttext (andere Spaltenfolge/Zeichenabstände);
+  # als Evidence zählt nur Originaltext der Seiten, sonst bleibt der Name leer.
+  name_excerpt=_original_excerpt(doc,(identity.name_source,*identity.name_rows,security_name)) if security_name else None
+  if security_name and not name_excerpt:
+   issues.append(Issue(stable_id("issue",event_id,"security-name-evidence"),"COMDIRECT_SECURITY_NAME_UNVERIFIED",IssueSeverity.WARNING,
+                       "Wertpapiername im PDF-Text nicht belegbar; Name bleibt leer.",event_id=event_id,nature=IssueNature.MISSING_INFORMATION))
+   security_name=None
   if identity.status in {"AMBIGUOUS", "INVALID"}:
    issues.append(Issue(stable_id("issue", event_id, "security-identity", identity.status),
                        "COMDIRECT_SECURITY_" + identity.status, IssueSeverity.WARNING,
@@ -356,6 +492,10 @@ class ComdirectPlugin:
                        event_id=event_id, nature=IssueNature.UNSECURED_ASSIGNMENT))
   for code,missing,message in (("COMDIRECT_SECURITY_MISSING",not (isin or resolved_wkn),"Wertpapieridentität fehlt."),("COMDIRECT_QUANTITY_MISSING",qty is None,"Stückzahl fehlt."),("COMDIRECT_SETTLEMENT_MISSING",settlement is None,"Settlementbetrag fehlt.")):
    if missing: issues.append(Issue(stable_id("issue",event_id,code),code,IssueSeverity.WARNING,message,event_id=event_id,nature=IssueNature.MISSING_INFORMATION))
+  if kind in {"BUY","SELL","REDEMPTION"} and exec_match is None and cipher is None and CIPHER_TRADE.search(head) and not (PRICE.search(head) and MARKET_VALUE.search(head)):
+   issues.append(Issue(stable_id("issue",event_id,"COMDIRECT_TRADE_VALUES_UNRESOLVED"),"COMDIRECT_TRADE_VALUES_UNRESOLVED",IssueSeverity.WARNING,
+                       "Kurs und Kurswert stehen in einer defekten eingebetteten Schrift und sind nicht eindeutig entschlüsselbar; sie bleiben leer.",
+                       event_id=event_id,nature=IssueNature.MISSING_INFORMATION))
   event_ev=ev("economic_event",settlement if settlement else re.search(next(p for x,p in TITLES if x==h),text,re.I|re.S)); iban=IBAN.search(text); account_id=None; accounts=()
   if iban:
    iban_value=re.sub(r"\s","",iban.group(0)); ie=ev("iban",iban); account_id=stable_id("account","comdirect",iban_value); accounts=(Account(account_id,bank_name=fv("comdirect",ie),iban=fv(iban_value,ie),currency=fv("EUR",ie)),)
@@ -370,18 +510,21 @@ class ComdirectPlugin:
   # position change.  Never synthesize a SecurityMovement for it.
   security=() if kind not in {"BUY", "SELL", "REDEMPTION"} or not(qty and isin) else (SecurityMovement(stable_id("security",event_id),event_id,isin,qty if kind=="BUY" else -qty,(event_ev,),depot_id),)
   fees=tuple(FeeEvent(stable_id("fee",event_id,k),"trading",k,dec(m.group(1)),"EUR",date(valuta.group(1)) if valuta else date("01.01.1970"),FeeEffect.INCLUDED_IN_SETTLEMENT,doc.document_id,"comdirect",depot_id=depot_id,account_id=account_id,security_id=isin,transaction_id=event_id,evidence_ids=(event_ev,)) for k,p in FEE for m in [re.search(p,text,re.I)] if m)
-  comps=tuple(TaxComponent(k,dec(m.group(1)),"EUR") for k,p in TAX for m in [re.search(p,text,re.I)] if m); taxes=(TaxEvent(stable_id("tax",event_id),event_id,"WITHHOLDING",comps,evidence_ids=(event_ev,),depot_id=depot_id,isin=isin,bank_id="comdirect",account_id=account_id),) if comps else ()
+  # Nur Käufe: dort ist die Belastung vor Steuern genau Kurswert plus Entgelte; Klartextgebühren haben Vorrang.
+  if kind=="BUY" and cipher and not fees:
+   fees=tuple(FeeEvent(stable_id("fee",event_id,k),"trading",k,amount,"EUR",date(valuta.group(1)) if valuta else date("01.01.1970"),FeeEffect.INCLUDED_IN_SETTLEMENT,doc.document_id,"comdirect",depot_id=depot_id,account_id=account_id,security_id=isin,transaction_id=event_id,evidence_ids=(event_ev,)) for k,amount in _cipher_fees(head,text[len(head):],cipher))
+  # Die "Steuerliche Behandlung" eines Kaufs wirkt nur auf den Verrechnungstopf; ihre 0,00-Zeilen sind keine einbehaltene Steuer.
+  comps=tuple(TaxComponent(k,dec(m.group(1)),"EUR") for k,p in TAX for m in [re.search(p,text,re.I)] if m and (kind!="BUY" or dec(m.group(1))>0)); taxes=(TaxEvent(stable_id("tax",event_id),event_id,"WITHHOLDING",comps,evidence_ids=(event_ev,),depot_id=depot_id,isin=isin,bank_id="comdirect",account_id=account_id),) if comps else ()
   trades=()
   if kind in {"BUY","SELL","REDEMPTION"}:
-   pm=PRICE.search(text); mm=MARKET_VALUE.search(text); gm=GROSS.search(text); fx=FX.search(text); nm=NAME.search(text); tm=TRADE_DATE.search(text); xm=EXECUTION_DATE.search(text); dm=TRADE_DAY.search(text)
+   pm=PRICE.search(head); mm=MARKET_VALUE.search(head); gm=GROSS.search(head); fx=FX.search(head); nm=NAME.search(text); tm=TRADE_DATE.search(text); xm=EXECUTION_DATE.search(text); dm=TRADE_DAY.search(text)
    name_value=nm.group(1).strip() if nm else None
    if name_value and not re.sub(r"[/\s]|WPKNR|WKN|ISIN","",name_value,flags=re.I): name_value=None
    if not name_value: name_value=security_name
-   price=dec(pm.group("a")) if pm else (dec(exec_match.group("price")) if exec_match else None)
-   market=dec(mm.group("a")) if mm else (dec(exec_match.group("market")) if exec_match else None)
+   price=dec(pm.group("a")) if pm else (dec(exec_match.group("price")) if exec_match else cipher[1] if cipher else None)
+   market=dec(mm.group("a")) if mm else (dec(exec_match.group("market")) if exec_match else cipher[2] if cipher else None)
    trades=(SecurityTrade(stable_id("trade",event_id),event_id,kind,name_value or MissingValue.NOT_FOUND,isin or MissingValue.NOT_FOUND,resolved_wkn or MissingValue.NOT_FOUND,qty if qty is not None else MissingValue.NOT_FOUND,date(tm.group(1)) if tm else (date(dm.group(1)) if dm else MissingValue.NOT_FOUND),date(xm.group(1)) if xm else MissingValue.NOT_FOUND,date(valuta.group(1)) if valuta else MissingValue.NOT_FOUND,price if price is not None else MissingValue.NOT_FOUND,(pm.group("cur1") or pm.group("cur2")) if pm and (pm.group("cur1") or pm.group("cur2")) else ("EUR" if price is not None and not pm else MissingValue.NOT_FOUND),market if market is not None else MissingValue.NOT_FOUND,dec(gm.group("a")) if gm else MissingValue.NOT_FOUND,dec(fx.group(1)) if fx else MissingValue.NOT_FOUND,dec(settlement.group("a")) if settlement else MissingValue.NOT_FOUND,settlement.group("cur") if settlement else MissingValue.NOT_FOUND,depot_id,account_id,(event_ev,)),)
-  identity_evidence=tuple(ev(label,(identity.name_source or value) if label=="security_name" else value,
-                             *(identity.name_rows if label=="security_name" else ()))
+  identity_evidence=tuple(ev(label,name_excerpt if label=="security_name" else value)
                           for label,value in (("security_wkn",resolved_wkn),("security_isin",isin),("security_name",security_name)) if value)
   reference_matches=tuple(BANK_REFERENCE.finditer(text))
   reference_values=tuple(re.sub(r"\s+","",match.group(1)) for match in reference_matches)
@@ -407,12 +550,16 @@ class ComdirectPlugin:
 
 FR_NAMES=("Girokonto","Tagesgeld PLUS-Konto","Tagesgeld PLUS","Tagesgeldkonto","Verrechnungskonto","O&F-Konto")
 FR_ACCOUNT_LINE=re.compile(r"^("+"|".join(FR_NAMES)+r")\s+(DE(?:\s*\d){20})(?:\s+([+-]?"+A+r"))?(?:\s+([A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?))?$")
+# Historische Layouts nennen die IBANs je Konto nur im Hinweisblock "Für Ihre Überweisungen ...".
+FR_LABELLED_IBAN=re.compile(r"^-?\s*(Girokonto|Tagesgeld PLUS(?:-Konto)?|Tagesgeldkonto|Verrechnungskonto|O&F-Konto)\s*:\s*Konto\s+\d+\s+IBAN\s+(DE(?:\s*\d){20})")
 FR_HEADING=re.compile(r"^(Girokonto|Tagesgeld(?: PLUS(?:-Konto)?)?|Tagesgeldkonto|Verrechnungskonto|O&F-Konto)(?:\s+(?:Dispositionskredit|ec|girocard)\b.*)?$")
 FR_SALDO=re.compile(r"^(Alter|Neuer)\s+Saldo\s+("+D+r")(?:\s+([+-]?"+A+r"))?$",re.I)
 FR_AMOUNT=re.compile(r"^[+-]?"+A+r"$")
 FR_BOOKING_AMOUNT=re.compile(r"^[+-]"+A+r"$")
 FR_DATE_LINE=re.compile(r"^"+D+r"$")
 FR_ROW=re.compile(r"^("+D+r")(?:\s+("+D+r"))?\s+(.*?)\s+([+-]"+A+r")$")
+FR_ROW_TYPE_FIRST=re.compile(r"^(\D.*?)\s+("+D+r")\s+("+D+r")\s+([+-]"+A+r")$")
+FR_HISTORICAL_AMOUNT=re.compile(r"(?<!\d)([+-]"+A+r")(?!\d)")
 FR_POSITION_HEAD=re.compile(r"^([A-Z0-9]{6})\s*/\s*(Girosammelverwahrung|Wertpapierrechnung)$")
 FR_POSITION_VALUES=re.compile(r"^("+A+r")\s+("+A+r")\s+([A-Z]{3})\s+("+A+r")$")
 FR_POSITION_REST=re.compile(r"^([+-]?"+A+r")(?:\s+([+-]"+A+r"))?$")
@@ -448,6 +595,7 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
  def detect(self,doc): return (Detection(self.metadata.plugin_id,self.metadata.version,"finanzreport","comdirect Finanzreport",Decimal("0.99"),"Finanzreport header recognized"),) if re.search("comdirect",doc.text,re.I) and re.search(r"Finanzreport\s+Nr",doc.text,re.I) else ()
  def parse(self,doc,d):
   text=doc.text; ev,fv,evidence=evidence_recorder(doc,self.metadata.plugin_id,d.handler_id,self.metadata.version)
+  deferred_evidence=[]
   header=re.search(r"Finanzreport\s+Nr\.?\s*(\S*)",text,re.I); header_ev=ev("document_type",header)
   period=re.search(r"(?:Berichtszeitraum|Zeitraum)\s*:?[ \t]*("+D+r")\s*(?:bis|-)\s*("+D+r")",text,re.I)
   report_dates={hit.group(1) for hit in FR_REPORT_DATE.finditer(text)}
@@ -479,7 +627,13 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
    if key in seen:
     issues.append(Issue(stable_id("issue",event_id,"duplicate"),"DUPLICATE_BOOKING",IssueSeverity.WARNING,"Duplicate booking in Finanzreport.",event_id=event_id,nature=IssueNature.CONFIRMED_DEVIATION)); return
    seen.add(key)
-   be=ev("booking","\n".join(block["raw"]),offset=block["offset"])
+   excerpt="\n".join(block["raw"])
+   if block.get("historical"):
+    evidence_page_number=evidence_page(doc,excerpt,block["offset"])
+    be=stable_id("evidence",doc.document_id,evidence_page_number,"booking",excerpt,event_id)
+    deferred_evidence.append(Evidence(be,doc.document_id,evidence_page_number,"booking",excerpt,f"page:{evidence_page_number}",doc.source_hash,self.metadata.plugin_id,d.handler_id,self.metadata.version))
+   else:
+    be=ev("booking",excerpt,offset=block["offset"])
    interest=FR_INTEREST_HEAD.search(re.sub(r"\s+","",purpose))
    taxes=()
    if interest:
@@ -491,8 +645,11 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
     withheld=sum((c.amount for c in comps),Decimal())
     if net is not None and abs(gross-withheld-net)>Decimal("0.01"):
      issues.append(Issue(stable_id("issue",event_id,"interest"),"INTEREST_RECONCILIATION",IssueSeverity.ERROR,"Zinsabschluss ist nicht abgestimmt (Brutto %.2f, Steuern %.2f, Netto %.2f)."%(gross,withheld,net),be,event_id,IssueNature.MATHEMATICAL_INCONSISTENCY))
-   movement=CashMovement(stable_id("cash",event_id),event_id,block["amount"],"EUR",CashStatus.ACTUAL,account_id=current,evidence_ids=(be,),movement_type=CashMovementType.INTEREST_CREDIT if interest else CashMovementType.OTHER)
-   events.append(FinancialEvent(event_id,doc.document_id,"CASH_BOOKING",date(block["booked"]),(movement,),tax_events=taxes,evidence_ids=(be,)))
+   custody=bool(re.search(r"Verwahrentgelt",purpose,re.I)) and block["amount"]<0
+   movement=CashMovement(stable_id("cash",event_id),event_id,block["amount"],"EUR",CashStatus.ACTUAL,account_id=current,evidence_ids=(be,),movement_type=CashMovementType.INTEREST_CREDIT if interest else CashMovementType.FEE_DEBIT if custody else CashMovementType.OTHER)
+   # Eine vorhandene Kontobelastung ist die einzige Cash-Bewegung; FeeEvent ist mit ihr verknüpft.
+   fees=(FeeEvent(stable_id("fee",event_id),"custody","verwahrentgelt",abs(block["amount"]),"EUR",date(block["booked"]),FeeEffect.ACTUAL_BOOKED,doc.document_id,"comdirect",account_id=current,transaction_id=event_id,cash_movement_id=movement.movement_id,evidence_ids=(be,)),) if custody else ()
+   events.append(FinancialEvent(event_id,doc.document_id,"CASH_BOOKING",date(block["booked"]),(movement,),tax_events=taxes,fee_events=fees,evidence_ids=(be,)))
 
   def flush_position():
    nonlocal pos
@@ -512,6 +669,25 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
     issues.append(Issue(stable_id("issue",doc.document_id,"position",block["wkn"]),"DEPOT_POSITION_MISMATCH",IssueSeverity.ERROR,"Kurswert, Kaufwert und Gewinn/Verlust der Position %s sind nicht abgestimmt."%block["wkn"],nature=IssueNature.MATHEMATICAL_INCONSISTENCY))
    positions.append(block)
 
+  # Namensbezogene IBANs aus dem historischen Hinweisblock; widersprüchliche Angaben gelten als nicht eindeutig.
+  labelled={}; labelled_conflicts=set(); historical_sections=set(); historical_incomplete=set(); historical_unassigned=set(); historical_modes={}; historical_pending=None; historical_leading_dates=[]; historical_leading_body=[]; historical_unanchored=[]
+  for _page,label_offset,label_line in lines:
+   label=FR_LABELLED_IBAN.match(label_line)
+   if not label: continue
+   label_name=label.group(1).lower(); label_iban=re.sub(r"\s","",label.group(2))
+   if label_name in labelled and labelled[label_name][0]!=label_iban: labelled_conflicts.add(label_name)
+   labelled.setdefault(label_name,(label_iban,label_line,label_offset))
+  for label_name in labelled_conflicts: del labelled[label_name]
+
+  def flush_historical():
+   nonlocal historical_pending,pending
+   if historical_pending is None: return
+   block,historical_pending=historical_pending,None
+   if len(block["dates"])!=2 or not block["body"]:
+    historical_incomplete.add(block["account"]); return
+   pending={"booked":block["dates"][0],"valuta":block["dates"][1],"body":block["body"],"raw":block["raw"],"amount":block["amount"],"offset":block["offset"],"page":block["page"],"historical":True}
+   flush_booking()
+
   index=0
   while index<len(lines):
    page,offset,line=lines[index]
@@ -528,7 +704,7 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
    if account:
     name,iban=account.group(1),re.sub(r"\s","",account.group(2))
     aid=account_dto(name,iban,account.group(4),line,offset)
-    flush_booking(); current=aid; depot_mode=False
+    flush_historical(); historical_leading_dates.clear(); historical_leading_body.clear(); historical_unanchored.clear(); flush_booking(); current=aid; depot_mode=False
     if account.group(3): overview[iban]=dec(account.group(3))
     elif index<len(lines) and FR_AMOUNT.fullmatch(lines[index][2]) and not FR_SALDO.match(lines[index][2]):
      overview[iban]=dec(lines[index][2]); index+=1
@@ -543,8 +719,20 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
      iban=names.get(name.lower())
      if iban is None and name.lower().startswith("tagesgeld"): iban=names.get("tagesgeld plus-konto")
      if iban is None:
-      raise ValueError("Finanzreport: Kontobereich ohne Kontoübersicht (IBAN fehlt) für "+heading.group(1)+".")
-     flush_booking(); flush_position(); current=by_iban[iban]; section_accounts.add(current); depot_mode=False; depot_done=False
+      found=labelled.get(name.lower()) or (labelled.get("tagesgeld plus-konto") if name.lower()=="tagesgeld plus" else None) or (labelled.get("tagesgeld plus") if name.lower()=="tagesgeld plus-konto" else None)
+      if found is not None:
+       account_dto(name,found[0],None,found[1],found[2]); iban=found[0]
+     if iban is None:
+      # Keine IBAN im Dokument bzw. nicht eindeutig: Bereich nicht zuordnen, Verlust sichtbar melden.
+      flush_booking(); flush_position(); current=None; depot_mode=False; depot_done=False
+      lost=0
+      for _p,_o,later in lines[index:]:
+       if FR_SALDO.match(later) and later.startswith("Neuer"): break
+       if (FR_ROW.match(later) and not FR_DATE_LINE.fullmatch(later)) or FR_ROW_TYPE_FIRST.match(later): lost+=1
+      reason="mehrdeutig" if name.lower() in labelled_conflicts else "im Dokument nicht vorhanden"
+      issues.append(Issue(stable_id("issue",doc.document_id,"account-iban-missing",name.lower(),offset),"ACCOUNT_IBAN_UNRESOLVED",IssueSeverity.ERROR if lost else IssueSeverity.WARNING,"Kontobereich %s ohne eindeutige IBAN (%s); %d Buchung(en) wurden nicht übernommen."%(heading.group(1),reason,lost),nature=IssueNature.UNSECURED_ASSIGNMENT))
+      continue
+     flush_historical(); historical_leading_dates.clear(); historical_leading_body.clear(); historical_unanchored.clear(); flush_booking(); flush_position(); current=by_iban[iban]; section_accounts.add(current); depot_mode=False; depot_done=False
      continue
    if depot_mode:
     if depot_done: continue
@@ -585,8 +773,13 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
     pos={"wkn":row.group(1),"page":page,"offset":offset,"raw":[line],"name":None,"quantity":dec(row.group(2)),"price":dec(row.group(3)),"price_currency":"EUR","value":dec(row.group(4)),"cost":None,"profit":None,"rest":[],"require_name":False,"price_date":row.group(5)}
     flush_position(); continue
    if current is None: continue
+   if line.startswith("Kto. / IBAN"):
+    historical_sections.add(current); historical_unanchored.clear(); continue
    saldo=FR_SALDO.match(line)
    if saldo:
+    flush_historical()
+    if historical_unanchored: historical_unassigned.add(current); historical_unanchored.clear()
+    if historical_leading_dates or historical_leading_body: historical_incomplete.add(current); historical_leading_dates.clear(); historical_leading_body.clear()
     flush_booking()
     amount=saldo.group(3); excerpt=line
     if amount is None and index<len(lines) and FR_AMOUNT.fullmatch(lines[index][2]):
@@ -598,10 +791,52 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
     (opened if saldo.group(1)=="Alter" else closed)[current]=dec(amount)
     if saldo.group(1)=="Neuer": current=None
     continue
+   if current in historical_sections:
+    amounts=list(FR_HISTORICAL_AMOUNT.finditer(line))
+    if len(amounts)==1:
+     if historical_unanchored: historical_unassigned.add(current); historical_unanchored.clear()
+     mode=historical_modes.get(current)
+     if historical_pending is not None:
+      if mode=="amount-first" and len(historical_pending["dates"])>=2: flush_historical()
+      else: historical_pending["body"].append(line); historical_pending["raw"].append(line); continue
+     if mode is None:
+      if len(historical_leading_dates)==2: mode="dates-first"
+      elif not historical_leading_dates: mode="amount-first"
+      else: historical_incomplete.add(current); historical_leading_dates.clear(); historical_leading_body.clear(); continue
+      historical_modes[current]=mode
+     if mode=="dates-first" and len(historical_leading_dates)!=2:
+      historical_unassigned.add(current); historical_leading_dates.clear(); historical_leading_body.clear(); continue
+     amount=amounts[0]; purpose=(line[:amount.start()]+" "+line[amount.end():]).strip()
+     historical_pending={"account":current,"dates":list(historical_leading_dates),"body":[*historical_leading_body,purpose],"raw":[*historical_leading_dates,*historical_leading_body,line],"amount":dec(amount.group(1)),"offset":offset,"page":page}
+     historical_leading_dates.clear(); historical_leading_body.clear()
+     continue
+    if FR_DATE_LINE.fullmatch(line):
+     if historical_unanchored: historical_unassigned.add(current); historical_unanchored.clear()
+     mode=historical_modes.get(current)
+     if mode=="dates-first":
+      if historical_pending is not None: flush_historical()
+      historical_leading_dates.append(line)
+      if len(historical_leading_dates)>2: historical_incomplete.add(current)
+     elif historical_pending is None:
+      historical_leading_dates.append(line)
+      if len(historical_leading_dates)>2: historical_incomplete.add(current)
+     else:
+      historical_pending["dates"].append(line); historical_pending["raw"].append(line)
+     continue
+    if historical_pending is None and historical_leading_dates: historical_leading_body.append(line)
+    elif historical_pending is None: historical_unanchored.append(line)
+    else: historical_pending["body"].append(line); historical_pending["raw"].append(line)
+    continue
    row=FR_ROW.match(line)
    if row and not FR_DATE_LINE.fullmatch(line):
     flush_booking()
     pending={"booked":row.group(1),"valuta":row.group(2),"body":[row.group(3)],"raw":[line],"amount":dec(row.group(4)),"offset":offset,"page":page}
+    flush_booking(); continue
+   row=FR_ROW_TYPE_FIRST.match(line)
+   if row:
+    # Historisches Layout: Vorgangsart zuerst, danach Buchungstag, Valuta und Betrag.
+    flush_booking()
+    pending={"booked":row.group(2),"valuta":row.group(3),"body":[row.group(1)],"raw":[line],"amount":dec(row.group(4)),"offset":offset,"page":page}
     flush_booking(); continue
    if FR_DATE_LINE.fullmatch(line):
     if pending is None or pending["amount"] is not None:
@@ -615,9 +850,24 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
     pending["amount"]=dec(line); pending["raw"].append(line); flush_booking(); continue
    if pending is not None:
     pending["body"].append(line); pending["raw"].append(line)
-  flush_booking(); flush_position()
+  flush_historical(); flush_booking(); flush_position()
 
-  for aid in section_accounts|{event.cash_movements[0].account_id for event in events if event.cash_movements and event.cash_movements[0].account_id}:
+  unsupported_historical=set()
+  for aid in sorted(historical_sections):
+   account_events=[event for event in events if event.cash_movements and event.cash_movements[0].account_id==aid]
+   total=sum((event.cash_movements[0].amount for event in account_events),Decimal())
+   complete=aid not in historical_incomplete and aid not in historical_unassigned and aid in opened and aid in closed and opened[aid]+total==closed[aid]
+   if complete: continue
+   unsupported_historical.add(aid)
+   reasons=[]
+   if aid in historical_incomplete: reasons.append("unvollständiger oder mehrdeutiger Buchungsblock")
+   if aid in historical_unassigned: reasons.append("nicht zuordenbare Tabellenzeile")
+   if aid not in opened or aid not in closed: reasons.append("Anfangs- oder Endsaldo fehlt")
+   elif opened[aid]+total!=closed[aid]: reasons.append("Saldenabweichung")
+   issues.append(Issue(stable_id("issue",doc.document_id,"historical-bookings",aid),"HISTORICAL_BOOKING_LAYOUT_UNSUPPORTED",IssueSeverity.ERROR,"Historisches Buchungslayout nicht vollständig erkannt (%s); %d erkannte Buchungskandidaten wurden wegen des fehlenden Saldenabgleichs nicht als Kontobewegungen ausgegeben."%(", ".join(reasons),len(account_events)),nature=IssueNature.MISSING_INFORMATION))
+  if unsupported_historical:
+   events=[event for event in events if not event.cash_movements or event.cash_movements[0].account_id not in unsupported_historical]
+  for aid in (section_accounts|{event.cash_movements[0].account_id for event in events if event.cash_movements and event.cash_movements[0].account_id})-unsupported_historical:
    total=sum((event.cash_movements[0].amount for event in events if event.cash_movements and event.cash_movements[0].account_id==aid),Decimal())
    if aid not in opened or aid not in closed:
     issues.append(Issue(stable_id("issue",aid,"saldo-missing"),"SALDO_MISSING",IssueSeverity.WARNING,"Anfangs- oder Endsaldo fehlt; Saldenprüfung entfällt.",nature=IssueNature.MISSING_INFORMATION)); continue
@@ -670,4 +920,4 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
      seen_links.add(link_key)
      le=ev("depot_account_link",match); links.append(DepotAccountLink(stable_id("depot-account",depots[0].depot_id,account.account_id,doc.document_id),depots[0].depot_id,account.account_id,fv("SETTLEMENT",le),valid_from=fv(date(period.group(1)),le) if period else FieldValue.unknown(),is_default=FieldValue.manual(False)))
   attrs={"document_number":header.group(1) or MissingValue.NOT_FOUND,"period_start":period.group(1) if period else MissingValue.NOT_FOUND,"period_end":period.group(2) if period else MissingValue.NOT_FOUND,"report_date":report_date or MissingValue.NOT_FOUND,"layout_path":"core" if re.search(r"IBAN|Depotgesamtwert",text,re.I) else "legacy"}
-  return ParsedDocument(stable_id("result",doc.document_id,self.metadata.version),doc.document_id,self.metadata.plugin_id,self.metadata.version,"finanzreport",events=tuple(events),evidence=tuple(evidence),issues=tuple(issues),attributes=attrs,accounts=tuple(accounts),account_balances=tuple(balances),depots=tuple(depots),depot_snapshots=tuple(snapshots),depot_account_links=tuple(links))
+  return ParsedDocument(stable_id("result",doc.document_id,self.metadata.version),doc.document_id,self.metadata.plugin_id,self.metadata.version,"finanzreport",events=tuple(events),evidence=tuple(evidence+deferred_evidence),issues=tuple(issues),attributes=attrs,accounts=tuple(accounts),account_balances=tuple(balances),depots=tuple(depots),depot_snapshots=tuple(snapshots),depot_account_links=tuple(links))
