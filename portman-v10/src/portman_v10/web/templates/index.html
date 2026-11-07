@@ -15,6 +15,7 @@
   </style>
 </head>
 <body>
+  <nav><a href="{{ url_for('index') }}" aria-current="page">Import</a> · <a href="{{ url_for('accounts_page') }}">Konten &amp; Depots</a></nav>
   <h1>Portman V10</h1>
   <p class="banner">Importvorschau – noch nicht gebucht</p>
   {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}

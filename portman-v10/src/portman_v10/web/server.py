@@ -15,6 +15,9 @@ from portman_v10.application.contracts import ApplicationError, CommitImport, Co
 from portman_v10.infrastructure.import_workflow import ImportWorkflow
 from portman_v10.infrastructure.parser_adapter import _resolve_instrument
 from portman_v10.infrastructure.sqlite_store import SQLiteStore
+from portman_v10.web.accounts import (
+    AccountForm, AccountFormError, account_input_from_form, account_rows, form_from_account, form_from_request, reference_options,
+)
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 MAX_REQUEST_BYTES = MAX_UPLOAD_BYTES + 64 * 1024
@@ -276,6 +279,7 @@ def create_app(
             action = {
                 "review_item": "Prüfentscheidung",
                 "commit_import": "Übernahme",
+                "save_account": "Kontenpflege",
             }.get(request.endpoint, "Upload")
             app.logger.warning(
                 "V10-Schreibaktion abgelehnt (%s): Origin=%r Referer=%r Host=%r Vergleich=%r/%r Token=%s",
@@ -290,6 +294,7 @@ def create_app(
             messages = {
                 "Prüfentscheidung": "Prüfentscheidung abgelehnt: lokale Herkunft oder sitzungsgebundener CSRF-Token ungültig.",
                 "Übernahme": "Übernahme abgelehnt: lokale Herkunft oder sitzungsgebundener CSRF-Token ungültig.",
+                "Kontenpflege": "Kontenpflege abgelehnt: lokale Herkunft oder sitzungsgebundener CSRF-Token ungültig.",
                 "Upload": "Upload nur von der geöffneten lokalen V10-Seite erlaubt.",
             }
             abort(403, description=messages[action])
@@ -398,6 +403,80 @@ def create_app(
             abort(409 if isinstance(error, ApplicationError) and error.code in {ErrorCode.STALE_REVISION, ErrorCode.POSSIBLE_DUPLICATE, ErrorCode.SOURCE_CONFLICT} else 400,
                   description=error.message if isinstance(error, ApplicationError) else "Ungültige Übernahmeanfrage")
 
+    def all_accounts():
+        items, cursor = [], None
+        while True:
+            page = workflow.store.list_accounts(cursor, 500)
+            items.extend(page.items)
+            cursor = page.next_cursor
+            if cursor is None:
+                return tuple(items)
+
+    def render_accounts(*, edit_form=None, cash_form=None, depot_form=None, error=None, saved=None, status=200):
+        accounts = all_accounts()
+        exclude = edit_form.account_id if edit_form else None
+        banks = sorted({account.institution for account in accounts if account.institution} | {"comdirect"}, key=str.casefold)
+        return render_template(
+            "accounts.html",
+            rows=account_rows(accounts),
+            references=reference_options(accounts, exclude),
+            banks=banks,
+            edit_form=edit_form,
+            cash_form=cash_form or AccountForm("checking"),
+            depot_form=depot_form or AccountForm("depot", currency=""),
+            error=error,
+            saved=saved,
+            csrf_token=session.setdefault("v10_csrf_token", secrets.token_urlsafe(32)),
+            branch=branch,
+            commit=commit,
+            profile=profile,
+        ), status
+
+    @app.get("/accounts")
+    def accounts_page():
+        saved = None
+        saved_id = request.args.get("saved")
+        if saved_id:
+            try:
+                saved = workflow.store.get_account(saved_id).name
+            except ApplicationError:
+                saved = None
+        return render_accounts(saved=saved)
+
+    @app.get("/accounts/<account_id>/edit")
+    def edit_account(account_id: str):
+        try:
+            account = workflow.store.get_account(account_id)
+        except ApplicationError as error:
+            abort(404, description=error.message)
+        try:
+            return render_accounts(edit_form=form_from_account(account))
+        except AccountFormError as error:
+            return render_accounts(error=str(error), status=400)
+
+    @app.post("/accounts")
+    def save_account():
+        account_id = request.form.get("account_id", "").strip()
+        current = None
+        if account_id:
+            try:
+                current = workflow.store.get_account(account_id)
+            except ApplicationError as error:
+                abort(404, description=error.message)
+        try:
+            value, expected_revision = account_input_from_form(request.form, current)
+            saved = workflow.store.save_account(value, expected_revision)
+        except (AccountFormError, ApplicationError) as error:
+            message = error.message if isinstance(error, ApplicationError) else str(error)
+            status = 409 if isinstance(error, ApplicationError) and error.code == ErrorCode.STALE_REVISION else 400
+            entered = form_from_request(request.form, current)
+            if current is not None:
+                return render_accounts(edit_form=entered, error=message, status=status)
+            if entered.is_cash:
+                return render_accounts(cash_form=entered, error=message, status=status)
+            return render_accounts(depot_form=entered, error=message, status=status)
+        return redirect(url_for("accounts_page", saved=saved.account_id), code=303)
+
     @app.get("/documents/<document_id>")
     def open_document(document_id: str):
         try:
@@ -429,7 +508,7 @@ def main() -> None:
     branch = os.environ.get("PORTMAN_V10_BRANCH", _git_value("branch", "--show-current"))
     commit = os.environ.get("PORTMAN_V10_COMMIT", _git_value("rev-parse", "--short", "HEAD"))
     workflow = ImportWorkflow(SQLiteStore(data_dir / "v10.sqlite"), data_dir)
-    app = create_app(workflow, branch=branch, commit=commit, profile="isoliertes Web-Testprofil · data/web-test")
+    app = create_app(workflow, branch=branch, commit=commit, profile=f"isoliertes Web-Testprofil · {data_dir / 'v10.sqlite'}")
     try:
         app.run(host="127.0.0.1", port=int(os.environ.get("PORTMAN_V10_WEB_PORT", "8765")), debug=False, use_reloader=False, threaded=True)
     finally:
