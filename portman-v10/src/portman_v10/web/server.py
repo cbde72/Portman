@@ -34,6 +34,9 @@ STATUS_LABELS = {
     "unsupported": "Nicht unterstützt",
     "duplicate_file": "Identischer Dateiinhalt",
 }
+# Diese Kandidaten überspringt SQLiteStore.commit_import; alle übrigen brauchen eine Entscheidung.
+# needs_review hat in job.html keine Entscheidungsknöpfe und blockiert die Übernahme bereits als offener Punkt.
+NO_DECISION_STATUSES = frozenset({"information", "error", "duplicate_file", "needs_review"})
 ASSIGNMENT_LABELS = {
     "exact_identifier": "Exakte Kennung",
     "user_hint": "Vorgabe",
@@ -164,9 +167,13 @@ def _present_preview(workflow: ImportWorkflow, preview):
         checks = list(f"Prüfen: {value}" for value in item.missing_fields)
         checks.extend(f"Prüfen: {value.message}" for value in item.conflicts)
         checks.extend(f"Prüfen: {value['message']}" for value in warnings if value["severity"] in {"WARNING", "ERROR"})
+        decision_missing = item.review_status not in NO_DECISION_STATUSES and item.candidate_id not in decisions
+        if decision_missing:
+            checks.insert(0, "Prüfen: Entscheidung fehlt – „Kandidat prüfen / annehmen“ oder „Ignorieren“ wählen")
         presented.append({
             "kind": item.suggested_kind or item.kind,
             "status": item.review_status,
+            "decision_missing": decision_missing,
             "decision_status": decision_labels.get(decisions.get(item.candidate_id)),
             "candidate_id": item.candidate_id,
             "candidate_revision": item.revision,
@@ -193,7 +200,9 @@ def _preview_summary(preview):
     cash = sum(1 for item in preview.items for movement in item.movements if movement.movement_type == "cash")
     quantity = sum(1 for item in preview.items for movement in item.movements if movement.movement_type == "quantity")
     unresolved = sum(1 for item in preview.items if item.missing_fields or item.conflicts or item.review_status != "complete_candidate")
-    return {"events": len(preview.items), "cash": cash, "quantity": quantity, "unresolved": unresolved}
+    decided = {value.candidate_id for value in preview.decisions}
+    undecided = sum(1 for item in preview.items if item.review_status not in NO_DECISION_STATUSES and item.candidate_id not in decided)
+    return {"events": len(preview.items), "cash": cash, "quantity": quantity, "unresolved": unresolved, "undecided": undecided}
 
 
 def create_app(
@@ -334,6 +343,9 @@ def create_app(
 
     @app.get("/jobs/<job_id>")
     def job_page(job_id: str):
+        return render_job(job_id)
+
+    def render_job(job_id: str, *, action_error: str | None = None, status: int = 200):
         try:
             job = workflow.get_job(job_id)
             documents = workflow.get_import_document_results(job_id)
@@ -359,13 +371,24 @@ def create_app(
             csrf_token=session.setdefault("v10_csrf_token", secrets.token_urlsafe(32)),
             has_preview=preview is not None,
             preview_revision=preview.revision if preview else 0,
-            summary=_preview_summary(preview) if preview else {"events": 0, "cash": 0, "quantity": 0, "unresolved": 0},
+            summary=_preview_summary(preview) if preview else {"events": 0, "cash": 0, "quantity": 0, "unresolved": 0, "undecided": 0},
             commit_report=commit_report,
+            action_error=action_error,
             status_labels=STATUS_LABELS,
             branch=branch,
             commit=commit,
             profile=profile,
-        )
+        ), status
+
+    def render_import_error(import_id: str, message: str, status: int):
+        """Fehler einer Schreibaktion auf der Importseite selbst anzeigen statt als nackte Fehlerseite."""
+        try:
+            job_id = workflow.store.find_job_by_import(import_id)
+        except Exception:
+            job_id = None
+        if not job_id:
+            abort(404, description="Import nicht gefunden")
+        return render_job(job_id, action_error=message, status=status)
 
     @app.post("/imports/<import_id>/review")
     def review_item(import_id: str):
@@ -382,7 +405,9 @@ def create_app(
             workflow.resolve_import_item(import_id, ConflictDecision(candidate_id, "link" if action == "link" else action, target_id=related if action == "link" else None, candidate_revision=candidate.revision), preview.revision)
             return redirect(url_for("job_by_import", import_id=import_id), code=303)
         except ApplicationError as error:
-            abort(409 if error.code == ErrorCode.STALE_REVISION else 400, description=error.message)
+            if error.code == ErrorCode.NOT_FOUND:
+                abort(404, description=error.message)
+            return render_import_error(import_id, f"Prüfentscheidung nicht gespeichert: {error.message}", 409 if error.code == ErrorCode.STALE_REVISION else 400)
 
     @app.get("/imports/<import_id>")
     def job_by_import(import_id: str):
@@ -400,8 +425,11 @@ def create_app(
             workflow.commit_import(CommitImport(import_id, int(request.form.get("preview_revision", "0")), request.form.get("request_id", "")))
             return redirect(url_for("job_by_import", import_id=import_id), code=303)
         except (ValueError, ApplicationError) as error:
-            abort(409 if isinstance(error, ApplicationError) and error.code in {ErrorCode.STALE_REVISION, ErrorCode.POSSIBLE_DUPLICATE, ErrorCode.SOURCE_CONFLICT} else 400,
-                  description=error.message if isinstance(error, ApplicationError) else "Ungültige Übernahmeanfrage")
+            if isinstance(error, ApplicationError) and error.code == ErrorCode.NOT_FOUND:
+                abort(404, description=error.message)
+            status = 409 if isinstance(error, ApplicationError) and error.code in {ErrorCode.STALE_REVISION, ErrorCode.POSSIBLE_DUPLICATE, ErrorCode.SOURCE_CONFLICT} else 400
+            message = error.message if isinstance(error, ApplicationError) else "Ungültige Übernahmeanfrage"
+            return render_import_error(import_id, f"Übernahme nicht ausgeführt: {message}", status)
 
     def all_accounts():
         items, cursor = [], None

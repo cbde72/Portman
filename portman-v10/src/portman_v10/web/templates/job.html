@@ -21,6 +21,7 @@
   <nav><a href="{{ url_for('index') }}">Import</a> · <a href="{{ url_for('accounts_page') }}">Konten &amp; Depots</a></nav>
   <h1>Importprüfung</h1>
   <p class="banner">Importvorschau – noch nicht gebucht</p>
+  {% if action_error %}<p id="action-error" class="error" role="alert"><strong>{{ action_error }}</strong>{% if summary.undecided %}<br>Noch {{ summary.undecided }} Kandidat{% if summary.undecided != 1 %}en{% endif %} ohne Entscheidung – unten rot markiert.{% endif %}</p>{% endif %}
   <p id="uploaded-filenames">Hochgeladene Datei{% if documents|length != 1 %}en{% endif %}: {% for document in documents %}{{ document.name }}{% if not loop.last %}, {% endif %}{% else %}noch nicht verarbeitet{% endfor %}</p>
   {% if job.state in ('queued', 'running') %}
     <p id="job-feedback" role="status" aria-live="polite">{% for document in documents %}{{ document.name }}{% if not loop.last %}, {% endif %}{% endfor %} hochgeladen. Importvorschau wird erstellt …</p>
@@ -126,8 +127,9 @@
       <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
       <input type="hidden" name="request_id" value="web-{{ job.import_id }}-{{ preview_revision }}">
-      <button type="submit" {% if summary.unresolved or summary.events == 0 %}disabled{% endif %}>Übernehmen</button>
+      <button type="submit" {% if summary.unresolved or summary.undecided or summary.events == 0 %}disabled{% endif %}>Übernehmen</button>
       {% if summary.unresolved %}<p class="warning">Vor der Übernahme müssen alle unvollständigen Kandidaten, offenen Zuordnungen und Konflikte geklärt sein.</p>{% endif %}
+      {% if summary.undecided %}<p id="undecided-hint" class="check-point">Noch {{ summary.undecided }} Kandidat{% if summary.undecided != 1 %}en{% endif %} ohne Entscheidung: Bei jedem rot markierten Kandidaten „Kandidat prüfen / annehmen“ oder „Ignorieren“ wählen, dann übernehmen.</p>{% endif %}
     </form>
   {% endif %}
   <p><a href="{{ url_for('index') }}">Weiteres PDF prüfen</a></p>
