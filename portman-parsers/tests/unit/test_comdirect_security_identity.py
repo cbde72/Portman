@@ -313,6 +313,37 @@ def test_dividend_identity_evidence_uses_the_real_source_page():
     assert any(item.field == "security_name" and "A0H074iSh.DJ" in item.excerpt for item in identity_evidence)
 
 
+def test_investment_tax_notice_keeps_security_identity_and_evidence():
+    page1 = (
+        "comdirect\nSteuerliche Behandlung: Investment-Ausschüttung\n"
+        "Depotnummer: 123456\nBruttoertrag EUR 5,00\n"
+        "Kapitalertragsteuer EUR 1,00\nSteuerbemessungsgrundlage EUR 4,00"
+    )
+    page2 = (
+        "Wertpapier-Bezeichnung WKN/ISIN\n"
+        "iShares MSCI World A0H074\n"
+        "Inhaber-Anteile DE000A0H0744\nSTK 16,471"
+    )
+    plugin = ComdirectPlugin()
+    document = _document(page1, page2)
+    result = plugin.parse(document, plugin.detect(document)[0])
+    event = result.events[0]
+    evidence = {item.evidence_id: item for item in result.evidence}
+    identity_evidence = [evidence[item] for item in event.security_identity_evidence_ids]
+
+    assert event.kind == "TAX_NOTICE"
+    assert (event.security_name, event.security_wkn, event.security_isin) == (
+        "iShares MSCI World Inhaber-Anteile",
+        "A0H074",
+        "DE000A0H0744",
+    )
+    assert event.tax_events[0].isin == "DE000A0H0744"
+    assert {item.page_number for item in identity_evidence} == {2}
+    assert {item.field for item in identity_evidence} == {"security_name", "security_wkn", "security_isin"}
+    assert not event.cash_movements
+    assert not event.security_movements
+
+
 def test_conflicting_isin_elsewhere_in_document_is_ambiguous():
     text = _dividend(
         "per 01.02.2025 716460 SAP SE\n"
