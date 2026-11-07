@@ -254,7 +254,7 @@ class SQLiteStore:
         connection = self.connect()
         try:
             return tuple(row[0] for row in connection.execute(
-                "SELECT instrument_id FROM instrument_identifiers WHERE lower(identifier_type)=lower(?) AND lower(context)=lower(?) AND value=? ORDER BY instrument_id",
+                "SELECT DISTINCT instrument_id FROM instrument_identifiers WHERE lower(identifier_type)=lower(?) AND lower(context)=lower(?) AND value=? ORDER BY instrument_id",
                 (identifier_type, context, value)))
         finally:
             connection.close()
@@ -469,6 +469,15 @@ class SQLiteStore:
                     raise ApplicationError(ErrorCode.VALIDATION_ERROR, "Widersprüchliche Kandidaten können nicht übernommen werden")
                 if item.missing_fields or item.review_status != "complete_candidate":
                     raise ApplicationError(ErrorCode.VALIDATION_ERROR, "Unvollständige Kandidaten können nicht übernommen werden")
+                booking_kinds = {
+                    ("user.comdirect-ertraege", "wertpapierkauf"): {"BUY"},
+                    ("user.comdirect-ertraege", "wertpapierverkauf"): {"SELL"},
+                    ("user.comdirect-ertraege", "einloesung"): {"REDEMPTION"},
+                    ("user.comdirect-ertraege", "dividendengutschrift"): {"DIVIDEND"},
+                    ("user.comdirect-ertraege", "ertragsgutschrift"): {"DIVIDEND"},
+                }
+                if item.plugin_id is not None and item.kind not in booking_kinds.get((item.plugin_id, item.handler_id), set()):
+                    raise ApplicationError(ErrorCode.UNSUPPORTED_DOCUMENT, "Für diesen Parserhandler und Vorgangstyp ist noch kein sicherer V10-Übernahmepfad implementiert")
                 if action not in {"accept", "link"}:
                     raise ApplicationError(ErrorCode.VALIDATION_ERROR, "Kandidat hat keine gültige Übernahmeentscheidung")
                 candidates.append((item, action, decision.get("target_id")))

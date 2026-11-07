@@ -1,16 +1,19 @@
 """Serverseitige lokale Weboberfläche für den vorhandenen V10-Importworkflow."""
 from io import BytesIO
+import hmac
 import os
 from pathlib import Path
+import secrets
 import sqlite3
 import subprocess
 from urllib.parse import urlsplit
 
-from flask import Flask, abort, redirect, render_template, request, send_file, url_for
+from flask import Flask, abort, redirect, render_template, request, send_file, session, url_for
 from werkzeug.exceptions import RequestEntityTooLarge
 
 from portman_v10.application.contracts import ApplicationError, CommitImport, ConflictDecision, DocumentUpload, ErrorCode, ImportStart
 from portman_v10.infrastructure.import_workflow import ImportWorkflow
+from portman_v10.infrastructure.parser_adapter import _resolve_instrument
 from portman_v10.infrastructure.sqlite_store import SQLiteStore
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
@@ -19,7 +22,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[3]
 STATUS_LABELS = {
     "queued": "Wartet",
     "running": "Wird verarbeitet",
-    "needs_review": "Prüfung erforderlich",
+    "needs_review": "Prüfung nötig",
     "completed": "Abgeschlossen",
     "failed": "Fehlgeschlagen",
     "cancelled": "Abgebrochen",
@@ -55,30 +58,83 @@ def _account_label(workflow: ImportWorkflow, account_id: str | None) -> str:
     return account.name
 
 
-def _instrument_label(workflow: ImportWorkflow, instrument_id: str | None, instrument_name: str | None) -> str:
-    if instrument_id:
-        try:
-            instrument = workflow.store.get_instrument(instrument_id)
-            return " — ".join(value for value in (instrument.name, instrument.isin or instrument.wkn) if value)
-        except ApplicationError:
-            return instrument_name or "Instrument nicht verfügbar"
-    return instrument_name or "Unbekannt"
+def _instrument_summaries(workflow: ImportWorkflow, item):
+    references = dict(item.references)
+    parsed_isin = references.get("security_isin")
+    parsed_wkn = references.get("security_wkn")
+    summaries = []
+    seen = set()
+    for movement in item.movements:
+        if movement.movement_type != "quantity":
+            continue
+        master = None
+        if movement.instrument_id:
+            try:
+                master = workflow.store.get_instrument(movement.instrument_id)
+            except ApplicationError:
+                master = None
+        name = movement.instrument_name or (master.name if master else None)
+        identifier = parsed_isin or parsed_wkn or (master.isin or master.wkn if master else None)
+        identifier_type = "ISIN" if parsed_isin or (master and master.isin and not parsed_wkn) else "WKN"
+        if name and identifier:
+            label = f"{name} — {identifier_type} {identifier}"
+        elif name:
+            label = name
+        elif identifier:
+            label = f"Wertpapiername nicht erkannt — {identifier_type} {identifier}"
+        else:
+            label = "Wertpapier nicht erkannt"
+        key = (label, movement.instrument_id is None)
+        if key in seen:
+            continue
+        seen.add(key)
+        issue = next((value for value in item.missing_fields if any(word in value.casefold() for word in ("instrument", "isin", "wkn"))), None)
+        summaries.append({
+            "label": label,
+            "mapping": "Zuordnung offen" if movement.instrument_id is None else "Zugeordnet",
+            "issue": f"Prüfen: {issue}" if issue and movement.instrument_id is None else None,
+        })
+    if not summaries and (parsed_isin or parsed_wkn or references.get("security_name")):
+        movement_id = next((movement.security_id for movement in item.movements if movement.movement_type == "quantity"), None)
+        instrument_id, issue = _resolve_instrument(workflow.store, parsed_isin, parsed_wkn, movement_id)
+        master = None
+        if instrument_id:
+            try:
+                master = workflow.store.get_instrument(instrument_id)
+            except ApplicationError:
+                master = None
+        name = references.get("security_name") or (master.name if master else None)
+        identifier = parsed_isin or parsed_wkn or (master.isin or master.wkn if master else None)
+        identifier_type = "ISIN" if parsed_isin or (master and master.isin and not parsed_wkn) else "WKN"
+        label = f"{name} — {identifier_type} {identifier}" if name and identifier else name or f"Wertpapiername nicht erkannt — {identifier_type} {identifier}" if identifier else "Wertpapier nicht erkannt"
+        summaries.append({
+            "label": label,
+            "mapping": "Zugeordnet" if instrument_id else "Zuordnung offen",
+            "issue": f"Prüfen: {issue}" if issue else None,
+        })
+    return tuple(summaries)
 
 
 def _present_preview(workflow: ImportWorkflow, preview):
     presented = []
+    decisions = {value.candidate_id: value.decision.decision for value in preview.decisions}
+    decision_labels = {"accept": "Kandidat angenommen", "link": "Als Ergänzungsbeleg zugeordnet", "ignore": "Kandidat ignoriert"}
     for item in preview.items:
         movements = []
         for movement in item.movements:
+            movement_checks = ()
+            if movement.account_id is None:
+                kind = "Depot" if movement.movement_type == "quantity" else "Geldkonto"
+                movement_checks = (f"Prüfen: {kind} nicht zugeordnet",)
             movements.append({
                 "type": "Geldbewegung" if movement.movement_type == "cash" else "Mengenbewegung",
                 "date": movement.date.isoformat() if movement.date else "Unbekannt",
                 "account": _account_label(workflow, movement.account_id),
                 "account_reference": movement.account_reference or "",
-                "instrument": _instrument_label(workflow, movement.instrument_id, movement.instrument_name),
                 "amount": movement.amount.text if movement.amount else "Unbekannt",
                 "unit": movement.currency or ("Stück" if movement.movement_type == "quantity" else ""),
                 "assignment": ASSIGNMENT_LABELS[movement.account_assignment],
+                "checks": movement_checks,
             })
         dates = tuple({
             "meaning": value.meaning.replace("_", " "),
@@ -102,17 +158,29 @@ def _present_preview(workflow: ImportWorkflow, preview):
             "code": value.code,
             "message": value.message,
         } for value in item.warnings)
+        checks = list(f"Prüfen: {value}" for value in item.missing_fields)
+        checks.extend(f"Prüfen: {value.message}" for value in item.conflicts)
+        checks.extend(f"Prüfen: {value['message']}" for value in warnings if value["severity"] in {"WARNING", "ERROR"})
         presented.append({
             "kind": item.suggested_kind or item.kind,
             "status": item.review_status,
+            "decision_status": decision_labels.get(decisions.get(item.candidate_id)),
+            "candidate_id": item.candidate_id,
+            "candidate_revision": item.revision,
             "related_event": next((value.related_event_id for value in item.conflicts if value.related_event_id), None),
+            "instruments": _instrument_summaries(workflow, item),
             "movements": tuple(movements),
+            "account_references": tuple(
+                ("Geldbewegung" if movement.movement_type == "cash" else "Mengenbewegung", movement.account_reference)
+                for movement in item.movements if movement.account_reference
+            ),
             "dates": dates,
             "components": components,
             "references": tuple((key, value or "Unbekannt") for key, value in item.references),
             "evidence": evidence,
             "warnings": warnings,
             "missing": item.missing_fields,
+            "checks": tuple(dict.fromkeys(checks)),
             "original_text": item.original_text or "",
         })
     return tuple(presented)
@@ -138,6 +206,8 @@ def create_app(
         MAX_FORM_MEMORY_SIZE=64 * 1024,
         MAX_FORM_PARTS=8,
         TRUSTED_HOSTS=["127.0.0.1", "localhost"],
+        SECRET_KEY=secrets.token_urlsafe(32),
+        SESSION_COOKIE_DOMAIN=None,
     )
 
     @app.after_request
@@ -163,30 +233,66 @@ def create_app(
                 # Origin is serialized as scheme + authority only. Referer is
                 # a full URL and legitimately includes the page path/query;
                 # those parts do not participate in same-origin comparison.
-                if not is_referer and (parsed.path not in {"", "/"} or parsed.query or parsed.fragment):
+                if not is_referer and (parsed.path or parsed.query or parsed.fragment):
                     return False
                 port = parsed.port or (443 if parsed.scheme == "https" else 80)
                 return parsed.scheme.casefold(), parsed.hostname.rstrip(".").casefold(), port
             except ValueError:
                 return False
 
-        expected = parsed_origin(request.host_url)
+        expected = (request.scheme.casefold(), (urlsplit(f"//{request.host}").hostname or "").casefold().rstrip("."), urlsplit(f"//{request.host}").port or (443 if request.scheme == "https" else 80))
         origin_header = request.headers.get("Origin")
         referer_header = request.headers.get("Referer")
         origin = parsed_origin(origin_header) if origin_header is not None else None
         referer = parsed_origin(referer_header, is_referer=True) if referer_header is not None else None
-        # Native browser form POSTs normally send Origin. If it is omitted, a
-        # same-origin Referer is an acceptable fallback; with neither header,
-        # deny because the local browser context cannot be established.
-        valid = expected is not False and origin is not False and referer is not False
-        if origin_header is None and referer_header is None:
-            valid = False
-        if origin_header is not None:
+        # Host validation is mandatory, including when a browser serializes an
+        # opaque origin as "null" or omits both provenance headers.
+        host = urlsplit(f"//{request.host}").hostname
+        host = host.casefold().rstrip(".") if host else ""
+        local_host = host in {"127.0.0.1", "localhost", "::1"}
+        valid = expected is not False and local_host
+        if origin_header not in (None, "", "null"):
+            valid = valid and origin is not False
+        if referer_header not in (None, "", "null"):
+            valid = valid and referer is not False
+        if origin_header not in (None, "", "null"):
             valid = valid and origin == expected
-        if referer_header is not None:
+        if referer_header not in (None, "", "null"):
             valid = valid and referer == expected
+        # Null or missing provenance is never itself trusted. A per-session
+        # synchronizer token is required in those cases and also protects all
+        # accepted upload posts.
+        supplied_token = request.form.get("_csrf_token", "")
+        # Flask's signed session cookie is the server-managed session boundary;
+        # the token itself is stored in that session and compared in constant time.
+        expected_token = session.get("v10_csrf_token", "")
+        if not expected_token:
+            valid = False
+        else:
+            valid = valid and hmac.compare_digest(supplied_token, expected_token)
+        if origin_header in (None, "", "null") or referer_header in (None, "", "null"):
+            valid = valid and bool(expected_token)
         if not valid:
-            abort(403, description="Upload nur von der geöffneten lokalen V10-Seite erlaubt.")
+            action = {
+                "review_item": "Prüfentscheidung",
+                "commit_import": "Übernahme",
+            }.get(request.endpoint, "Upload")
+            app.logger.warning(
+                "V10-Schreibaktion abgelehnt (%s): Origin=%r Referer=%r Host=%r Vergleich=%r/%r Token=%s",
+                action,
+                origin_header,
+                referer_header,
+                request.headers.get("Host"),
+                origin,
+                expected,
+                bool(expected_token),
+            )
+            messages = {
+                "Prüfentscheidung": "Prüfentscheidung abgelehnt: lokale Herkunft oder sitzungsgebundener CSRF-Token ungültig.",
+                "Übernahme": "Übernahme abgelehnt: lokale Herkunft oder sitzungsgebundener CSRF-Token ungültig.",
+                "Upload": "Upload nur von der geöffneten lokalen V10-Seite erlaubt.",
+            }
+            abort(403, description=messages[action])
 
     @app.errorhandler(RequestEntityTooLarge)
     def upload_too_large(_error):
@@ -198,7 +304,8 @@ def create_app(
 
     @app.get("/")
     def index():
-        return render_template("index.html", branch=branch, commit=commit, profile=profile)
+        token = session.setdefault("v10_csrf_token", secrets.token_urlsafe(32))
+        return render_template("index.html", branch=branch, commit=commit, profile=profile, csrf_token=token)
 
     @app.post("/imports")
     def upload_import():
@@ -244,6 +351,7 @@ def create_app(
             job=job,
             documents=documents,
             preview=_present_preview(workflow, preview) if preview else (),
+            csrf_token=session.setdefault("v10_csrf_token", secrets.token_urlsafe(32)),
             has_preview=preview is not None,
             preview_revision=preview.revision if preview else 0,
             summary=_preview_summary(preview) if preview else {"events": 0, "cash": 0, "quantity": 0, "unresolved": 0},

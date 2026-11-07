@@ -14,6 +14,15 @@ try {
         throw "Web-Abhaengigkeit oder Parser fehlt in der V10-.venv. Web installieren: .\.venv\Scripts\python.exe -m pip install -e '.[web]'; Parser-Pin installieren: .\.venv\Scripts\python.exe -m pip install -r requirements-parser.txt"
     }
 
+    $portProbe = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Parse('127.0.0.1'), 8765)
+    try {
+        $portProbe.Start()
+    } catch {
+        throw 'Port 8765 ist bereits belegt. Beenden Sie gezielt den zugehoerigen V10-Webserver und starten Sie erneut; ein vorhandener /health-Endpunkt wird nicht als eigener Server akzeptiert.'
+    } finally {
+        $portProbe.Stop()
+    }
+
     $branch = (& git rev-parse --abbrev-ref HEAD).Trim()
     if ($LASTEXITCODE -ne 0 -or -not $branch) { throw 'Git-Branch konnte nicht ermittelt werden.' }
     if ($branch -eq 'main' -or $branch -match 'parser') { throw "Start auf unzulaessigem Branch '$branch' abgebrochen." }
@@ -42,7 +51,7 @@ try {
     Write-Host 'Der Server laeuft. Mit Strg+C beenden.'
     Wait-Process -Id $server.Id
 } finally {
-    if ($server -and -not $server.HasExited) { Stop-Process -Id $server.Id -Force }
+    if ($server -and -not $server.HasExited) { $server.Kill($true); $server.WaitForExit() }
     $env:PYTHONPATH = $previousPythonPath
     Pop-Location
 }

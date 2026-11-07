@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
 from typing import Protocol, Literal
+from datetime import date as DateType
 
 from portman_v10.domain.values import ExactValue, canonical_decimal, compare_decimal_text
 
@@ -332,7 +333,8 @@ class PreviewMovement:
     instrument_name: str | None = None
     account_id: str | None = None
     account_reference: str | None = None
-    date: date | None = None
+    #date: date | None = None
+    date: DateType | None = None
     date_meaning: str | None = None
     status: str | None = None
     direction: str | None = None

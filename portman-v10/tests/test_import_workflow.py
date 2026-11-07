@@ -133,6 +133,39 @@ class ImportWorkflowTests(unittest.TestCase):
         self.assertEqual(len(stored.positions), 2)
         self.assertEqual(len([row for row in stored.components if row.component_type == "fee"]), 1)
 
+    def test_identical_file_reimport_requires_link_and_does_not_duplicate_booking(self):
+        first_upload, first_job, first_preview = self._ready_preview(name="original.pdf")
+        first_report = self.workflow.commit_import(CommitImport(first_job.import_id, first_preview.revision, "original-commit"))
+
+        repeated_upload = self._upload(name="renamed-copy.pdf")
+        self.assertTrue(repeated_upload.identical_content_already_stored)
+        self.assertEqual(repeated_upload.document.document_id, first_upload.document.document_id)
+        repeated_job = self.workflow.wait(
+            self.workflow.start_import(ImportStart((repeated_upload.document.document_id,))).job_id, 10
+        )
+        repeated_preview = self.workflow.get_import_preview(repeated_job.import_id)
+        self.assertEqual(len(repeated_preview.items), 1)
+        candidate = repeated_preview.items[0]
+        self.assertEqual(candidate.disposition, "conflict")
+        self.assertEqual(candidate.conflicts[0].related_event_id, first_report.event_ids[0])
+
+        decision = ConflictDecision(candidate.candidate_id, "link", target_id=first_report.event_ids[0], candidate_revision=candidate.revision)
+        repeated_preview = self.workflow.resolve_import_item(repeated_job.import_id, decision, repeated_preview.revision)
+        report = self.workflow.commit_import(CommitImport(repeated_job.import_id, repeated_preview.revision, "repeat-commit"))
+
+        self.assertEqual(report.created_event_ids, ())
+        self.assertEqual(report.linked_event_ids, first_report.event_ids)
+        stored = self.store.load_event(first_report.event_ids[0])
+        self.assertEqual(stored.document_ids, (first_upload.document.document_id,))
+        self.assertEqual(len(stored.positions), 2)
+        connection = self.store.connect()
+        try:
+            self.assertEqual(connection.execute("SELECT count(*) FROM events").fetchone()[0], 1)
+            self.assertEqual(connection.execute("SELECT count(*) FROM positions").fetchone()[0], 2)
+            self.assertEqual(connection.execute("SELECT count(*) FROM import_contributions WHERE event_id=?", (first_report.event_ids[0],)).fetchone()[0], 2)
+        finally:
+            connection.close()
+
     def test_preview_candidate_order_is_canonical_and_reference_conflicts_are_held(self):
         uploaded = self._upload(name="multi.pdf")
         job = self.workflow.wait(self.workflow.start_import(ImportStart((uploaded.document.document_id,))).job_id, 10)
@@ -246,6 +279,370 @@ class ImportWorkflowTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def test_comdirect_purchase_uses_event_isin_for_instrument_match(self):
+        from portman_v10.infrastructure.parser_adapter import _resolve_instrument
+
+        matched = self.store.save_instrument(InstrumentInput(
+            "Lang & Schwarz", "equity", isin="DE000LS9AVX3", wkn="LS9AVX",
+        ))
+        # Der Parser liefert die Sicherheitskennung zusätzlich direkt am Event.
+        self.assertEqual(_resolve_instrument(self.store, "DE000LS9AVX3", "LS9AVX", None), (matched.instrument_id, None))
+
+        source = """comdirect
+Wertpapierkauf
+Depotnummer: 123456
+WKN: LS9AVX
+ISIN: DE000LS9AVX3
+Nennwert Zum Kurs von
+St. 0,007 EUR 3.471,31
+Kurswert : EUR 24,30
+Valuta 01.07.2026
+Zu Ihren Lasten EUR 24,30
+Steuerliche Behandlung: Wertpapierkauf Nr. 91182283 vom 01.07.2026
+Stk. 0,007 LANG+SCHWARZ O.E. INDEX , WKN / ISIN: LS9AVX / DE000LS9AVX3
+IBAN DE00000000000000000001"""
+        uploaded = self._upload(source, "structured-purchase.pdf")
+        job = self.workflow.wait(self.workflow.start_import(ImportStart((uploaded.document.document_id,))).job_id, 10)
+        item = self.workflow.get_import_preview(job.import_id).items[0]
+        self.assertEqual(dict(item.references)["security_isin"], "DE000LS9AVX3")
+        self.assertEqual(dict(item.references)["security_wkn"], "LS9AVX")
+        self.assertEqual(item.instrument_ids, (matched.instrument_id,))
+        self.assertFalse(any("V10-Instrument" in value for value in item.missing_fields))
+
+    def test_instrument_resolution_wkn_fallback_conflicts_and_multiple_hits(self):
+        from portman_v10.infrastructure.parser_adapter import _resolve_instrument
+
+        wkn_only = self.store.save_instrument(InstrumentInput("WKN only", "fund", wkn="ABC123"))
+        self.assertEqual(_resolve_instrument(self.store, None, "ABC123", None), (wkn_only.instrument_id, None))
+        self.assertIn("Kein V10-Instrument", _resolve_instrument(self.store, None, "NOHIT1", None)[1])
+
+        self.store.save_instrument(InstrumentInput("Conflict A", "equity", isin="DE0001111111", wkn="AAA111"))
+        self.store.save_instrument(InstrumentInput("Conflict B", "equity", isin="DE0002222222", wkn="BBB222"))
+        conflict_id, conflict_reason = _resolve_instrument(self.store, "DE0001111111", "BBB222", "DE0001111111")
+        self.assertIsNone(conflict_id)
+        self.assertIn("Widersprüchliche ISIN/WKN", conflict_reason)
+
+        duplicate_isin = "DE0003333333"
+        self.store.save_instrument(InstrumentInput("Duplicate A", "equity", isin=duplicate_isin))
+        self.store.save_instrument(InstrumentInput("Duplicate B", "equity", isin=duplicate_isin))
+        duplicate_id, duplicate_reason = _resolve_instrument(self.store, duplicate_isin, None, duplicate_isin)
+        self.assertIsNone(duplicate_id)
+        self.assertIn("Mehrere V10-Instrumente", duplicate_reason)
+
+    def test_real_pinned_comdirect_sale_and_income_handlers_require_safe_account_reference(self):
+        samples = (
+            ("wertpapierverkauf", "comdirect\nWertpapierverkauf\nStk. 1,000 Fonds DE0008474511\nZu Ihren Gunsten EUR 100,00\nDepotnummer: 123456\nIBAN DE00000000000000000001\nValuta 01.07.2026", ["-1", "100"]),
+            ("dividendengutschrift", "comdirect\nAbrechnung Dividendengutschrift\nBruttoertrag EUR 5,00\nZu Ihren Gunsten EUR 3,68\nStk. 1,000 Fonds DE0008474511\nDepotnummer: 123456\nIBAN DE00000000000000000001\nValuta 01.07.2026", ["3.68"]),
+            ("einloesung", "comdirect\nAbrechnung Einlösung\nStk. 1,000 Fonds DE0008474511\nZu Ihren Gunsten EUR 100,00\nDepotnummer: 123456\nIBAN DE00000000000000000001\nValuta 01.07.2026", ["100", "-1"]),
+        )
+        for handler, source, _expected in samples:
+            with self.subTest(handler=handler):
+                uploaded = self._upload(source, f"{handler}.pdf")
+                job = self.workflow.wait(self.workflow.start_import(ImportStart((uploaded.document.document_id,))).job_id, 10)
+                preview = self.workflow.get_import_preview(job.import_id)
+                self.assertEqual(preview.documents[0].handler_id, handler)
+                self.assertTrue(preview.items)
+                self.assertEqual(preview.items[0].review_status, "needs_review")
+                self.assertTrue(any("Bankreferenz" in value for value in preview.items[0].missing_fields))
+
+    def test_commit_rejects_pp_handler_even_if_preview_is_incorrectly_marked_complete(self):
+        from dataclasses import replace
+        from portman_v10.infrastructure.preview_codec import encode_preview
+
+        source = "comdirect\nWertpapierverkauf\nStk. 1,000 Fonds DE0008474511\nZu Ihren Gunsten EUR 100,00\nDepotnummer: 123456\nIBAN DE00000000000000000001\nValuta 01.07.2026"
+        uploaded = self._upload(source, "held-sale.pdf")
+        job = self.workflow.wait(self.workflow.start_import(ImportStart((uploaded.document.document_id,))).job_id, 10)
+        preview = self.workflow.get_import_preview(job.import_id)
+        candidate = replace(preview.items[0], plugin_id="portfolio-performance.comdirect", review_status="complete_candidate", missing_fields=(), warnings=())
+        preview = replace(preview, items=(candidate,))
+        self.store.replace_import_preview_items(job.import_id, preview.revision, encode_preview(preview))
+        self.workflow.resolve_import_item(job.import_id, ConflictDecision(candidate.candidate_id, "accept"), preview.revision)
+        with self.assertRaises(ApplicationError) as rejected:
+            self.workflow.commit_import(CommitImport(job.import_id, preview.revision + 1, "blocked-sale"))
+        self.assertEqual(rejected.exception.code, ErrorCode.UNSUPPORTED_DOCUMENT)
+
+    def test_real_parser_comdirect_sale_creates_signed_cash_and_quantity_once(self):
+        source = """comdirect
+Wertpapierverkauf
+Depotnummer: 123456
+Stk. 1,000 Fonds, WKN / ISIN: ABC123 / DE0008474511
+IBAN DE00000000000000000001
+Zu Ihren Gunsten EUR 100,00
+Valuta 01.07.2026
+Referenz: SELLREF0001"""
+        uploaded = self._upload(source, "sale-with-reference.pdf")
+        job = self.workflow.wait(self.workflow.start_import(ImportStart((uploaded.document.document_id,))).job_id, 10)
+        preview = self.workflow.get_import_preview(job.import_id)
+        item = preview.items[0]
+        self.assertEqual((preview.documents[0].handler_id, item.kind, item.review_status), ("wertpapierverkauf", "SELL", "complete_candidate"))
+        self.assertEqual([(value.movement_type, value.amount.text) for value in item.movements], [("cash", "100"), ("quantity", "-1")])
+        self.workflow.resolve_import_item(job.import_id, ConflictDecision(item.candidate_id, "accept", candidate_revision=item.revision), preview.revision)
+        current = self.workflow.get_import_preview(job.import_id)
+        report = self.workflow.commit_import(CommitImport(job.import_id, current.revision, "real-parser-sale"))
+        self.assertEqual(len(report.created_event_ids), 1)
+        connection = self.store.connect()
+        try:
+            rows = connection.execute("SELECT currency,amount_decimal,instrument_id,quantity_decimal FROM positions").fetchall()
+            self.assertCountEqual([(row[0], row[1], row[2], row[3]) for row in rows], [("EUR", "100", None, None), (None, None, self.instrument.instrument_id, "-1")])
+        finally:
+            connection.close()
+
+    def test_real_parser_dividend_uses_cash_credit_without_depot_quantity(self):
+        source = """comdirect
+Abrechnung Dividendengutschrift
+Zu Ihren Gunsten EUR 3,68
+Stk. 1,000 Fonds, WKN / ISIN: ABC123 / DE0008474511
+IBAN DE00000000000000000001
+Valuta 01.07.2026
+Referenz: DIVREF0001"""
+        uploaded = self._upload(source, "dividend-with-reference.pdf")
+        job = self.workflow.wait(self.workflow.start_import(ImportStart((uploaded.document.document_id,))).job_id, 10)
+        preview = self.workflow.get_import_preview(job.import_id)
+        item = preview.items[0]
+        self.assertEqual((preview.documents[0].handler_id, item.kind, item.review_status), ("dividendengutschrift", "DIVIDEND", "complete_candidate"))
+        self.assertEqual([(value.movement_type, value.amount.text) for value in item.movements], [("cash", "3.68")])
+        self.workflow.resolve_import_item(job.import_id, ConflictDecision(item.candidate_id, "accept", candidate_revision=item.revision), preview.revision)
+        current = self.workflow.get_import_preview(job.import_id)
+        self.workflow.commit_import(CommitImport(job.import_id, current.revision, "real-parser-dividend"))
+        connection = self.store.connect()
+        try:
+            rows = connection.execute("SELECT currency,amount_decimal,instrument_id,quantity_decimal FROM positions").fetchall()
+            self.assertEqual([(row[0], row[1], row[2], row[3]) for row in rows], [("EUR", "3.68", None, None)])
+        finally:
+            connection.close()
+
+    def test_real_parser_redemption_and_income_interest_handlers_have_distinct_effects(self):
+        samples = (
+            ("einloesung", "Abrechnung Einlösung\nStk. 1,000 Fonds, WKN / ISIN: ABC123 / DE0008474511\nDepotnummer: 123456\nIBAN DE00000000000000000001\nZu Ihren Gunsten EUR 100,00\nValuta 01.07.2026\nReferenz: REDEMPTION0001", [("cash", "100"), ("quantity", "-1")]),
+            ("ertragsgutschrift", "Abrechnung Ertragsgutschrift\nZinsgutschrift EUR 5,00\nZu Ihren Gunsten EUR 5,00\nIBAN DE00000000000000000001\nValuta 01.07.2026\nReferenz: INCOME00001", [("cash", "5")]),
+        )
+        for handler, source, expected_movements in samples:
+            with self.subTest(handler=handler):
+                uploaded = self._upload("comdirect\n" + source, f"{handler}-with-reference.pdf")
+                job = self.workflow.wait(self.workflow.start_import(ImportStart((uploaded.document.document_id,))).job_id, 10)
+                preview = self.workflow.get_import_preview(job.import_id)
+                item = preview.items[0]
+                self.assertEqual(preview.documents[0].handler_id, handler)
+                self.assertEqual(item.review_status, "complete_candidate")
+                self.assertEqual([(value.movement_type, value.amount.text) for value in item.movements], expected_movements)
+                self.workflow.resolve_import_item(job.import_id, ConflictDecision(item.candidate_id, "accept", candidate_revision=item.revision), preview.revision)
+                current = self.workflow.get_import_preview(job.import_id)
+                report = self.workflow.commit_import(CommitImport(job.import_id, current.revision, f"real-parser-{handler}"))
+                self.assertEqual(len(report.created_event_ids), 1)
+
+    def test_a2h57n_purchase_parser_preserves_quarter_share_and_identifier(self):
+        source = """comdirect
+Wertpapierkauf
+Depotnummer: 123456
+WKN: A2H57N
+ISIN: LU1681041973
+Nennwert Zum Kurs von
+St. 0,25 EUR 199,68
+Kurswert : EUR 49,92
+Valuta 02.05.2025
+Zu Ihren Lasten EUR 49,92
+Steuerliche Behandlung: Wertpapierkauf Nr. 266D25000000001 vom 02.05.2025
+Stk. 0,25 AIS-AM.E.H.D.F.EOC, WKN / ISIN: A2H57N / LU1681041973
+IBAN DE00000000000000000001"""
+        uploaded = self._upload(source, "synthetic-a2h57n-buy.pdf")
+        job = self.workflow.wait(self.workflow.start_import(ImportStart((uploaded.document.document_id,))).job_id, 10)
+        preview = self.workflow.get_import_preview(job.import_id)
+        item = preview.items[0]
+        self.assertEqual(preview.documents[0].handler_id, "wertpapierkauf")
+        self.assertEqual(dict(item.references)["security_wkn"], "A2H57N")
+        self.assertEqual(dict(item.references)["security_isin"], "LU1681041973")
+        self.assertEqual([(movement.movement_type, movement.amount.text) for movement in item.movements], [("cash", "-49.92"), ("quantity", "0.25")])
+        self.assertTrue(item.source_evidence)
+
+    def test_real_pinned_comdirect_tax_information_has_no_booking_candidate(self):
+        source = "comdirect\nSteuerliche Behandlung: Vorabpauschale\nVorabpauschale EUR 5,00\nSteuerbemessungsgrundlage EUR 4,00\nKapitalertragsteuer EUR 1,00\nFreistellungsauftrag EUR 2,00\nIBAN DE00000000000000000001\nDepotnummer: 123456"
+        uploaded = self._upload(source, "vorabpauschale.pdf")
+        job = self.workflow.wait(self.workflow.start_import(ImportStart((uploaded.document.document_id,))).job_id, 10)
+        preview = self.workflow.get_import_preview(job.import_id)
+        self.assertEqual(preview.documents[0].handler_id, "vorabpauschale")
+        self.assertEqual(preview.items[0].review_status, "information")
+        self.assertFalse(preview.items[0].movements)
+        self.assertTrue(any(item.category == "tax_detail" and item.kind == "taxable_amount" for item in preview.items[0].components))
+
+    def test_tax_statement_parser_quantity_without_cash_is_held_as_parser_gap(self):
+        source = """comdirect
+Steuerliche Behandlung: Fiktiver Verkauf Investmentfonds w. Investmentsteuerref.
+Stk. -21,826 ISH.S.EUROP.MID 200 U.ETF, WKN / ISIN: 593399 / DE0005933998
+Zu Ihren Gunsten vor Steuern:
+Kapitalertragsteuer EUR 0,00
+Solidaritätszuschlag EUR 0,00
+Kirchensteuer EUR 0,00
+abgeführte Steuern EUR 0,00
+Zu Ihren Gunsten nach Steuern:
+Freistellungsauftrag EUR 0,00"""
+        uploaded = self._upload(source, "synthetic-fiktiver-verkauf-steuer.pdf")
+        job = self.workflow.wait(self.workflow.start_import(ImportStart((uploaded.document.document_id,))).job_id, 10)
+        preview = self.workflow.get_import_preview(job.import_id)
+        item = preview.items[0]
+        self.assertEqual(preview.documents[0].handler_id, "wertpapierverkauf")
+        self.assertEqual(item.kind, "parserluecke_steuerereignis")
+        self.assertEqual(item.movements, ())
+        self.assertIn("kein Bestandszugang oder -abgang", item.missing_fields[0])
+        self.assertIn("-21.826", dict(item.references)["unbooked_security_movements"])
+        connection = self.store.connect()
+        try:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM events").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM positions").fetchone()[0], 0)
+        finally:
+            connection.close()
+
+    def test_real_pinned_comdirect_tax_notice_handlers_keep_bases_out_of_cash_movements(self):
+        samples = (
+            ("investment_ausschuettung", "comdirect\nSteuerliche Behandlung: Investment-Ausschüttung\nBruttoertrag EUR 5,00\nKapitalertragsteuer EUR 1,00\nSteuerbemessungsgrundlage EUR 4,00\nFreistellungsauftrag EUR 2,00\nIBAN DE00000000000000000001\nDepotnummer: 123456", {"taxable_amount": "4", "exemption_order_used": "2"}),
+            ("dividende_steuer_inland", "comdirect\nSteuerliche Behandlung: Dividende\nBruttoertrag EUR 5,00\nKapitalertragsteuer EUR 1,00\nKirchensteuer EUR 0,10\nSteuerbemessungsgrundlage EUR 4,00\nIBAN DE00000000000000000001\nDepotnummer: 123456", {"taxable_amount": "4", "actually_withheld_tax": "1.1"}),
+        )
+        for handler, source, expected_details in samples:
+            with self.subTest(handler=handler):
+                uploaded = self._upload(source, f"{handler}.pdf")
+                job = self.workflow.wait(self.workflow.start_import(ImportStart((uploaded.document.document_id,))).job_id, 10)
+                preview = self.workflow.get_import_preview(job.import_id)
+                self.assertEqual(preview.documents[0].handler_id, handler)
+                self.assertEqual(len(preview.items), 1)
+                item = preview.items[0]
+                self.assertEqual(item.review_status, "information")
+                self.assertFalse(item.movements)
+                self.assertFalse(item.missing_fields)
+                self.assertFalse(item.warnings)
+                details = {component.kind: component.amount.text for component in item.components if component.amount}
+                for key, value in expected_details.items():
+                    self.assertEqual(details[key], value)
+                self.assertTrue(item.source_evidence)
+
+    def test_real_pinned_comdirect_mifid_information_is_non_bookable(self):
+        source = "comdirect\nKosteninformation zum Wertpapiergeschäft\nProduktkosten 1,00 EUR\nDienstleistungskosten 0,50 EUR"
+        uploaded = self._upload(source, "mifid-costs.pdf")
+        job = self.workflow.wait(self.workflow.start_import(ImportStart((uploaded.document.document_id,))).job_id, 10)
+        preview = self.workflow.get_import_preview(job.import_id)
+        self.assertEqual(preview.items[0].review_status, "information")
+        self.assertFalse(preview.items[0].movements)
+        self.assertTrue(all(not item.counts_as_movement for item in preview.items[0].components))
+
+    def test_real_pinned_comdirect_finanzreport_snapshot_stays_information(self):
+        source = "comdirect\nFinanzreport Nr. 123 per 01.07.2026\nGirokonto DE00000000000000000001\nAlter Saldo 01.06.2026 100,00\nNeuer Saldo 01.07.2026 110,00"
+        uploaded = self._upload(source, "finanzreport.pdf")
+        job = self.workflow.wait(self.workflow.start_import(ImportStart((uploaded.document.document_id,))).job_id, 10)
+        preview = self.workflow.get_import_preview(job.import_id)
+        self.assertEqual(preview.documents[0].handler_id, "finanzreport")
+        self.assertEqual(preview.items[0].review_status, "information")
+        self.assertFalse(preview.items[0].movements)
+
+    def test_real_pinned_comdirect_finanzreport_keeps_each_booking_row_separate(self):
+        source = "comdirect\nFinanzreport Nr. 124 per 01.07.2026\nGirokonto DE00000000000000000001\nAlter Saldo 01.06.2026 100,00\n01.07.2026 01.07.2026 Habenzinsen +10,00\n01.07.2026 01.07.2026 Kartenzahlung -2,50\nNeuer Saldo 01.07.2026 107,50"
+        uploaded = self._upload(source, "finanzreport-lines.pdf")
+        job = self.workflow.wait(self.workflow.start_import(ImportStart((uploaded.document.document_id,))).job_id, 10)
+        preview = self.workflow.get_import_preview(job.import_id)
+        self.assertEqual(preview.documents[0].handler_id, "finanzreport")
+        self.assertEqual(len(preview.items), 2)
+        by_source = {item.source_evidence[0].excerpt: item for item in preview.items}
+        self.assertEqual(set(by_source), {"01.07.2026 01.07.2026 Habenzinsen +10,00", "01.07.2026 01.07.2026 Kartenzahlung -2,50"})
+        self.assertEqual(by_source["01.07.2026 01.07.2026 Habenzinsen +10,00"].movements[0].amount.text, "10")
+        self.assertEqual(by_source["01.07.2026 01.07.2026 Kartenzahlung -2,50"].movements[0].amount.text, "-2.5")
+        self.assertEqual({item.movements[0].account_id for item in preview.items}, {self.cash.account_id})
+        self.assertEqual([item.review_status for item in preview.items], ["needs_review", "needs_review"])
+        self.assertTrue(all(item.source_evidence and item.source_evidence[0].excerpt for item in preview.items))
+        self.assertTrue(all(any("Übernahme" in missing for missing in item.missing_fields) for item in preview.items))
+
+    def test_executable_comdirect_handler_registry_is_fully_listed(self):
+        from portman_parsers.registry import default_registry
+
+        handlers = {(plugin.plugin_id, item.handler_id) for plugin in default_registry().metadata()
+                    if plugin.plugin_id in {"user.comdirect-ertraege", "comdirect.finanzreport", "portfolio-performance.comdirect"}
+                    for item in plugin.handlers if default_registry().handler_status(plugin.plugin_id, item.handler_id) == "IMPLEMENTED"}
+        self.assertEqual(len(handlers), 19)
+
+    def test_pp_derived_comdirect_plugins_are_parsed_when_selected_by_registry(self):
+        from portman_parsers.registry import default_registry
+        from portman_parsers.extraction import extract_pdf
+
+        source = "comdirect\nWertpapierverkauf\nStk. 1,000 Fonds, WKN / ISIN: ABC123 / DE0008474511\nDepotnummer: 123456\nIBAN DE00000000000000000001\nZu Ihren Gunsten EUR 10,00\nValuta 01.07.2026"
+        path = self.root / "pp-derived-sale.pdf"
+        path.write_bytes(make_text_pdf(source))
+        detection = default_registry().select(extract_pdf(str(path)))
+        self.assertIsNotNone(detection)
+        uploaded = self.workflow.upload_document(DocumentUpload("pp-derived-sale.pdf", path.read_bytes()))
+        job = self.workflow.wait(self.workflow.start_import(ImportStart((uploaded.document.document_id,))).job_id, 10)
+        preview = self.workflow.get_import_preview(job.import_id)
+        self.assertEqual(preview.documents[0].handler_id, detection.handler_id)
+        self.assertEqual(preview.items[0].review_status, "needs_review")
+
+    def test_all_pp_comdirect_handlers_parse_synthetic_pdf_through_registered_plugin(self):
+        from portman_parsers.extraction import extract_pdf
+        from portman_parsers.registry import default_registry
+        from portman_parsers.validation import validate_parsed_document
+
+        samples = {
+            "wertpapierkauf": ("Wertpapierkauf\nStk. 1,000 Fonds, WKN / ISIN: ABC123 / DE0008474511\nDepotnummer: 123456\nIBAN DE00000000000000000001\nZu Ihren Lasten EUR 10,00\nValuta 01.07.2026", "BUY", "-10", "1"),
+            "wertpapierverkauf": ("Wertpapierverkauf\nStk. 1,000 Fonds, WKN / ISIN: ABC123 / DE0008474511\nDepotnummer: 123456\nIBAN DE00000000000000000001\nZu Ihren Gunsten EUR 10,00\nValuta 01.07.2026", "SELL", "10", "-1"),
+            "einloesung": ("Abrechnung Einlösung\nStk. 1,000 Fonds, WKN / ISIN: ABC123 / DE0008474511\nDepotnummer: 123456\nIBAN DE00000000000000000001\nZu Ihren Gunsten EUR 10,00\nValuta 01.07.2026", "REDEMPTION", "10", "-1"),
+            "dividendengutschrift": ("Abrechnung Dividendengutschrift\nZu Ihren Gunsten EUR 5,00\nDepotnummer: 123456\nIBAN DE00000000000000000001\nValuta 01.07.2026", "DIVIDEND", "5", None),
+            "ertragsgutschrift": ("Abrechnung Ertragsgutschrift\nZinsgutschrift EUR 5,00\nZu Ihren Gunsten EUR 5,00\nIBAN DE00000000000000000001\nValuta 01.07.2026", "DIVIDEND", "5", None),
+            "investment_ausschuettung": ("Steuerliche Behandlung: Investment-Ausschüttung\nKapitalertragsteuer EUR 1,00\nSteuerbemessungsgrundlage EUR 4,00", "TAX_NOTICE", None, None),
+            "dividende_steuer_inland": ("Steuerliche Behandlung: Dividende\nKapitalertragsteuer EUR 1,00\nSteuerbemessungsgrundlage EUR 4,00", "TAX_NOTICE", None, None),
+            "vorabpauschale": ("Steuerliche Behandlung: Vorabpauschale\nVorabpauschale EUR 5,00\nKapitalertragsteuer EUR 1,00", "ADVANCE_TAX", None, None),
+            "finanzreport": ("Finanzreport Nr. 123 per 01.07.2026\nGirokonto DE00000000000000000001\nAlter Saldo 01.06.2026 100,00\nNeuer Saldo 01.07.2026 110,00", None, None, None),
+        }
+        registry = default_registry()
+        plugin_id = "portfolio-performance.comdirect"
+        plugin = registry.plugin(plugin_id)
+        with TemporaryDirectory() as directory:
+            for handler, (body, expected_kind, cash_amount, quantity_amount) in samples.items():
+                with self.subTest(handler=handler):
+                    path = Path(directory) / f"pp-{handler}.pdf"
+                    path.write_bytes(make_text_pdf(f"comdirect\n{body}"))
+                    document = extract_pdf(str(path))
+                    detections = plugin.detect(document)
+                    self.assertEqual(len(detections), 1)
+                    detection = detections[0]
+                    self.assertEqual(detection.handler_id, handler)
+                    result = registry.parse(document, detection)
+                    self.assertEqual((result.plugin_id, result.handler_id), (plugin_id, handler))
+                    self.assertTrue(result.evidence)
+                    self.assertEqual(validate_parsed_document(result), ())
+                    if expected_kind:
+                        self.assertEqual(len(result.events), 1)
+                        event = result.events[0]
+                        self.assertEqual(event.kind, expected_kind)
+                        self.assertEqual([format(m.amount.normalize(), "f") for m in event.cash_movements], [cash_amount] if cash_amount is not None else [])
+                        self.assertEqual([format(m.quantity.normalize(), "f") for m in event.security_movements], [quantity_amount] if quantity_amount is not None else [])
+                    else:
+                        self.assertFalse(result.events)
+
+    def test_default_registry_prefers_comdirect_specific_plugins_over_pp_aliases(self):
+        from portman_parsers.extraction import extract_pdf
+        from portman_parsers.registry import default_registry
+
+        samples = {
+            "wertpapierkauf": "Wertpapierkauf",
+            "wertpapierverkauf": "Wertpapierverkauf",
+            "einloesung": "Abrechnung Einlösung",
+            "dividendengutschrift": "Abrechnung Dividendengutschrift",
+            "ertragsgutschrift": "Abrechnung Ertragsgutschrift",
+            "investment_ausschuettung": "Steuerliche Behandlung: Investment-Ausschüttung",
+            "dividende_steuer_inland": "Steuerliche Behandlung: Dividende",
+            "vorabpauschale": "Steuerliche Behandlung: Vorabpauschale",
+        }
+        registry = default_registry()
+        with TemporaryDirectory() as directory:
+            for handler, title in samples.items():
+                with self.subTest(handler=handler):
+                    path = Path(directory) / f"registry-{handler}.pdf"
+                    path.write_bytes(make_text_pdf(f"comdirect\n{title}"))
+                    document = extract_pdf(str(path))
+                    candidates = registry.detect(document)
+                    selected = registry.select(document)
+                    self.assertIn(("portfolio-performance.comdirect", handler), {(item.plugin_id, item.handler_id) for item in candidates})
+                    self.assertEqual((selected.plugin_id, selected.handler_id), ("user.comdirect-ertraege", handler))
+
+            report_path = Path(directory) / "registry-finanzreport.pdf"
+            report_path.write_bytes(make_text_pdf("comdirect\nFinanzreport Nr. 125 per 01.07.2026"))
+            report = registry.select(extract_pdf(str(report_path)))
+            self.assertEqual((report.plugin_id, report.handler_id), ("comdirect.finanzreport", "finanzreport"))
+
     def test_conflicting_account_hint_is_visible_and_does_not_override_source(self):
         other = self.store.save_account(AccountInput("Other Giro", "cash", "checking", "comdirect", "EUR"), None)
         uploaded = self._upload()
@@ -335,9 +732,11 @@ class ImportWorkflowTests(unittest.TestCase):
         sale_job = self.workflow.start_import(ImportStart((unapproved.document.document_id,)))
         self.workflow.wait(sale_job.job_id, 10)
         sale_result = self.workflow.get_import_document_results(sale_job.job_id)[0]
-        self.assertEqual(sale_result.status, "unsupported")
+        self.assertEqual(sale_result.status, "needs_review")
         self.assertEqual(sale_result.handler_id, "wertpapierverkauf")
-        self.assertEqual(self.workflow.get_import_preview(sale_job.import_id).items, ())
+        sale_preview = self.workflow.get_import_preview(sale_job.import_id)
+        self.assertEqual(sale_preview.items[0].review_status, "needs_review")
+        self.assertTrue(sale_preview.items[0].movements)
 
     def test_information_only_comdirect_document_is_not_a_booking_candidate(self):
         source = "comdirect\nKosteninformation zum Wertpapiergeschäft 10,00 EUR"
