@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% set active = "accounts_page" %}
+{% block title %}{{ account.name }}{% endblock %}
+{% block content %}
+  <h1>{{ account.name }}</h1>
+  <dl>
+    <dt>Typ</dt><dd>{{ account.type }}</dd>
+    <dt>Bank</dt><dd>{{ account.institution }}</dd>
+    <dt>Währung</dt><dd>{{ account.currency }}</dd>
+    <dt>Kennungen</dt><dd>{% for value in account.identifiers %}{{ value }}{% if not loop.last %}<br>{% endif %}{% else %}keine{% endfor %}</dd>
+    <dt>Referenzkonto</dt><dd>{{ account.reference }}</dd>
+    <dt>Status</dt><dd>{{ "aktiv" if account.active else "deaktiviert" }} · Revision {{ account.revision }}</dd>
+  </dl>
+  <p>{% if account.editable %}<a href="{{ url_for('edit_account', account_id=account.account_id) }}">Konto bearbeiten</a> · {% endif %}<a href="{{ url_for('accounts_page') }}">Zur Kontenliste</a></p>
+  {% if action_error %}<p id="action-error" class="error" role="alert">{{ action_error }}</p>{% endif %}
+  {% if deactivated %}<p class="notice" role="status">Konto deaktiviert. Es bleibt mit allen Buchungen lesbar und durchsuchbar.</p>{% endif %}
+  {% if opened %}<p class="notice" role="status">Eröffnungsbestand gespeichert: {{ opened.date }} · {{ opened.value }}{% if opened.cost %} · {{ opened.cost }}{% endif %}</p>{% endif %}
+
+  <h2>Eröffnungsbestand erfassen</h2>
+  <p>Ein expliziter Startbestand zum Stichtag – keine erfundene Kauf- oder Gegenbuchung. Frühere Historie gilt damit nicht als belegt.</p>
+  <form id="opening-form" method="post" action="{{ url_for('record_opening', account_id=account.account_id) }}">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="opening_id" value="{{ opening.opening_id }}">
+    <div class="field"><label for="opening-date">Stichtag</label><input id="opening-date" type="date" name="effective_date" value="{{ opening.effective_date }}" required></div>
+    {% if kind == "cash" %}
+      <div class="field"><label for="opening-amount">Betrag ({{ account_currency }})</label><input id="opening-amount" name="amount" value="{{ opening.amount }}" inputmode="decimal" required placeholder="z. B. 1234,56"></div>
+    {% else %}
+      <div class="field"><label for="opening-instrument">Instrument</label>
+        <select id="opening-instrument" name="instrument_id" required>
+          <option value="">bitte wählen</option>
+          {% for value, label in instruments %}<option value="{{ value }}"{% if value == opening.instrument_id %} selected{% endif %}>{{ label }}</option>{% endfor %}
+        </select></div>
+      <div class="field"><label for="opening-quantity">Stückzahl</label><input id="opening-quantity" name="quantity" value="{{ opening.quantity }}" inputmode="decimal" required></div>
+      <div class="field"><label for="opening-acquired">Anschaffungsdatum (optional)</label><input id="opening-acquired" type="date" name="acquired_on" value="{{ opening.acquired_on }}"></div>
+      <div class="field"><label for="opening-cost">Anschaffungskosten gesamt (optional)</label><input id="opening-cost" name="acquisition_cost" value="{{ opening.acquisition_cost }}" inputmode="decimal" placeholder="leer = unbekannt"></div>
+      <div class="field"><label for="opening-cost-currency">Kostenwährung</label><input id="opening-cost-currency" name="cost_currency" value="{{ opening.cost_currency or 'EUR' }}" maxlength="3"></div>
+      {% if not instruments %}<p class="warning">Noch keine Instrumente vorhanden. <a href="{{ url_for('instruments_page') }}">Instrument anlegen</a></p>{% endif %}
+    {% endif %}
+    <div class="field"><label for="opening-note">Notiz (optional)</label><input id="opening-note" name="note" value="{{ opening.note }}" maxlength="500"></div>
+    <button type="submit">Eröffnungsbestand speichern</button>
+  </form>
+
+  {% if account.active %}
+    <h2>Konto deaktivieren</h2>
+    <form id="deactivate-form" method="post" action="{{ url_for('deactivate_account', account_id=account.account_id) }}">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="expected_revision" value="{{ account.revision }}">
+      <label><input type="checkbox" name="confirm" value="1" required> Konto deaktivieren – es wird nicht gelöscht, bleibt mit allen Buchungen lesbar und durchsuchbar.</label>
+      <button type="submit">Deaktivieren</button>
+    </form>
+  {% endif %}
+
+  <h2>Buchungen</h2>
+  {% if notice %}<p class="warning" role="status">{{ notice }}</p>{% endif %}
+  {% if error %}<p class="error" role="alert">{{ error }} <a href="{{ url_for('account_detail', account_id=account.account_id) }}">Neu laden</a></p>{% endif %}
+  {% if bookings is not none %}
+    {% if bookings %}
+      <p>Sortiert nach Buchungsdatum, neueste zuerst.{% if is_continuation %} Fortsetzung – <a href="{{ url_for('account_detail', account_id=account.account_id) }}">zum Anfang</a>.{% endif %}</p>
+      <table id="booking-list">
+        <thead><tr><th>Datum</th><th>Art</th><th>Beschreibung</th><th class="amount">Betrag</th></tr></thead>
+        <tbody>
+          {% for booking in bookings %}
+            <tr{% if not booking.active %} class="inactive"{% endif %}>
+              <td>{{ booking.date }}</td>
+              <td>{{ booking.kind }}</td>
+              <td>{{ booking.description }}</td>
+              <td class="amount">{{ booking.amount }} {{ booking.currency }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% if next_cursor %}<p><a id="next-page" data-more-for="booking-list" href="{{ url_for('account_detail', account_id=account.account_id, cursor=next_cursor) }}">Weitere Buchungen</a></p>{% endif %}
+    {% else %}
+      <p>Keine Buchungen für dieses Konto.</p>
+    {% endif %}
+  {% endif %}
+{% endblock %}

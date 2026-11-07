@@ -1,27 +1,22 @@
-<!doctype html>
-<html lang="de">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  {% if job.state in ('queued', 'running') %}<meta http-equiv="refresh" content="2">{% endif %}
-  <title>Importvorschau · Portman V10</title>
-  <style>
-    body { max-width: 76rem; margin: 2rem auto; padding: 0 1rem; color: #17212b; font: 1rem/1.5 system-ui, sans-serif; }
-    .banner { padding: 1rem; border: 2px solid #a54b00; background: #fff5e8; font-weight: 700; }
-    .warning { padding: .7rem; background: #fff5e8; border-left: .3rem solid #a54b00; }
-    .error { padding: .7rem; background: #fff0f0; border-left: .3rem solid #a11; }
-    .check-point { color: #b00020; font-weight: 700; }
-    table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
-    th, td { text-align: left; vertical-align: top; border: 1px solid #bbc4cc; padding: .5rem; }
-    details { margin: .7rem 0; }
-    footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid #bbc4cc; color: #46535f; font-size: .9rem; }
-  </style>
-</head>
-<body>
-  <nav><a href="{{ url_for('index') }}">Import</a> · <a href="{{ url_for('accounts_page') }}">Konten &amp; Depots</a></nav>
+{% extends "base.html" %}
+{% set active = "index" %}
+{% block head %}{% if job.state in ('queued', 'running') %}<meta http-equiv="refresh" content="2">{% endif %}{% endblock %}
+{% block title %}Importvorschau{% endblock %}
+{% block content %}
   <h1>Importprüfung</h1>
   <p class="banner">Importvorschau – noch nicht gebucht</p>
   {% if action_error %}<p id="action-error" class="error" role="alert"><strong>{{ action_error }}</strong>{% if summary.undecided %}<br>Noch {{ summary.undecided }} Kandidat{% if summary.undecided != 1 %}en{% endif %} ohne Entscheidung – unten rot markiert.{% endif %}</p>{% endif %}
+  {% if stale_preview %}
+    <div id="stale-preview" class="warning" role="status">
+      <strong>Diese Vorschau ist veraltet – Übernahme gesperrt.</strong>
+      Seit ihrer Erstellung wurde der Datenbestand geändert, etwa durch eine andere Übernahme, eine Rücknahme oder gepflegte Konten bzw. Instrumente. Dubletten und Zuordnungen müssen deshalb neu geprüft werden.
+      <form method="post" action="{{ url_for('refresh_preview', import_id=job.import_id) }}">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+        <button type="submit">Vorschau mit aktuellem Datenstand neu erstellen</button>
+      </form>
+      <small>Dieselben gespeicherten Belege werden neu eingelesen, kein erneuter Upload nötig. Annehmen/Ignorieren danach in der neuen Vorschau erneut wählen; diese Vorschau bleibt unverändert in der Importliste.</small>
+    </div>
+  {% endif %}
   <p id="uploaded-filenames">Hochgeladene Datei{% if documents|length != 1 %}en{% endif %}: {% for document in documents %}{{ document.name }}{% if not loop.last %}, {% endif %}{% else %}noch nicht verarbeitet{% endfor %}</p>
   {% if job.state in ('queued', 'running') %}
     <p id="job-feedback" role="status" aria-live="polite">{% for document in documents %}{{ document.name }}{% if not loop.last %}, {% endif %}{% endfor %} hochgeladen. Importvorschau wird erstellt …</p>
@@ -58,15 +53,24 @@
 
   <h2>Erkannte Vorschauwerte</h2>
   {% if has_preview %}<p>Prüfsumme: Vorschauversion {{ preview_revision }} · Kandidaten {{ summary.events }} · Geldbewegungen {{ summary.cash }} · Mengenbewegungen {{ summary.quantity }} · offene Konflikte/Zuordnungen {{ summary.unresolved }}</p>{% endif %}
+  {% if (bulk.ready or bulk.unmatched) and not commit_report and job.state == 'needs_review' and not stale_preview %}
+    <form id="accept-all-form" class="card" method="post" action="{{ url_for('accept_all_candidates', import_id=job.import_id) }}">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
+      {% if bulk.ready %}<button type="submit">Alle {{ bulk.ready }} bereiten Kandidaten annehmen</button>{% endif %}
+      {% if bulk.unmatched %}<button type="submit" name="mode" value="unmatched" data-confirm-button="{{ bulk.unmatched }} referenzlose Reportzeilen als neue Buchungen vormerken? Nur bestätigen, wenn keine davon bereits gebucht ist.">Alle {{ bulk.unmatched }} referenzlosen Reportzeilen als neue Buchung übernehmen</button>{% endif %}
+      <small>Nimmt nur vollständige Kandidaten ohne Konflikt und ohne bisherige Entscheidung an; gebucht wird erst mit „Übernehmen“ unten. Einzelne vorher ignorieren oder danach umentscheiden ist möglich.{% if bulk.others %} {{ bulk.others }} weitere{% if bulk.others == 1 %}r Kandidat braucht{% else %} Kandidaten brauchen{% endif %} eine Einzelentscheidung.{% endif %}</small>
+    </form>
+  {% endif %}
   {% if preview %}
     {% for item in preview %}
-      <section>
+      <section id="candidate-{{ item.candidate_id }}">
         <h3>{{ item.kind }} · {{ status_labels.get(item.status, item.status) }}</h3>
         {% if item.decision_status %}<p id="review-status-{{ item.candidate_id }}" role="status"><strong>Prüfentscheidung gespeichert: {{ item.decision_status }}.</strong> Noch nicht gebucht; Übernahme erfolgt separat.</p>{% endif %}
         {% if item.instruments %}
           <p><strong>Wertpapier:</strong>
             {% for instrument in item.instruments %}
-              {{ instrument.label }} · Stammdatenzuordnung: {{ instrument.mapping }}{% if instrument.issue %}<br><span class="check-point">{{ instrument.issue }}</span>{% endif %}{% if not loop.last %}; {% endif %}
+              {{ instrument.label }} · Stammdatenzuordnung: {{ instrument.mapping }}{% if instrument.create %} · <a class="create-instrument" href="{{ url_for('new_instrument', return_to=url_for('job_page', job_id=job.job_id), **instrument.create) }}#instrument-form">Instrument anlegen</a>{% endif %}{% if instrument.issue %}<br><span class="check-point">{{ instrument.issue }}</span>{% endif %}{% if not loop.last %}; {% endif %}
             {% endfor %}
           </p>
         {% endif %}
@@ -87,7 +91,21 @@
           </table>
         {% else %}<p>Keine Geld- oder Mengenbewegung erkannt.</p>{% endif %}
         {% for check in item.checks %}<p class="check-point">{{ check }}</p>{% endfor %}
-        {% if item.status == "information" %}<p><strong>Information – keine Buchung.</strong></p>{% elif item.status == "needs_review" %}<p><strong>Prüfung nötig – dieser Vorgangstyp ist noch nicht zur Übernahme freigegeben.</strong></p>{% else %}<form method="post" action="{{ url_for('review_item', import_id=job.import_id) }}">
+        {% if item.status == "information" %}<p><strong>Information – keine Buchung.</strong></p>{% elif item.finanzreport %}<p><strong>Referenzlose Reportzeile:</strong> Der Finanzreport liefert keine Bankreferenz, Dubletten sind deshalb nicht automatisch erkennbar. Nur als neue Buchung übernehmen, wenn diese Zeile noch nicht gebucht ist; gebucht wird erst mit „Übernehmen“ unten.</p>
+        {% if item.unmatched_blocker %}<p class="check-point">{{ item.unmatched_blocker }}</p>{% endif %}
+        <form method="post" action="{{ url_for('review_item', import_id=job.import_id) }}">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="candidate_id" value="{{ item.candidate_id }}">
+          <input type="hidden" name="candidate_revision" value="{{ item.candidate_revision }}">
+          {% if not item.unmatched_blocker and item.decision != "accept_unmatched" %}<button name="decision" value="accept_unmatched" type="submit">Als neue Buchung übernehmen (ohne Bankreferenz)</button>{% endif %}
+          {% if item.related_event and item.decision != "link" %}<button name="decision" value="link" type="submit">Bestehender Buchung zuordnen</button>{% endif %}
+          {% if item.decision != "ignore" %}<button name="decision" value="ignore" type="submit">Ignorieren (nicht buchen)</button>{% endif %}
+        </form>{% elif item.status == "needs_review" %}<p><strong>Prüfung nötig – dieser Vorgangstyp ist noch nicht zur Übernahme freigegeben.</strong></p>{% if not item.decision_status %}<form method="post" action="{{ url_for('review_item', import_id=job.import_id) }}">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="candidate_id" value="{{ item.candidate_id }}">
+          <input type="hidden" name="candidate_revision" value="{{ item.candidate_revision }}">
+          <button name="decision" value="ignore" type="submit">Ignorieren (nicht buchen)</button>
+        </form>{% endif %}{% else %}<form method="post" action="{{ url_for('review_item', import_id=job.import_id) }}">
           <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="candidate_id" value="{{ item.candidate_id }}">
           <input type="hidden" name="candidate_revision" value="{{ item.candidate_revision }}">
@@ -122,17 +140,24 @@
   {% if commit_report %}
     <h2>Übernahmebericht</h2>
     <p>Gespeicherte Vorgänge: {{ commit_report.event_ids|join(", ") or "keine" }} · Datenrevision {{ commit_report.data_revision }}</p>
+    <form method="post" action="{{ url_for('preview_rollback_route') }}">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="import_id" value="{{ job.import_id }}">
+      <input type="hidden" name="return_to" value="{{ url_for('job_page', job_id=job.job_id) }}">
+      <button type="submit">Diesen Import zurücknehmen (Vorschau)</button>
+    </form>
   {% elif has_preview and job.state == 'needs_review' %}
+    <div id="commit-area">
+    {% if bulk_accepted is not none %}<p id="bulk-accepted" class="notice" role="status">{{ bulk_accepted }} Kandidat{% if bulk_accepted != 1 %}en{% endif %} angenommen. Noch nicht gebucht – jetzt prüfen und übernehmen.</p>{% endif %}
     <form method="post" action="{{ url_for('commit_import', import_id=job.import_id) }}">
       <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="preview_revision" value="{{ preview_revision }}">
       <input type="hidden" name="request_id" value="web-{{ job.import_id }}-{{ preview_revision }}">
-      <button type="submit" {% if summary.unresolved or summary.undecided or summary.events == 0 %}disabled{% endif %}>Übernehmen</button>
+      <button type="submit" {% if stale_preview or summary.unresolved or summary.undecided or summary.events == 0 %}disabled{% endif %}>Übernehmen</button>
       {% if summary.unresolved %}<p class="warning">Vor der Übernahme müssen alle unvollständigen Kandidaten, offenen Zuordnungen und Konflikte geklärt sein.</p>{% endif %}
       {% if summary.undecided %}<p id="undecided-hint" class="check-point">Noch {{ summary.undecided }} Kandidat{% if summary.undecided != 1 %}en{% endif %} ohne Entscheidung: Bei jedem rot markierten Kandidaten „Kandidat prüfen / annehmen“ oder „Ignorieren“ wählen, dann übernehmen.</p>{% endif %}
     </form>
+    </div>
   {% endif %}
   <p><a href="{{ url_for('index') }}">Weiteres PDF prüfen</a></p>
-  <footer>Branch: {{ branch }} · Commit: {{ commit }} · Datenbankprofil: {{ profile }}</footer>
-</body>
-</html>
+{% endblock %}

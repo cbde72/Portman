@@ -1,12 +1,13 @@
 """Kleine SQLite-Migrations- und Persistenzbasis; kein vollständiger Importservice."""
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from datetime import datetime
 from importlib.resources import files
 from hashlib import sha256
 import json
 from pathlib import Path
+import re
 import sqlite3
 from typing import Iterator
 from uuid import uuid4
@@ -17,8 +18,20 @@ from portman_v10.infrastructure.sqlite_decimal import register_decimal_collation
 from portman_v10.application.contracts import (
     Account, AccountIdentifier, AccountInput, AccountPage, ApplicationError,
     ErrorCode, Instrument, InstrumentIdentifier, InstrumentInput, InstrumentPage,
-    OpeningBalance, OpeningBalanceInput, Document, ImportJob, ImportDocumentResult,
+    OpeningBalance, OpeningBalanceInput, Document, ImportJob, ImportPage, ImportSummary, ImportDocumentResult,
+    BalanceLine, Overview,
 )
+
+
+def _valid_isin(value: str) -> bool:
+    if not re.fullmatch(r"[A-Z]{2}[A-Z0-9]{9}[0-9]", value):
+        return False
+    expanded = "".join(str(ord(char) - 55) if char.isalpha() else char for char in value)
+    checksum = 0
+    for index, char in enumerate(expanded):
+        digit = int(char) * (2 if (len(expanded) - index) % 2 == 0 else 1)
+        checksum += digit // 10 + digit % 10
+    return checksum % 10 == 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -428,7 +441,8 @@ class SQLiteStore:
                     raise ApplicationError(ErrorCode.REQUEST_ID_REUSED, "request_id wurde bereits für eine andere Eingabe verwendet")
                 raw = json.loads(operation["result_text"])
                 return CommitReport(raw["import_id"], tuple(raw["event_ids"]), raw["data_revision"], True,
-                                    tuple(raw.get("created_event_ids", ())), tuple(raw.get("linked_event_ids", ())))
+                                    tuple(raw.get("created_event_ids", ())), tuple(raw.get("linked_event_ids", ())),
+                                    tuple(raw.get("created_instrument_ids", ())))
 
             stored = connection.execute("SELECT revision, data_revision FROM import_previews WHERE import_id=?", (command.import_id,)).fetchone()
             current_revision = connection.execute("SELECT data_revision FROM app_state WHERE singleton=1").fetchone()[0]
@@ -465,9 +479,24 @@ class SQLiteStore:
                         raise ApplicationError(ErrorCode.VALIDATION_ERROR, "Wiederimport benötigt das bereits verknüpfte Zielereignis")
                     candidates.append((item, action, decision.get("target_id")))
                     continue
-                if item.conflicts and not (action == "link" and all(value.code in {ErrorCode.POSSIBLE_DUPLICATE, ErrorCode.SOURCE_CONFLICT} for value in item.conflicts)):
+                if item.conflicts and not (action == "link" and all(value.code in {ErrorCode.POSSIBLE_DUPLICATE, ErrorCode.SOURCE_CONFLICT} for value in item.conflicts)) \
+                        and not (action == "accept_unmatched" and self._can_accept_unmatched_finanzreport(item)):
                     raise ApplicationError(ErrorCode.VALIDATION_ERROR, "Widersprüchliche Kandidaten können nicht übernommen werden")
-                if item.missing_fields or item.review_status != "complete_candidate":
+                unmatched_finanzreport = action == "accept_unmatched" and self._can_accept_unmatched_finanzreport(item)
+                if unmatched_finanzreport:
+                    movement = item.movements[0]
+                    account = connection.execute("SELECT kind,currency FROM accounts WHERE account_id=?", (movement.account_id,)).fetchone()
+                    if account is None or account["kind"] != "cash" or account["currency"] != movement.currency:
+                        raise ApplicationError(ErrorCode.UNRESOLVED_ACCOUNT, "Finanzreport-Ziel muss ein Geldkonto mit derselben Währung sein")
+                linked_finanzreport_match = (
+                    action == "link"
+                    and (item.plugin_id, item.handler_id, item.kind) == ("comdirect.finanzreport", "finanzreport", "CASH_BOOKING")
+                    and set(item.missing_fields) == {"Bankreferenz fehlt oder ist nicht eindeutig; Dubletten können nicht sicher automatisch zugeordnet werden"}
+                    and item.review_status == "needs_review"
+                    and decision.get("target_id")
+                    and any(value.code == ErrorCode.POSSIBLE_DUPLICATE and value.related_event_id == decision.get("target_id") for value in item.conflicts)
+                )
+                if (item.missing_fields or item.review_status != "complete_candidate") and not (unmatched_finanzreport or linked_finanzreport_match):
                     raise ApplicationError(ErrorCode.VALIDATION_ERROR, "Unvollständige Kandidaten können nicht übernommen werden")
                 booking_kinds = {
                     ("user.comdirect-ertraege", "wertpapierkauf"): {"BUY"},
@@ -475,10 +504,11 @@ class SQLiteStore:
                     ("user.comdirect-ertraege", "einloesung"): {"REDEMPTION"},
                     ("user.comdirect-ertraege", "dividendengutschrift"): {"DIVIDEND"},
                     ("user.comdirect-ertraege", "ertragsgutschrift"): {"DIVIDEND"},
+                    ("comdirect.finanzreport", "finanzreport"): {"CASH_BOOKING"},
                 }
                 if item.plugin_id is not None and item.kind not in booking_kinds.get((item.plugin_id, item.handler_id), set()):
                     raise ApplicationError(ErrorCode.UNSUPPORTED_DOCUMENT, "Für diesen Parserhandler und Vorgangstyp ist noch kein sicherer V10-Übernahmepfad implementiert")
-                if action not in {"accept", "link"}:
+                if action not in {"accept", "accept_unmatched", "link"}:
                     raise ApplicationError(ErrorCode.VALIDATION_ERROR, "Kandidat hat keine gültige Übernahmeentscheidung")
                 candidates.append((item, action, decision.get("target_id")))
 
@@ -496,9 +526,9 @@ class SQLiteStore:
                 if action == "link" and not target_id:
                     raise ApplicationError(ErrorCode.VALIDATION_ERROR, "Verknüpfungsentscheidung benötigt ein Zielereignis")
 
-            created, linked = [], []
+            created, linked, created_instruments = [], [], []
             now = datetime.now().astimezone().isoformat()
-            for item, action, target_id in candidates:
+            for candidate_index, (item, action, target_id) in enumerate(candidates):
                 reference = dict(item.references).get("bank_reference")
                 reference_status = dict(item.references).get("bank_reference_status")
                 cash_accounts = {movement.account_id for movement in item.movements if movement.movement_type == "cash" and movement.account_id}
@@ -518,7 +548,7 @@ class SQLiteStore:
                         raise ApplicationError(ErrorCode.SOURCE_CONFLICT, "Verknüpfungsziel fehlt oder hat einen anderen Vorgangstyp")
                     self._link_complement(connection, item, event_id, command.import_id, now)
                     linked.append(event_id)
-                elif item.disposition in {"conflict", "complement", "existing"}:
+                elif item.disposition in {"conflict", "complement", "existing"} and action != "accept_unmatched":
                     related = next((value.related_event_id for value in item.conflicts if value.related_event_id), None)
                     if not related:
                         raise ApplicationError(ErrorCode.POSSIBLE_DUPLICATE, "Vorschau enthält einen ungeklärten Dublettenhinweis")
@@ -530,17 +560,446 @@ class SQLiteStore:
                     linked.append(existing)
                 else:
                     event_id = uuid4().hex
+                    item, new_instruments = self._resolve_import_instruments(connection, item, command.import_id, now)
+                    candidates[candidate_index] = (item, action, target_id)
+                    created_instruments.extend(new_instruments)
                     self._insert_import_event(connection, item, event_id, command.import_id, now, reference, context, import_row)
                     created.append(event_id)
 
             revision = self._bump_metadata_revision(connection, refresh_index_revision=False)
             self._refresh_touched_balance_index(connection, candidates, created, revision)
-            report = CommitReport(command.import_id, tuple(dict.fromkeys((*created, *linked))), revision, False, tuple(created), tuple(linked))
+            report = CommitReport(command.import_id, tuple(dict.fromkeys((*created, *linked))), revision, False,
+                                  tuple(created), tuple(linked), tuple(dict.fromkeys(created_instruments)))
             result = json.dumps({"import_id": report.import_id, "event_ids": report.event_ids, "data_revision": report.data_revision,
-                                 "created_event_ids": report.created_event_ids, "linked_event_ids": report.linked_event_ids}, sort_keys=True)
+                                 "created_event_ids": report.created_event_ids, "linked_event_ids": report.linked_event_ids,
+                                 "created_instrument_ids": report.created_instrument_ids}, sort_keys=True)
             connection.execute("INSERT INTO operations(request_id, command_type, input_hash, result_text, completed_at) VALUES (?, 'commit_import', ?, ?, ?)", (command.request_id, input_hash, result, now))
             connection.execute("UPDATE imports SET status='committed' WHERE import_id=?", (command.import_id,))
+            connection.execute("UPDATE import_jobs SET state='completed',progress=100,completed_documents=document_count,revision=revision+1,updated_at=? WHERE import_id=?",
+                               (now, command.import_id))
             return report
+
+    @staticmethod
+    def _can_accept_unmatched_finanzreport(item):
+        """Explizite Neuanlage ohne Bankreferenz, nur für belegte Einzel-Geldzeilen."""
+        expected_missing = "Bankreferenz fehlt oder ist nicht eindeutig; Dubletten können nicht sicher automatisch zugeordnet werden"
+        if (item.plugin_id, item.handler_id, item.kind) != ("comdirect.finanzreport", "finanzreport", "CASH_BOOKING"):
+            return False
+        if item.warnings or item.review_status != "needs_review" or set(item.missing_fields) != {expected_missing}:
+            return False
+        if dict(item.references).get("bank_reference_status") == "RECOGNIZED" or dict(item.references).get("bank_reference"):
+            return False
+        if item.conflicts:
+            return False
+        if len(item.movements) != 1:
+            return False
+        movement = item.movements[0]
+        if (movement.movement_type != "cash" or movement.amount is None or movement.amount.text == "0"
+                or not movement.currency or not movement.account_id or not movement.date or movement.status != "ACTUAL"):
+            return False
+        return True
+
+    def preview_rollback(self, selection):
+        """Erstellt und speichert einen revisionsgebundenen, unverändernden Rücknahmeplan."""
+        from portman_v10.application.contracts import ApplicationError, ErrorCode, RollbackContribution, RollbackPreview
+
+        plan_id = uuid4().hex
+        try:
+            with self.transaction() as connection:
+                if selection.all_imports:
+                    import_ids = tuple(row[0] for row in connection.execute(
+                        "SELECT import_id FROM imports WHERE status='committed' ORDER BY import_id"))
+                else:
+                    import_ids = tuple(sorted(set(selection.import_ids)))
+                    for import_id in import_ids:
+                        row = connection.execute("SELECT status FROM imports WHERE import_id=?", (import_id,)).fetchone()
+                        if row is None:
+                            raise ApplicationError(ErrorCode.NOT_FOUND, f"Import nicht gefunden: {import_id}")
+                        if row[0] != "committed":
+                            raise ApplicationError(ErrorCode.VALIDATION_ERROR, f"Import {import_id} ist nicht mehr übernahmeaktiv")
+                if not import_ids:
+                    raise ApplicationError(ErrorCode.VALIDATION_ERROR, "Die Rücknahmeauswahl enthält keine aktiven Importe")
+                revision = connection.execute("SELECT data_revision FROM app_state WHERE singleton=1").fetchone()[0]
+                details = self._rollback_impact(connection, import_ids)
+                connection.execute("DELETE FROM rollback_plans WHERE data_revision<>?", (revision,))
+                connection.execute("INSERT INTO rollback_plans(plan_id,data_revision,import_ids_json,created_at) VALUES(?,?,?,?)",
+                                   (plan_id, revision, json.dumps(import_ids), datetime.now().astimezone().isoformat()))
+                return RollbackPreview(plan_id, revision, import_ids, details["events"], details["dependencies"],
+                                       details["contributions"], details["document_links"], details["instruments"],
+                                       details["balance_impacts"], details["removable_instruments"],
+                                       tuple(RollbackContribution(**value) for value in details["contribution_details"]))
+        except ApplicationError:
+            raise
+        except sqlite3.Error as error:
+            raise ApplicationError(ErrorCode.STORAGE_ERROR, "Rücknahmevorschau konnte nicht erstellt werden") from error
+
+    @staticmethod
+    def _rollback_impact(connection, import_ids):
+        marks = ",".join("?" for _ in import_ids)
+        contributions = connection.execute(
+            f"SELECT * FROM import_contributions WHERE import_id IN ({marks}) ORDER BY contribution_id", import_ids).fetchall()
+        events = tuple(sorted({row["event_id"] for row in contributions if row["event_id"]}))
+        dependencies = []
+        removable_events = []
+        retained_events = set()
+        remove_position_ids = set()
+        if events:
+            for event_id in events:
+                selected_creation = connection.execute(
+                    "SELECT 1 FROM import_contributions WHERE event_id=? AND target_type='event' AND action='create' LIMIT 1",
+                    (event_id,)).fetchone()
+                remaining = connection.execute(
+                    f"SELECT 1 FROM import_contributions c LEFT JOIN imports i ON i.import_id=c.import_id WHERE c.event_id=? AND (c.source_kind='manual' OR (c.import_id NOT IN ({marks}) AND i.status='committed')) LIMIT 1",
+                    (event_id, *import_ids)).fetchone()
+                if remaining:
+                    retained_events.add(event_id)
+                    continue
+                if not selected_creation:
+                    retained_events.add(event_id)
+                    continue
+                opening = connection.execute("SELECT 1 FROM opening_entries WHERE event_id=?", (event_id,)).fetchone()
+                correction = connection.execute("SELECT event_id FROM events WHERE correction_of_event_id=? ORDER BY event_id", (event_id,)).fetchall()
+                allocation = connection.execute("SELECT 1 FROM lot_allocations WHERE event_id=? LIMIT 1", (event_id,)).fetchone()
+                manual = connection.execute(
+                    f"SELECT 1 FROM import_contributions c LEFT JOIN imports i ON i.import_id=c.import_id WHERE c.event_id=? AND (c.source_kind='manual' OR (c.import_id NOT IN ({marks}) AND i.status='committed')) LIMIT 1",
+                    (event_id, *import_ids)).fetchone()
+                if opening:
+                    dependencies.append(f"Vorgang {event_id}: manueller Eröffnungsbestand bleibt erhalten und blockiert die Löschung")
+                if correction:
+                    dependencies.append(f"Vorgang {event_id}: wird von späterer Korrektur {correction[0][0]} referenziert")
+                if allocation:
+                    dependencies.append(f"Vorgang {event_id}: besitzt Anschaffungstranchen-/Transferzuordnungen ohne selektive Provenienz")
+                if manual:
+                    dependencies.append(f"Vorgang {event_id}: enthält manuell oder durch verbleibende Quellen getragene Beiträge")
+                if not (opening or correction or allocation or manual):
+                    removable_events.append(event_id)
+
+        for contribution in contributions:
+            if contribution["target_type"] != "event" or not contribution["field_name"].startswith("position:") or not contribution["event_id"]:
+                continue
+            position_id = contribution["field_name"].split(":", 1)[1]
+            remaining_position_source = connection.execute(
+                f"SELECT 1 FROM import_contributions c LEFT JOIN imports i ON i.import_id=c.import_id WHERE c.event_id=? AND c.field_name=? AND (c.source_kind='manual' OR (c.import_id NOT IN ({marks}) AND i.status='committed')) LIMIT 1",
+                (contribution["event_id"], contribution["field_name"], *import_ids)).fetchone()
+            if not remaining_position_source:
+                allocation = connection.execute("SELECT event_id FROM lot_allocations WHERE position_id=? LIMIT 1", (position_id,)).fetchone()
+                if allocation:
+                    dependencies.append(f"Position {position_id}: durch Anschaffungstranche/Transfer {allocation[0]} referenziert")
+                else:
+                    remove_position_ids.add(position_id)
+
+        for event_id in removable_events:
+            remove_position_ids.update(row[0] for row in connection.execute("SELECT position_id FROM positions WHERE event_id=?", (event_id,)))
+
+        # Migration 0006 kann auf Datenstände treffen, deren ältere Imports noch keine
+        # positionspezifischen Beiträge geschrieben haben. In dem Fall schützt eine
+        # verbleibende Ereignis-/Belegquelle alle Positionen; eine manuelle Feldnotiz allein
+        # schützt sie nicht vor dem Wegfall des selektierten Importursprungs.
+        for event_id in events:
+            has_position_sources = connection.execute(
+                "SELECT 1 FROM import_contributions WHERE event_id=? AND field_name LIKE 'position:%' LIMIT 1", (event_id,)).fetchone()
+            if has_position_sources or event_id in removable_events:
+                continue
+            selected_creator = connection.execute(
+                f"SELECT 1 FROM import_contributions WHERE event_id=? AND target_type='event' AND action='create' AND import_id IN ({marks}) LIMIT 1",
+                (event_id, *import_ids)).fetchone()
+            if not selected_creator:
+                continue
+            other_position_support = connection.execute(
+                f"SELECT 1 FROM import_contributions c LEFT JOIN imports i ON i.import_id=c.import_id WHERE c.event_id=? AND c.import_id NOT IN ({marks}) AND i.status='committed' AND (c.field_name='event' OR c.field_name='evidence' OR c.field_name LIKE 'position:%') LIMIT 1",
+                (event_id, *import_ids)).fetchone()
+            manual_position_support = connection.execute(
+                "SELECT 1 FROM import_contributions WHERE event_id=? AND source_kind='manual' AND (field_name='event' OR field_name LIKE 'position:%') LIMIT 1",
+                (event_id,)).fetchone()
+            if not other_position_support and not manual_position_support:
+                remove_position_ids.update(row[0] for row in connection.execute("SELECT position_id FROM positions WHERE event_id=?", (event_id,)))
+
+        # Nur instrumenteigenständige Herkunftsbeiträge markieren. Die tatsächliche Löschfreigabe
+        # prüft beim Ausführen zusätzlich Revision und jede Fremdreferenz unter BEGIN IMMEDIATE.
+        instruments = {row["instrument_id"] for row in contributions if row["target_type"] == "instrument" and row["instrument_id"]}
+        if remove_position_ids:
+            position_marks = ",".join("?" for _ in remove_position_ids)
+            instruments.update(row[0] for row in connection.execute(
+                f"SELECT DISTINCT instrument_id FROM positions WHERE position_id IN ({position_marks}) AND instrument_id IS NOT NULL", tuple(sorted(remove_position_ids))))
+        instruments = tuple(sorted(instruments))
+        removable_instruments = []
+        for instrument_id in instruments:
+            origin = connection.execute(
+                "SELECT 1 FROM import_contributions WHERE instrument_id=? AND target_type='instrument' AND action='create' LIMIT 1",
+                (instrument_id,)).fetchone()
+            if not origin:
+                continue
+            remaining_origin = connection.execute(
+                f"SELECT 1 FROM import_contributions c JOIN imports i ON i.import_id=c.import_id WHERE c.instrument_id=? AND c.target_type='instrument' AND c.action='create' AND c.import_id NOT IN ({marks}) AND i.status='committed' LIMIT 1",
+                (instrument_id, *import_ids)).fetchone()
+            if remove_position_ids:
+                position_marks = ",".join("?" for _ in remove_position_ids)
+                used = connection.execute(f"SELECT 1 FROM positions WHERE instrument_id=? AND position_id NOT IN ({position_marks}) LIMIT 1", (instrument_id,*sorted(remove_position_ids))).fetchone()
+            else:
+                used = connection.execute("SELECT 1 FROM positions WHERE instrument_id=? LIMIT 1", (instrument_id,)).fetchone()
+            lot = connection.execute("SELECT 1 FROM acquisition_lots WHERE instrument_id=? LIMIT 1", (instrument_id,)).fetchone()
+            metadata = connection.execute("SELECT revision FROM instruments WHERE instrument_id=?", (instrument_id,)).fetchone()
+            if not (remaining_origin or used or lot) and metadata and metadata[0] == 1:
+                removable_instruments.append(instrument_id)
+            elif used:
+                # An event position sourced by one of the selected imports disappears only when
+                # its event is deletable. Re-evaluate this case after event decisions below.
+                if not any(event_id in removable_events for event_id in events):
+                    continue
+
+        link_ids = tuple(sorted({f"{row['event_id']}:{row['document_id']}" for row in contributions if row["event_id"] and row["document_id"]}))
+        impacts = {}
+        if remove_position_ids:
+            position_marks = ",".join("?" for _ in remove_position_ids)
+            for row in connection.execute(
+                f"SELECT p.event_id,p.account_id,p.currency,p.instrument_id,p.amount_decimal,p.quantity_decimal "
+                f"FROM positions p WHERE p.position_id IN ({position_marks})", tuple(sorted(remove_position_ids))):
+                asset = f"CURRENCY:{row['currency']}" if row["currency"] else f"INSTRUMENT:{row['instrument_id']}"
+                value = row["amount_decimal"] if row["currency"] else row["quantity_decimal"]
+                key = (row["account_id"], asset)
+                impacts.setdefault(key, []).append(value)
+        from portman_v10.domain.values import sum_decimal_text
+        balance_impacts = tuple(f"{account}|{asset}|{sum_decimal_text(values)}" for (account, asset), values in sorted(impacts.items()))
+        return {"events": events, "removable_events": tuple(sorted(removable_events)), "dependencies": tuple(sorted(set(dependencies))),
+                "remove_position_ids": tuple(sorted(remove_position_ids)),
+                "contributions": tuple(row["contribution_id"] for row in contributions),
+                "contribution_details": tuple({"contribution_id": row["contribution_id"], "import_id": row["import_id"],
+                                                "event_id": row["event_id"], "document_id": row["document_id"],
+                                                "target_type": row["target_type"], "field_name": row["field_name"],
+                                                "action": row["action"], "value_text": row["value_text"]} for row in contributions),
+                "document_links": link_ids, "instruments": instruments,
+                "balance_impacts": balance_impacts, "removable_instruments": tuple(sorted(removable_instruments))}
+
+    def execute_rollback(self, command):
+        """Nimmt selektierte Importbeiträge samt Index atomar zurück; request_id ist dauerhaft."""
+        from portman_v10.application.contracts import ApplicationError, ErrorCode, RollbackReport
+
+        request_text = json.dumps({"plan_id": command.plan_id, "expected_revision": command.expected_revision}, sort_keys=True, separators=(",", ":"))
+        input_hash = sha256(request_text.encode()).hexdigest()
+        try:
+            with self.transaction() as connection:
+                old = connection.execute("SELECT command_type,input_hash,result_text FROM operations WHERE request_id=?", (command.request_id,)).fetchone()
+                if old:
+                    if old["command_type"] != "rollback_imports" or old["input_hash"] != input_hash:
+                        raise ApplicationError(ErrorCode.REQUEST_ID_REUSED, "request_id wurde bereits für eine andere Eingabe verwendet")
+                    data = json.loads(old["result_text"])
+                    return RollbackReport(tuple(data["removed_import_ids"]), tuple(data["retained_event_ids"]), data["data_revision"], True,
+                                          tuple(data.get("removed_event_ids", ())), tuple(data.get("removed_instrument_ids", ())),
+                                          tuple(data.get("removed_position_ids", ())))
+                plan = connection.execute("SELECT data_revision,import_ids_json FROM rollback_plans WHERE plan_id=?", (command.plan_id,)).fetchone()
+                current = connection.execute("SELECT data_revision FROM app_state WHERE singleton=1").fetchone()[0]
+                if plan is None or plan["data_revision"] != command.expected_revision or current != command.expected_revision:
+                    raise ApplicationError(ErrorCode.STALE_REVISION, "Rücknahmeplan ist veraltet; bitte neu vorschauen")
+                import_ids = tuple(json.loads(plan["import_ids_json"]))
+                details = self._rollback_impact(connection, import_ids)
+                if details["dependencies"]:
+                    raise ApplicationError(ErrorCode.DEPENDENCY_CONFLICT, "; ".join(details["dependencies"]))
+                selected_events = set(details["events"])
+                contribution_rows = connection.execute(
+                    f"SELECT * FROM import_contributions WHERE import_id IN ({','.join('?' for _ in import_ids)}) ORDER BY contribution_id", import_ids).fetchall()
+                removed_events = set(details["removable_events"])
+                # Felder werden unabhängig von der Lebensdauer des Vorgangs zurückgenommen.
+                # Frühere Herkunftsmarken bleiben relevant, wenn ein späterer Beleg dasselbe
+                # Feld getragen hat und anschließend seinerseits zurückgenommen wird.
+                affected_fields = {(row["event_id"], row["field_name"]) for row in contribution_rows if row["event_id"]}
+                placeholders = ",".join("?" for _ in import_ids)
+                for event_id, field in affected_fields:
+                    remaining = connection.execute(
+                        f"SELECT 1 FROM import_contributions c LEFT JOIN imports i ON i.import_id=c.import_id "
+                        f"WHERE c.event_id=? AND c.field_name=? AND (c.import_id IS NULL OR (c.import_id NOT IN ({placeholders}) AND i.status='committed')) LIMIT 1",
+                        (event_id, field, *import_ids)).fetchone()
+                    if remaining:
+                        continue
+                    origins = connection.execute(
+                        "SELECT * FROM import_contributions WHERE event_id=? AND field_name=? AND action IN ('create','set') AND value_text IS NOT NULL ORDER BY created_at DESC, contribution_id DESC",
+                        (event_id, field)).fetchall()
+                    if not origins:
+                        continue
+                    origin = origins[0]
+                    if field in {"original_text", "bank_reference"}:
+                        current_row = connection.execute(f"SELECT {field} FROM events WHERE event_id=?", (event_id,)).fetchone()
+                        if current_row and current_row[0] == origin["value_text"]:
+                            if field == "bank_reference":
+                                connection.execute("UPDATE events SET bank_reference=?,reference_context=NULL,revision=revision+1 WHERE event_id=?", (origin["previous_value_text"], event_id))
+                            else:
+                                connection.execute("UPDATE events SET original_text=?,revision=revision+1 WHERE event_id=?", (origin["previous_value_text"], event_id))
+                    elif field.startswith("component:"):
+                        component_id = field.split(":", 1)[1]
+                        value = connection.execute("SELECT amount_decimal||'|'||currency FROM event_components WHERE component_id=?", (component_id,)).fetchone()
+                        if value and value[0] == origin["value_text"]:
+                            connection.execute("DELETE FROM event_components WHERE component_id=?", (component_id,))
+
+                # Entferne Beleglinks nur, wenn keine verbleibende Importquelle diesen Link trägt.
+                for row in contribution_rows:
+                    if row["event_id"] and row["document_id"]:
+                        other = connection.execute(
+                            "SELECT 1 FROM import_contributions WHERE event_id=? AND document_id=? AND (import_id IS NULL OR import_id NOT IN (" + ",".join("?" for _ in import_ids) + ")) LIMIT 1",
+                            (row["event_id"], row["document_id"], *import_ids)).fetchone()
+                        if not other:
+                            connection.execute("DELETE FROM event_documents WHERE event_id=? AND document_id=?", (row["event_id"], row["document_id"]))
+                # Import, der ein gemeinsames Ereignis angelegt hat, bleibt als inaktive
+                # Herkunftsmarke erhalten, bis auch die letzte aktive Quelle zurückgenommen ist.
+                retained_creation_ids = tuple(event_id for event_id in selected_events - removed_events)
+                retained_instrument_origins = tuple(instrument_id for instrument_id in details["instruments"] if instrument_id not in details["removable_instruments"])
+                keep_clauses, keep_params = [], []
+                if retained_creation_ids:
+                    keep_clauses.append("(target_type='event' AND action='create' AND event_id IN (" + ",".join("?" for _ in retained_creation_ids) + "))")
+                    keep_params.extend(retained_creation_ids)
+                if retained_instrument_origins:
+                    keep_clauses.append("(target_type='instrument' AND action='create' AND instrument_id IN (" + ",".join("?" for _ in retained_instrument_origins) + "))")
+                    keep_params.extend(retained_instrument_origins)
+                # Unveränderte Ursprungswerte bleiben als Provenienz erhalten, solange
+                # eine verbleibende aktive Quelle dasselbe Feld noch trägt.
+                retained_fields = []
+                for event_id, field in affected_fields:
+                    has_active = connection.execute(
+                        f"SELECT 1 FROM import_contributions c JOIN imports i ON i.import_id=c.import_id "
+                        f"WHERE c.event_id=? AND c.field_name=? AND i.status='committed' AND c.import_id NOT IN ({placeholders}) LIMIT 1",
+                        (event_id, field, *import_ids)).fetchone()
+                    if has_active:
+                        retained_fields.append((event_id, field))
+                if retained_fields:
+                    for event_id, field in retained_fields:
+                        keep_clauses.append("(event_id=? AND field_name=? AND action IN ('create','set'))")
+                        keep_params.extend((event_id, field))
+                if keep_clauses:
+                    connection.execute(f"DELETE FROM import_contributions WHERE import_id IN ({','.join('?' for _ in import_ids)}) AND NOT ({' OR '.join(keep_clauses)})", (*import_ids,*keep_params))
+                else:
+                    connection.execute(f"DELETE FROM import_contributions WHERE import_id IN ({','.join('?' for _ in import_ids)})", import_ids)
+
+                # Nur Events ohne verbleibende Evidenz löschen. SQLite-FKs und explizite
+                # Abhängigkeitsprüfung verhindern das Entfernen manueller/gekoppelter Daten.
+                for position_id in details["remove_position_ids"]:
+                    connection.execute("DELETE FROM positions WHERE position_id=?", (position_id,))
+                for event_id in sorted(removed_events):
+                    remaining = connection.execute("SELECT 1 FROM import_contributions c LEFT JOIN imports i ON i.import_id=c.import_id WHERE c.event_id=? AND (c.source_kind='manual' OR i.status='committed') LIMIT 1", (event_id,)).fetchone()
+                    if remaining:
+                        continue
+                    connection.execute("DELETE FROM import_contributions WHERE event_id=?", (event_id,))
+                    connection.execute("DELETE FROM event_documents WHERE event_id=?", (event_id,))
+                    connection.execute("DELETE FROM event_components WHERE event_id=?", (event_id,))
+                    connection.execute("DELETE FROM positions WHERE event_id=?", (event_id,))
+                    connection.execute("DELETE FROM events WHERE event_id=?", (event_id,))
+
+                # Alte Instrumentindexzeilen werden gemeinsam mit der Neuberechnung entfernt.
+                connection.execute("DELETE FROM balance_index")
+                removed_instruments = []
+                for instrument_id in details["removable_instruments"]:
+                    # Prüft Herkunft und Nutzungen in der gesperrten Transaktion erneut.
+                    used = connection.execute("SELECT 1 FROM positions WHERE instrument_id=? UNION ALL SELECT 1 FROM acquisition_lots WHERE instrument_id=? LIMIT 1", (instrument_id, instrument_id)).fetchone()
+                    instrument = connection.execute("SELECT revision FROM instruments WHERE instrument_id=?", (instrument_id,)).fetchone()
+                    if used or not instrument or instrument[0] != 1:
+                        continue
+                    connection.execute("DELETE FROM instrument_identifiers WHERE instrument_id=?", (instrument_id,))
+                    connection.execute("DELETE FROM import_contributions WHERE instrument_id=?", (instrument_id,))
+                    connection.execute("DELETE FROM instruments WHERE instrument_id=?", (instrument_id,))
+                    removed_instruments.append(instrument_id)
+
+                connection.execute(f"UPDATE imports SET status='rolled_back' WHERE import_id IN ({','.join('?' for _ in import_ids)})", import_ids)
+                revision = self._bump_metadata_revision(connection, refresh_index_revision=False)
+                self._rebuild_balance_index(connection, revision)
+                retained = tuple(sorted(selected_events - set(removed_events)))
+                report = RollbackReport(import_ids, retained, revision, False, tuple(sorted(removed_events)),
+                                        tuple(removed_instruments), details["remove_position_ids"])
+                result = json.dumps({"removed_import_ids": report.removed_import_ids, "retained_event_ids": report.retained_event_ids,
+                                     "data_revision": revision, "removed_event_ids": report.removed_event_ids,
+                                     "removed_instrument_ids": report.removed_instrument_ids,
+                                     "removed_position_ids": report.removed_position_ids}, sort_keys=True)
+                connection.execute("INSERT INTO operations(request_id,command_type,input_hash,result_text,completed_at) VALUES(?,'rollback_imports',?,?,?)",
+                                   (command.request_id, input_hash, result, datetime.now().astimezone().isoformat()))
+                connection.execute("DELETE FROM rollback_plans WHERE plan_id=?", (command.plan_id,))
+                return report
+        except ApplicationError:
+            raise
+        except Exception as error:
+            raise ApplicationError(ErrorCode.STORAGE_ERROR, "Rücknahme wurde vollständig zurückgerollt") from error
+
+    @staticmethod
+    def _rebuild_balance_index(connection, revision):
+        """Rekonstruiert alle betroffenen Reihen aus den verbleibenden Positionen in derselben Transaktion."""
+        touched = connection.execute(
+            "SELECT DISTINCT account_id,currency,instrument_id FROM positions UNION SELECT DISTINCT p.account_id,p.currency,p.instrument_id FROM opening_entries o JOIN positions p ON p.position_id=o.position_id").fetchall()
+        connection.execute("DELETE FROM balance_index")
+        keys = {(row["account_id"], f"CURRENCY:{row['currency']}" if row["currency"] else f"INSTRUMENT:{row['instrument_id']}",
+                 row["currency"], row["instrument_id"]) for row in touched}
+        SQLiteStore._refresh_balance_index_assets(connection, keys, revision)
+
+    def _resolve_import_instruments(self, connection, item, import_id, now):
+        """Resolve or create quantity instruments inside the enclosing commit transaction."""
+        from portman_v10.application.contracts import ApplicationError, ErrorCode
+
+        quantity_movements = [movement for movement in item.movements if movement.movement_type == "quantity"]
+        if not quantity_movements:
+            return item, ()
+        references = dict(item.references)
+        isin = references.get("security_isin")
+        wkn = references.get("security_wkn")
+        name = references.get("security_name")
+        if (item.plugin_id, item.handler_id, item.kind) not in {
+                ("user.comdirect-ertraege", "wertpapierkauf", "BUY"),
+                ("user.comdirect-ertraege", "wertpapierverkauf", "SELL"),
+                ("user.comdirect-ertraege", "einloesung", "REDEMPTION"),
+        }:
+            raise ApplicationError(ErrorCode.UNSUPPORTED_DOCUMENT, "Automatische Instrumentanlage ist für diesen Parser-/Vorgangstyp nicht freigegeben")
+        if not isin and not wkn:
+            raise ApplicationError(ErrorCode.VALIDATION_ERROR, "Wertpapierbewegung benötigt eine belegte ISIN oder WKN")
+        if isin and not _valid_isin(isin):
+            raise ApplicationError(ErrorCode.VALIDATION_ERROR, "Belegte ISIN ist ungültig; Instrument wird nicht angelegt")
+
+        def matches(identifier_type, value):
+            if not value:
+                return ()
+            return tuple(row[0] for row in connection.execute(
+                "SELECT DISTINCT instrument_id FROM instrument_identifiers "
+                "WHERE provider='instrument' AND lower(identifier_type)=lower(?) AND lower(context)='standard' AND value=? ORDER BY instrument_id",
+                (identifier_type, value)))
+
+        isin_matches = matches("ISIN", isin)
+        wkn_matches = matches("WKN", wkn)
+        if len(isin_matches) > 1 or len(wkn_matches) > 1:
+            raise ApplicationError(ErrorCode.SOURCE_CONFLICT, "Mehrdeutige Instrumentzuordnung für die belegte ISIN/WKN")
+        if isin and not isin_matches and wkn_matches:
+            raise ApplicationError(ErrorCode.SOURCE_CONFLICT, "Belegte ISIN und WKN verweisen auf unterschiedliche Instrumente")
+        instrument_id = isin_matches[0] if isin_matches else wkn_matches[0] if not isin and wkn_matches else None
+        if isin_matches and wkn_matches and isin_matches[0] != wkn_matches[0]:
+            raise ApplicationError(ErrorCode.SOURCE_CONFLICT, "Belegte ISIN und WKN verweisen auf unterschiedliche Instrumente")
+        created = []
+        if instrument_id:
+            if item.instrument_resolution == "will_create" and isin_matches:
+                # Eine andere Übernahme kann die ISIN seit der Vorschau angelegt haben.
+                pass
+            row = connection.execute("SELECT name FROM instruments WHERE instrument_id=?", (instrument_id,)).fetchone()
+            if row is None:
+                raise ApplicationError(ErrorCode.SOURCE_CONFLICT, "Instrumentkennung verweist auf einen fehlenden Stammsatz")
+            stored_wkn = connection.execute(
+                "SELECT value FROM instrument_identifiers WHERE instrument_id=? AND provider='instrument' AND lower(identifier_type)='wkn' AND lower(context)='standard' ORDER BY value",
+                (instrument_id,)).fetchall()
+            if wkn and stored_wkn and (len(stored_wkn) != 1 or stored_wkn[0][0] != wkn):
+                raise ApplicationError(ErrorCode.SOURCE_CONFLICT, "Belegte ISIN/WKN widerspricht der vorhandenen Instrumentkennung")
+        else:
+            if not isin:
+                raise ApplicationError(ErrorCode.VALIDATION_ERROR, "Neue Instrumente werden nur anhand einer belegten ISIN angelegt")
+            if item.instrument_resolution != "will_create" or not name or not name.strip():
+                raise ApplicationError(ErrorCode.VALIDATION_ERROR, "Neue Instrumentanlage zurückgehalten: belegter Wertpapiername fehlt oder Vorschau ist nicht freigegeben")
+            instrument_id = uuid4().hex
+            connection.execute("INSERT INTO instruments(instrument_id,name,asset_type,revision) VALUES(?,?,?,1)",
+                               (instrument_id, name.strip(), "security"))
+            identifiers = [("ISIN", isin)]
+            if wkn:
+                identifiers.append(("WKN", wkn))
+            connection.executemany(
+                "INSERT INTO instrument_identifiers(identifier_id,instrument_id,provider,identifier_type,context,value) VALUES(?,?,'instrument',?,'standard',?)",
+                ((uuid4().hex, instrument_id, identifier_type, value) for identifier_type, value in identifiers))
+            connection.execute(
+                "INSERT INTO import_contributions(contribution_id,import_id,instrument_id,document_id,source_kind,target_type,field_name,action,value_text,created_at) VALUES(?,?,?,?,'import','instrument','instrument','create',?,?)",
+                (uuid4().hex, import_id, instrument_id, item.document_id,
+                 json.dumps({"name": name.strip(), "asset_type": "security", "isin": isin, "wkn": wkn}, ensure_ascii=False), now))
+            created.append(instrument_id)
+
+        movements = tuple(replace(movement, instrument_id=instrument_id) if movement.movement_type == "quantity" else movement
+                          for movement in item.movements)
+        resolved = replace(item, movements=movements, instrument_ids=(instrument_id,), instrument_resolution="existing")
+        return resolved, tuple(created)
 
     def _insert_import_event(self, connection, item, event_id, import_id, now, reference, context, import_row):
         dates = {date.meaning: date.value for date in item.dates}
@@ -551,6 +1010,10 @@ class SQLiteStore:
         completeness = "complete" if not item.missing_fields else "incomplete"
         connection.execute("INSERT INTO events(event_id, kind, booking_date, trade_date, value_date, original_text, completeness, revision, bank_reference, reference_context) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
                            (event_id, item.kind, booking_date.isoformat(), self._date(dates.get("trade_date")), self._date(dates.get("value_date")), item.original_text, completeness, reference.strip() if reference else None, context))
+        for field, value in (("original_text", item.original_text), ("bank_reference", reference.strip() if reference else None)):
+            if value is not None:
+                connection.execute("INSERT INTO import_contributions(contribution_id,import_id,event_id,document_id,source_kind,target_type,field_name,action,previous_value_text,value_text,created_at) VALUES(?,?,?,?,'import','event',?,'create',NULL,?,?)",
+                                   (uuid4().hex, import_id, event_id, item.document_id, field, value, now))
         for movement in item.movements:
             if movement.account_id is None or movement.date is None or movement.amount is None:
                 raise ValueError("Unvollständige Bewegung trotz Übernahmefreigabe")
@@ -560,71 +1023,135 @@ class SQLiteStore:
                                 self._decimal(movement.amount) if movement.movement_type == "cash" else None,
                                 movement.instrument_id if movement.movement_type == "quantity" else None,
                                 self._decimal(movement.amount) if movement.movement_type == "quantity" else None, movement.date.isoformat()))
+            signature = {"account_id": movement.account_id, "currency": movement.currency if movement.movement_type == "cash" else None,
+                         "amount": self._decimal(movement.amount) if movement.movement_type == "cash" else None,
+                         "instrument_id": movement.instrument_id if movement.movement_type == "quantity" else None,
+                         "quantity": self._decimal(movement.amount) if movement.movement_type == "quantity" else None,
+                         "effective_date": movement.date.isoformat()}
+            connection.execute("INSERT INTO import_contributions(contribution_id,import_id,event_id,document_id,source_kind,target_type,field_name,action,value_text,created_at) VALUES(?,?,?,?,'import','event',?,'create',?,?)",
+                               (uuid4().hex, import_id, event_id, item.document_id, f"position:{position_id}", json.dumps(signature, sort_keys=True), now))
         for component in item.components:
             if component.category not in {"fee", "tax"}:
                 continue
             component_type = "fee" if component.category == "fee" else "tax"
+            component_id = uuid4().hex
+            amount = self._decimal(component.amount)
             connection.execute("INSERT INTO event_components(component_id,event_id,component_type,amount_decimal,currency) VALUES (?,?,?,?,?)",
-                               (uuid4().hex, event_id, component_type, self._decimal(component.amount), component.currency))
+                               (component_id, event_id, component_type, amount, component.currency))
+            connection.execute("INSERT INTO import_contributions(contribution_id,import_id,event_id,document_id,source_kind,target_type,field_name,action,value_text,created_at) VALUES(?,?,?,?,'import','event',?,'create',?,?)",
+                               (uuid4().hex, import_id, event_id, item.document_id, f"component:{component_id}", f"{amount}|{component.currency}", now))
         document = connection.execute("SELECT * FROM documents WHERE document_id=?", (item.document_id,)).fetchone()
         if document is None:
             raise ValueError("Quellbeleg fehlt")
-        connection.execute("INSERT OR IGNORE INTO event_documents(event_id,document_id,source_role) VALUES (?,?,?)", (event_id, item.document_id, "primary"))
+        connection.execute("INSERT OR IGNORE INTO event_documents(event_id,document_id,page_or_entry,source_role) VALUES (?,?,?,?)",
+                           (event_id, item.document_id, item.candidate_id, "primary"))
         connection.execute("INSERT INTO import_contributions(contribution_id,import_id,event_id,document_id,source_kind,target_type,field_name,action,value_text,created_at) VALUES (?,?,?,?,'import','event','event','create',?,?)",
                            (uuid4().hex, import_id, event_id, item.document_id, json.dumps({"candidate_id": item.candidate_id}), now))
 
     def _link_complement(self, connection, item, event_id, import_id, now):
+        from portman_v10.application.contracts import ApplicationError, ErrorCode
+
         event = connection.execute("SELECT kind, bank_reference, reference_context FROM events WHERE event_id=?", (event_id,)).fetchone()
         if event is None or event["kind"] != item.kind:
-            raise ValueError("Ergänzungsbeleg passt nicht zum vorhandenen Vorgang")
-        existing_positions = connection.execute("SELECT account_id,currency,amount_decimal,instrument_id,quantity_decimal,effective_date FROM positions WHERE event_id=? ORDER BY account_id,currency,instrument_id,effective_date", (event_id,)).fetchall()
-        existing_signature = {(row["account_id"], row["currency"], row["amount_decimal"], row["instrument_id"], row["quantity_decimal"], row["effective_date"]) for row in existing_positions}
-        incoming_signature = set()
+            raise ApplicationError(ErrorCode.SOURCE_CONFLICT, "Ergänzungsbeleg passt nicht zum vorhandenen Vorgang")
+        existing_documents = {row[0] for row in connection.execute("SELECT document_id FROM event_documents WHERE event_id=?", (event_id,))}
+        existing_positions = connection.execute("SELECT position_id,account_id,currency,amount_decimal,instrument_id,quantity_decimal,effective_date FROM positions WHERE event_id=? ORDER BY position_id", (event_id,)).fetchall()
+        by_signature = {}
+        by_dimension = {}
+        for row in existing_positions:
+            signature = (row["account_id"], row["currency"], row["amount_decimal"], row["instrument_id"], row["quantity_decimal"], row["effective_date"])
+            dimension = (row["account_id"], row["currency"], row["instrument_id"], row["effective_date"])
+            by_signature.setdefault(signature, []).append(row["position_id"])
+            by_dimension.setdefault(dimension, []).append(signature)
+        seen_incoming = set()
+        event_changed = False
         for movement in item.movements:
             account_id = movement.account_id
             if not account_id or movement.amount is None or movement.date is None:
-                raise ValueError("Ergänzungsbeleg enthält keine vollständige Bewegung")
+                raise ApplicationError(ErrorCode.INCOMPLETE_RESULT, "Ergänzungsbeleg enthält keine vollständige Geld-/Stückposition")
             signature = (account_id, movement.currency if movement.movement_type == "cash" else None,
                          self._decimal(movement.amount) if movement.movement_type == "cash" else None,
                          movement.instrument_id if movement.movement_type == "quantity" else None,
                          self._decimal(movement.amount) if movement.movement_type == "quantity" else None, movement.date.isoformat())
-            incoming_signature.add(signature)
-        if existing_signature and incoming_signature != existing_signature:
-            raise ValueError("Ergänzungsbeleg widerspricht den vorhandenen Geld-/Mengenpositionen")
-        if existing_signature:
-            existing_documents = {row[0] for row in connection.execute("SELECT document_id FROM event_documents WHERE event_id=?", (event_id,))}
-            if item.document_id in existing_documents:
-                connection.execute("INSERT INTO import_contributions(contribution_id,import_id,event_id,document_id,source_kind,target_type,field_name,action,value_text,created_at) VALUES (?,?,?,?,'import','event','evidence','link',?,?)",
-                                   (uuid4().hex, import_id, event_id, item.document_id, json.dumps({"candidate_id": item.candidate_id, "duplicate_file": True}), now))
-                return
+            if signature in seen_incoming:
+                raise ApplicationError(ErrorCode.SOURCE_CONFLICT, "Ergänzungsbeleg enthält dieselbe Position mehrfach; Zuordnung ist mehrdeutig")
+            seen_incoming.add(signature)
+            signature_json = json.dumps({"account_id": account_id, "currency": signature[1], "amount": signature[2],
+                                         "instrument_id": signature[3], "quantity": signature[4],
+                                         "effective_date": signature[5]}, sort_keys=True)
+            matches = by_signature.get(signature, ())
+            if matches:
+                if len(matches) != 1:
+                    raise ApplicationError(ErrorCode.SOURCE_CONFLICT, "Vorhandene Position ist mehrfach vorhanden; Ergänzung bleibt mehrdeutig")
+                position_id = matches[0]
+                connection.execute("INSERT INTO import_contributions(contribution_id,import_id,event_id,document_id,source_kind,target_type,field_name,action,value_text,created_at) VALUES(?,?,?,?,'import','event',?,'link',?,?)",
+                                   (uuid4().hex, import_id, event_id, item.document_id, f"position:{position_id}", signature_json, now))
+                continue
+            dimension = (account_id, signature[1], signature[3], signature[5])
+            if by_dimension.get(dimension):
+                raise ApplicationError(ErrorCode.SOURCE_CONFLICT, "Ergänzungsbeleg nennt für Konto, Anlage und Datum einen abweichenden Geld-/Stückbetrag")
+            position_id = uuid4().hex
+            connection.execute("INSERT INTO positions(position_id,event_id,account_id,currency,amount_decimal,instrument_id,quantity_decimal,effective_date) VALUES(?,?,?,?,?,?,?,?)",
+                               (position_id, event_id, account_id, signature[1], signature[2], signature[3], signature[4], signature[5]))
+            connection.execute("INSERT INTO import_contributions(contribution_id,import_id,event_id,document_id,source_kind,target_type,field_name,action,value_text,created_at) VALUES(?,?,?,?,'import','event',?,'create',?,?)",
+                               (uuid4().hex, import_id, event_id, item.document_id, f"position:{position_id}", signature_json, now))
+            by_signature[signature] = [position_id]
+            by_dimension.setdefault(dimension, []).append(signature)
+            event_changed = True
+        current_text = connection.execute("SELECT original_text FROM events WHERE event_id=?", (event_id,)).fetchone()[0]
+        if item.original_text and current_text == item.original_text:
+            connection.execute("INSERT INTO import_contributions(contribution_id,import_id,event_id,document_id,source_kind,target_type,field_name,action,value_text,created_at) VALUES(?,?,?,?,'import','event','original_text','link',?,?)",
+                               (uuid4().hex, import_id, event_id, item.document_id, item.original_text, now))
         stored_components = {(row["component_type"], row["amount_decimal"], row["currency"]) for row in connection.execute("SELECT component_type,amount_decimal,currency FROM event_components WHERE event_id=?", (event_id,))}
         for component in item.components:
             if component.category not in {"fee", "tax"} or component.amount is None:
                 continue
             key = (component.category, self._decimal(component.amount), component.currency)
             if key in stored_components:
+                component_id = connection.execute("SELECT component_id FROM event_components WHERE event_id=? AND component_type=? AND amount_decimal=? AND currency IS ?",
+                                                  (event_id, key[0], key[1], key[2])).fetchone()[0]
+                connection.execute("INSERT INTO import_contributions(contribution_id,import_id,event_id,document_id,source_kind,target_type,field_name,action,value_text,created_at) VALUES(?,?,?,?,'import','event',?,'link',?,?)",
+                                   (uuid4().hex, import_id, event_id, item.document_id, f"component:{component_id}", f"{key[1]}|{key[2]}", now))
                 continue
             same_kind = {value for value in stored_components if value[0] == component.category and value[2] == component.currency}
             if same_kind:
-                raise ValueError("Gebühren- oder Steuerbeleg widerspricht einem bereits gespeicherten Wert")
-            connection.execute("INSERT INTO event_components(component_id,event_id,component_type,amount_decimal,currency) VALUES (?,?,?,?,?)", (uuid4().hex, event_id, component.category, key[1], key[2]))
+                raise ApplicationError(ErrorCode.SOURCE_CONFLICT, "Gebühren- oder Steuerbeleg widerspricht einem bereits gespeicherten Wert")
+            component_id = uuid4().hex
+            connection.execute("INSERT INTO event_components(component_id,event_id,component_type,amount_decimal,currency) VALUES (?,?,?,?,?)", (component_id, event_id, component.category, key[1], key[2]))
+            connection.execute("INSERT INTO import_contributions(contribution_id,import_id,event_id,document_id,source_kind,target_type,field_name,action,value_text,created_at) VALUES(?,?,?,?,'import','event',?,'create',?,?)",
+                               (uuid4().hex, import_id, event_id, item.document_id, f"component:{component_id}", f"{key[1]}|{key[2]}", now))
             stored_components.add(key)
-        connection.execute("INSERT OR IGNORE INTO event_documents(event_id,document_id,source_role) VALUES (?,?,?)", (event_id, item.document_id, "complement"))
+            event_changed = True
+        if item.document_id not in existing_documents:
+            connection.execute("INSERT OR IGNORE INTO event_documents(event_id,document_id,page_or_entry,source_role) VALUES (?,?,?,?)",
+                               (event_id, item.document_id, item.candidate_id, "complement"))
         if item.original_text:
             current = connection.execute("SELECT original_text FROM events WHERE event_id=?", (event_id,)).fetchone()[0]
-            if current and current != item.original_text:
-                raise ValueError("Ergänzungsbeleg hat abweichenden Originaltext; keine automatische Überschreibung")
+            finanzreport_evidence = (item.plugin_id, item.handler_id, item.kind) == ("comdirect.finanzreport", "finanzreport", "CASH_BOOKING")
+            if current and current != item.original_text and not finanzreport_evidence:
+                raise ApplicationError(ErrorCode.SOURCE_CONFLICT, "Ergänzungsbeleg hat abweichenden Originaltext; keine automatische Überschreibung")
             if not current:
-                connection.execute("UPDATE events SET original_text=?, completeness='complete', revision=revision+1 WHERE event_id=?", (item.original_text, event_id))
+                connection.execute("UPDATE events SET original_text=?, completeness='complete' WHERE event_id=?", (item.original_text, event_id))
+                connection.execute("INSERT INTO import_contributions(contribution_id,import_id,event_id,document_id,source_kind,target_type,field_name,action,previous_value_text,value_text,created_at) VALUES(?,?,?,?,'import','event','original_text','set',NULL,?,?)",
+                                   (uuid4().hex, import_id, event_id, item.document_id, item.original_text, now))
+                event_changed = True
         if reference := dict(item.references).get("bank_reference"):
             context = event["reference_context"]
             if event["bank_reference"] and event["bank_reference"] != reference:
-                raise ValueError("Ergänzungsbeleg enthält eine abweichende Bankreferenz")
+                raise ApplicationError(ErrorCode.SOURCE_CONFLICT, "Ergänzungsbeleg enthält eine abweichende Bankreferenz")
             if not event["bank_reference"]:
                 cash_accounts = sorted({movement.account_id for movement in item.movements if movement.movement_type == "cash" and movement.account_id})
                 context = "|".join(cash_accounts) if cash_accounts else None
                 if context:
-                    connection.execute("UPDATE events SET bank_reference=?, reference_context=?, revision=revision+1 WHERE event_id=?", (reference, context, event_id))
+                    connection.execute("UPDATE events SET bank_reference=?, reference_context=? WHERE event_id=?", (reference, context, event_id))
+                    connection.execute("INSERT INTO import_contributions(contribution_id,import_id,event_id,document_id,source_kind,target_type,field_name,action,previous_value_text,value_text,created_at) VALUES(?,?,?,?,'import','event','bank_reference','set',NULL,?,?)",
+                                       (uuid4().hex, import_id, event_id, item.document_id, reference, now))
+                    event_changed = True
+            else:
+                connection.execute("INSERT INTO import_contributions(contribution_id,import_id,event_id,document_id,source_kind,target_type,field_name,action,value_text,created_at) VALUES(?,?,?,?,'import','event','bank_reference','link',?,?)",
+                                   (uuid4().hex, import_id, event_id, item.document_id, reference, now))
+        if event_changed:
+            connection.execute("UPDATE events SET revision=revision+1 WHERE event_id=?", (event_id,))
         connection.execute("INSERT INTO import_contributions(contribution_id,import_id,event_id,document_id,source_kind,target_type,field_name,action,value_text,created_at) VALUES (?,?,?,?,'import','event','evidence','link',?,?)",
                            (uuid4().hex, import_id, event_id, item.document_id, json.dumps({"candidate_id": item.candidate_id}), now))
 
@@ -636,36 +1163,72 @@ class SQLiteStore:
                     continue
                 asset_key = f"CURRENCY:{movement.currency}" if movement.movement_type == "cash" else f"INSTRUMENT:{movement.instrument_id}"
                 touched.add((movement.account_id, asset_key, movement.currency if movement.movement_type == "cash" else None, movement.instrument_id if movement.movement_type == "quantity" else None))
+        self._refresh_balance_index_assets(connection, touched, revision)
+
+    @staticmethod
+    def _refresh_balance_index_assets(connection, touched, revision):
+        """Baut nur berührte Konten-/Währungs- oder Konten-/Instrumentreihen aus der Buchungsquelle neu."""
         for account_id, asset_key, currency, instrument_id in touched:
-            opening_rows = connection.execute("SELECT o.effective_date,o.cost_basis_status,p.amount_decimal,p.quantity_decimal FROM opening_entries o JOIN positions p ON p.position_id=o.position_id WHERE p.account_id=? AND ((? IS NOT NULL AND p.currency=?) OR (? IS NOT NULL AND p.instrument_id=?)) ORDER BY o.effective_date", (account_id, currency, currency, instrument_id, instrument_id)).fetchall()
+            opening_rows = connection.execute("SELECT o.effective_date,p.amount_decimal,p.quantity_decimal FROM opening_entries o JOIN positions p ON p.position_id=o.position_id WHERE p.account_id=? AND ((? IS NOT NULL AND p.currency=?) OR (? IS NOT NULL AND p.instrument_id=?)) ORDER BY o.effective_date", (account_id, currency, currency, instrument_id, instrument_id)).fetchall()
             rows = connection.execute("SELECT p.effective_date,p.amount_decimal,p.quantity_decimal,e.completeness FROM positions p JOIN events e ON e.event_id=p.event_id LEFT JOIN opening_entries o ON o.event_id=e.event_id WHERE p.account_id=? AND o.event_id IS NULL AND ((? IS NOT NULL AND p.currency=?) OR (? IS NOT NULL AND p.instrument_id=?)) ORDER BY p.effective_date,p.position_id", (account_id, currency, currency, instrument_id, instrument_id)).fetchall()
-            completeness = {}
             dates = sorted({row["effective_date"] for row in (*opening_rows, *rows)})
             by_date = {}
             for row in opening_rows:
-                by_date.setdefault(row["effective_date"], []).append({"amount_decimal": row["amount_decimal"], "quantity_decimal": row["quantity_decimal"], "completeness": "complete", "is_opening": True})
+                by_date.setdefault(row["effective_date"], {"openings": [], "positions": []})["openings"].append(row)
             for row in rows:
-                by_date.setdefault(row["effective_date"], []).append(row)
-            for day in dates:
-                day_complete = True
-                for row in by_date[day]:
-                    value = row["amount_decimal"] if currency else row["quantity_decimal"]
-                    if value is None:
-                        day_complete = False
-                    day_complete &= row["completeness"] == "complete"
-                completeness[day] = "complete" if day_complete else "incomplete"
+                by_date.setdefault(row["effective_date"], {"openings": [], "positions": []})["positions"].append(row)
             connection.execute("DELETE FROM balance_index WHERE account_id=? AND asset_key=?", (account_id, asset_key))
             running = "0"
             known = False
+            complete = True
             for day in dates:
-                if any("is_opening" in row.keys() and row["is_opening"] for row in by_date[day]):
+                opening_rows_for_day = by_date[day]["openings"]
+                positions_for_day = by_date[day]["positions"]
+                if opening_rows_for_day:
                     known = True
-                day_values = [row["amount_decimal"] if currency else row["quantity_decimal"] for row in by_date[day] if (row["amount_decimal"] if currency else row["quantity_decimal"]) is not None]
-                if day_values:
+                    running = "0"
+                    complete = True
+                day_rows = (*opening_rows_for_day, *positions_for_day)
+                day_values = [row["amount_decimal"] if currency else row["quantity_decimal"] for row in day_rows
+                              if (row["amount_decimal"] if currency else row["quantity_decimal"]) is not None]
+                if known:
                     running = sum_decimal_text([running, *day_values])
+                    complete = complete and all(
+                        (row["amount_decimal"] if currency else row["quantity_decimal"]) is not None
+                        and ("completeness" not in row.keys() or row["completeness"] == "complete") for row in day_rows
+                    )
                 value = running if known else None
-                status = "complete" if all(completeness[prior] == "complete" for prior in dates[:dates.index(day) + 1]) else "incomplete"
+                status = ("complete" if complete else "incomplete") if known else "unknown"
                 connection.execute("INSERT INTO balance_index(account_id,asset_key,currency,instrument_id,as_of,value_decimal,value_rational,completeness,data_revision) VALUES (?,?,?,?,?,?,NULL,?,?)", (account_id, asset_key, currency, instrument_id, day, value, status, revision))
+        # Nicht berührte Reihen bleiben fachlich gleich, gehören aber nach dem
+        # atomaren Update ebenfalls zur jetzt veröffentlichten Gesamtrevision.
+        connection.execute("UPDATE balance_index SET data_revision=? WHERE data_revision<>?", (revision, revision))
+
+    def get_overview(self, as_of: date, account_ids: tuple[str, ...] = ()) -> Overview:
+        """Liest je Konto und Anlage die letzte gültige Indexzeile am oder vor dem Stichtag."""
+        connection = self.connect()
+        try:
+            revision = connection.execute("SELECT data_revision FROM app_state WHERE singleton=1").fetchone()[0]
+            stale = connection.execute("SELECT 1 FROM balance_index WHERE data_revision<>? LIMIT 1", (revision,)).fetchone()
+            if stale:
+                raise ApplicationError(ErrorCode.STALE_REVISION, "Bestandsindex ist veraltet und muss neu aufgebaut werden")
+            params = [as_of.isoformat(), as_of.isoformat()]
+            account_filter = ""
+            if account_ids:
+                account_filter = " AND current.account_id IN (" + ",".join("?" for _ in account_ids) + ")"
+                params.extend(account_ids)
+            rows = connection.execute(
+                "SELECT current.* FROM balance_index current WHERE current.as_of<=? AND NOT EXISTS ("
+                "SELECT 1 FROM balance_index later WHERE later.account_id=current.account_id AND later.asset_key=current.asset_key "
+                "AND later.as_of<=? AND later.as_of>current.as_of)" + account_filter +
+                " ORDER BY current.account_id,current.asset_key", params).fetchall()
+            lines = tuple(BalanceLine(
+                row["account_id"], ExactValue(row["value_decimal"]) if row["value_decimal"] is not None else None,
+                row["currency"], row["instrument_id"], row["completeness"] if row["value_decimal"] is not None else "unknown",
+            ) for row in rows)
+            return Overview(as_of, revision, lines)
+        finally:
+            connection.close()
 
     @staticmethod
     def _is_canonical_decimal(value: object) -> int:
@@ -812,6 +1375,42 @@ class SQLiteStore:
         finally:
             connection.close()
 
+    def list_imports(self, cursor: str | None = None, limit: int = 100) -> ImportPage:
+        if not 1 <= limit <= 500:
+            raise ApplicationError(ErrorCode.VALIDATION_ERROR, "limit muss zwischen 1 und 500 liegen")
+        connection = self.connect()
+        try:
+            revision = connection.execute("SELECT data_revision FROM app_state WHERE singleton = 1").fetchone()[0]
+            offset = 0
+            if cursor:
+                try:
+                    cursor_revision, cursor_offset = cursor.split(":", 1)
+                    if int(cursor_revision) != revision:
+                        raise ApplicationError(ErrorCode.STALE_REVISION, "Importliste wurde geändert; Liste neu laden")
+                    offset = int(cursor_offset)
+                    if offset < 0:
+                        raise ValueError("negativer Cursor")
+                except ValueError as error:
+                    raise ApplicationError(ErrorCode.VALIDATION_ERROR, "Importcursor ungültig") from error
+            rows = connection.execute(
+                "SELECT i.import_id,j.job_id,i.started_at,i.status AS import_status,j.state AS job_status,"
+                "COALESCE((SELECT json_array_length(p.normalized_preview_json,'$.items') FROM import_previews p WHERE p.import_id=i.import_id),0) AS candidate_count,"
+                "(SELECT json_group_array(files.original_name) FROM ("
+                "SELECT d.original_name FROM import_job_documents jd JOIN documents d ON d.document_id=jd.document_id "
+                "WHERE jd.job_id=j.job_id ORDER BY jd.ordinal) AS files) AS filenames "
+                "FROM imports i JOIN import_jobs j ON j.import_id=i.import_id "
+                "ORDER BY i.started_at DESC,i.import_id DESC LIMIT ? OFFSET ?", (limit + 1, offset)).fetchall()
+            has_more = len(rows) > limit
+            items = tuple(ImportSummary(
+                row["import_id"], row["job_id"], row["started_at"], row["import_status"], row["job_status"],
+                tuple(json.loads(row["filenames"] or "[]")), row["candidate_count"],
+                row["import_status"] in {"committed", "rolled_back"},
+            ) for row in rows[:limit])
+            next_cursor = f"{revision}:{offset + limit}" if has_more else None
+            return ImportPage(items, next_cursor, revision)
+        finally:
+            connection.close()
+
     def get_account(self, account_id: str) -> Account:
         connection = self.connect()
         try:
@@ -954,7 +1553,9 @@ class SQLiteStore:
                 connection.execute("INSERT INTO acquisition_lots(lot_id, instrument_id, account_id, original_quantity_decimal, acquired_on, original_cost_decimal, cost_currency) VALUES (?, ?, ?, ?, ?, ?, ?)", (lot_id, value.instrument_id, value.account_id, self._decimal(value.quantity), self._date(value.acquired_on), self._decimal(value.acquisition_cost), value.cost_currency))
             basis = "not_applicable" if money else "known" if value.acquisition_cost is not None else "unknown"
             connection.execute("INSERT INTO opening_entries(opening_id, event_id, position_id, opening_kind, effective_date, cost_basis_status, lot_id, note, source_kind, history_scope) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'manual', 'starting_balance')", (value.opening_id, event_id, position_id, "money" if money else "quantity", value.effective_date.isoformat(), basis, lot_id, value.note))
-            self._bump_metadata_revision(connection, refresh_index_revision=False)
+            revision = self._bump_metadata_revision(connection, refresh_index_revision=False)
+            asset_key = f"CURRENCY:{value.currency}" if money else f"INSTRUMENT:{value.instrument_id}"
+            self._refresh_balance_index_assets(connection, ((value.account_id, asset_key, value.currency, value.instrument_id),), revision)
             return OpeningBalance(value.opening_id, event_id, position_id, lot_id, value.account_id, value.effective_date, value.amount, value.quantity, value.currency, value.instrument_id, basis, value.acquired_on, value.acquisition_cost, value.cost_currency, value.note, "manual", "starting_balance")
 
     def get_opening(self, opening_id: str) -> OpeningBalance:
@@ -1012,7 +1613,12 @@ class SQLiteStore:
                     "INSERT INTO import_contributions(contribution_id, import_id, event_id, account_id, instrument_id, document_id, source_kind, target_type, field_name, action, previous_value_text, value_text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (contribution.contribution_id, contribution.import_id, event_target, account_target, instrument_target, contribution.document_id, contribution.source_kind, contribution.target_type, contribution.field_name, contribution.action, contribution.previous_value_text, contribution.value_text, contribution.created_at),
                 )
-            self._bump_metadata_revision(connection, refresh_index_revision=False)
+            revision = self._bump_metadata_revision(connection, refresh_index_revision=False)
+            touched = set()
+            for position in record.positions:
+                asset_key = f"CURRENCY:{position.currency}" if position.currency else f"INSTRUMENT:{position.instrument_id}"
+                touched.add((position.account_id, asset_key, position.currency, position.instrument_id))
+            self._refresh_balance_index_assets(connection, touched, revision)
 
     def load_event(self, event_id: str) -> StoredEvent | None:
         connection = self.connect()

@@ -1,95 +1,184 @@
-<!doctype html>
-<html lang="de">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Portman V10 · Importvorschau</title>
-  <style>
-    body { max-width: 70rem; margin: 2rem auto; padding: 0 1rem; color: #17212b; font: 1rem/1.5 system-ui, sans-serif; }
-    .banner { padding: 1rem; border: 2px solid #a54b00; background: #fff5e8; font-weight: 700; }
-    .error { border-left: .3rem solid #a11; padding: .75rem; background: #fff0f0; }
-    .upload-status { min-height: 1.5em; font-weight: 600; }
-    label, button { display: inline-block; margin: .8rem .4rem .8rem 0; }
-    button { padding: .5rem 1rem; }
-    footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid #bbc4cc; color: #46535f; font-size: .9rem; }
-  </style>
-</head>
-<body>
-  <nav><a href="{{ url_for('index') }}" aria-current="page">Import</a> · <a href="{{ url_for('accounts_page') }}">Konten &amp; Depots</a></nav>
+{% extends "base.html" %}
+{% set active = "index" %}
+{% block title %}Importvorschau{% endblock %}
+{% block content %}
   <h1>Portman V10</h1>
   <p class="banner">Importvorschau – noch nicht gebucht</p>
   {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
-  <h2>PDF zur Prüfung auswählen</h2>
-  <form id="upload-form" action="{{ url_for('upload_import') }}" method="post" enctype="multipart/form-data">
+  <h2>PDFs zur Prüfung auswählen</h2>
+  <form id="upload-form" action="{{ url_for('upload_import') }}" method="post" enctype="multipart/form-data"
+        data-documents-url="{{ url_for('stage_document') }}" data-batch-url="{{ url_for('start_batch_import') }}">
     <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
-    <label for="pdf">PDF-Datei (max. 50 MiB)</label>
-    <input id="pdf" name="pdf" type="file" accept="application/pdf,.pdf" required>
+    <div class="field"><label for="pdf">PDF-Dateien (je max. 50 MiB, mehrere möglich)</label>
+      <input id="pdf" name="pdf" type="file" accept="application/pdf,.pdf" multiple required></div>
+    <div class="field folder-choice" hidden><label for="pdf-folder">oder einen ganzen Ordner</label>
+      <input id="pdf-folder" type="file" webkitdirectory multiple></div>
     <button id="upload-submit" type="submit">Importvorschau starten</button>
   </form>
   <p id="upload-status" class="upload-status" role="status" aria-live="polite">Keine Datei ausgewählt.</p>
-  <p>Die Datei wird in das getrennte lokale Testprofil kopiert und verarbeitet. Es werden keine Buchungen übernommen.</p>
-  <footer>Branch: {{ branch }} · Commit: {{ commit }} · Datenbankprofil: {{ profile }}</footer>
-  <script>
+  <progress id="upload-progress" max="1" value="0" hidden></progress>
+  <ol id="upload-list" class="upload-list"></ol>
+  <p>Mehrere PDFs ergeben <strong>einen gemeinsamen Import</strong>: eine Vorschau mit allen Kandidaten, eine Übernahme, gemeinsam rücknehmbar. Einzelne Belege lassen sich in der Vorschau ignorieren. Die Dateien werden in das getrennte lokale Testprofil kopiert; es werden keine Buchungen übernommen.</p>
+{% endblock %}
+{% block scripts %}
+  <script nonce="{{ csp_nonce() }}">
     (() => {
       const form = document.getElementById('upload-form');
       const fileInput = document.getElementById('pdf');
+      const folderInput = document.getElementById('pdf-folder');
       const submit = document.getElementById('upload-submit');
       const status = document.getElementById('upload-status');
+      const progress = document.getElementById('upload-progress');
+      const list = document.getElementById('upload-list');
+      const token = form.elements._csrf_token.value;
+      let files = [];
+      let items = [];
+      let stored = [];
       let uploading = false;
 
+      // Ordnerauswahl gibt es nur mit JavaScript; ohne bleibt die normale Mehrfachauswahl.
+      folderInput.closest('.folder-choice').hidden = false;
+
+      const label = (count) => (count === 1 ? '1 Datei' : `${count} Dateien`);
+      const setStatus = (text, isError = false) => {
+        status.textContent = text;
+        status.className = isError ? 'upload-status error' : 'upload-status';
+      };
+      const setItem = (item, text, state) => {
+        item.textContent = text;
+        item.dataset.state = state;
+      };
+      const alertText = (html) => {
+        try {
+          const detail = new DOMParser().parseFromString(html, 'text/html').querySelector('[role="alert"]');
+          return detail && detail.textContent.trim() ? detail.textContent.trim() : null;
+        } catch (_) { return null; }
+      };
+
+      function choose(selected) {
+        const all = [...selected];
+        files = all.filter((file) => file.name.toLowerCase().endsWith('.pdf'));
+        const skipped = all.length - files.length;
+        stored = [];
+        items = files.map((file) => {
+          const item = document.createElement('li');
+          setItem(item, `${file.name} – wartet`, 'waiting');
+          return item;
+        });
+        list.replaceChildren(...items);
+        progress.hidden = true;
+        document.getElementById('start-partial')?.remove();
+        const note = skipped ? ` ${skipped} andere Datei${skipped === 1 ? '' : 'en'} übersprungen.` : '';
+        if (!files.length) {
+          setStatus(skipped ? `Keine PDF-Datei in der Auswahl.${note}` : 'Keine Datei ausgewählt.', skipped > 0);
+        } else {
+          setStatus(`${files.length === 1 ? files[0].name : label(files.length)} – bereit zum Hochladen.${note}`);
+        }
+      }
+
       fileInput.addEventListener('change', () => {
-        const file = fileInput.files && fileInput.files[0];
-        status.textContent = file ? `${file.name} – bereit zum Hochladen.` : 'Keine Datei ausgewählt.';
-        status.className = 'upload-status';
+        folderInput.value = '';
+        fileInput.required = true;
+        choose(fileInput.files || []);
+      });
+      folderInput.addEventListener('change', () => {
+        fileInput.value = '';
+        fileInput.required = false;
+        choose(folderInput.files || []);
       });
 
-      form.addEventListener('submit', (event) => {
-        if (uploading) {
-          event.preventDefault();
-          return;
-        }
-        const file = fileInput.files && fileInput.files[0];
-        if (!file) return;
-        event.preventDefault();
-        uploading = true;
-        submit.disabled = true;
-        status.textContent = `${file.name} wird hochgeladen …`;
-        status.className = 'upload-status';
+      // Jede Datei einzeln ablegen: Fortschritt und Fehler je Datei, keine Gesamtgrenze pro Anfrage.
+      function uploadOne(file, item) {
+        return new Promise((resolve) => {
+          const data = new FormData();
+          data.append('_csrf_token', token);
+          data.append('pdf', file, file.name);
+          const xhr = new XMLHttpRequest();
+          xhr.open('POST', form.dataset.documentsUrl);
+          setItem(item, `${file.name} wird hochgeladen …`, 'uploading');
+          xhr.upload.onprogress = (event) => {
+            if (event.lengthComputable) setItem(item, `${file.name} wird hochgeladen … ${Math.round(event.loaded * 100 / event.total)} %`, 'uploading');
+          };
+          xhr.onload = () => {
+            let body = null;
+            try { body = JSON.parse(xhr.responseText); } catch (_) { /* HTML-Fehlerseite */ }
+            if (xhr.status >= 200 && xhr.status < 300 && body && body.document_id) {
+              setItem(item, `${file.name} – gespeichert${body.already_stored ? ' (identische Datei war bereits abgelegt)' : ''}`, 'stored');
+              resolve(body.document_id);
+              return;
+            }
+            const message = (body && body.error) || alertText(xhr.responseText) || `Upload fehlgeschlagen (HTTP ${xhr.status}).`;
+            setItem(item, `${file.name}: ${message}`, 'failed');
+            resolve(null);
+          };
+          xhr.onerror = () => { setItem(item, `${file.name}: Netzwerkfehler beim Upload.`, 'failed'); resolve(null); };
+          xhr.onabort = () => { setItem(item, `${file.name}: Upload abgebrochen.`, 'failed'); resolve(null); };
+          xhr.send(data);
+        });
+      }
 
-        const xhr = new XMLHttpRequest();
-        xhr.open('POST', form.action);
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300 && new URL(xhr.responseURL).pathname.startsWith('/jobs/')) {
-            status.textContent = `${file.name} hochgeladen. Importvorschau wird erstellt …`;
-            window.location.assign(xhr.responseURL);
+      async function startImport(documentIds) {
+        setStatus(`${label(documentIds.length)} hochgeladen. Importvorschau wird erstellt …`);
+        const body = new URLSearchParams({ _csrf_token: token });
+        for (const id of documentIds) body.append('document_id', id);
+        try {
+          const response = await fetch(form.dataset.batchUrl, { method: 'POST', body, credentials: 'same-origin' });
+          if (response.ok && new URL(response.url).pathname.startsWith('/jobs/')) {
+            window.location.assign(response.url);
             return;
           }
-          let message = `Upload fehlgeschlagen (HTTP ${xhr.status}). Bitte erneut versuchen.`;
-          try {
-            const page = new DOMParser().parseFromString(xhr.responseText, 'text/html');
-            const detail = page.querySelector('[role="alert"]');
-            if (detail && detail.textContent.trim()) message = `${detail.textContent.trim()} Bitte erneut versuchen.`;
-          } catch (_) { /* die konkrete HTTP-Meldung bleibt sichtbar */ }
-          status.textContent = `${file.name}: ${message}`;
-          status.className = 'upload-status error';
-          uploading = false;
-          submit.disabled = false;
-        };
-        xhr.onerror = () => {
-          status.textContent = `${file.name}: Netzwerkfehler beim Upload. Bitte Verbindung prüfen und erneut versuchen.`;
-          status.className = 'upload-status error';
-          uploading = false;
-          submit.disabled = false;
-        };
-        xhr.onabort = () => {
-          status.textContent = `${file.name}: Upload abgebrochen. Bitte erneut versuchen.`;
-          status.className = 'upload-status error';
-          uploading = false;
-          submit.disabled = false;
-        };
-        xhr.send(new FormData(form));
+          setStatus(`${alertText(await response.text()) || `Import nicht gestartet (HTTP ${response.status}).`} Bitte erneut versuchen.`, true);
+        } catch (_) {
+          setStatus('Netzwerkfehler beim Starten des Imports. Bitte Verbindung prüfen und erneut versuchen.', true);
+        }
+        uploading = false;
+        submit.disabled = false;
+      }
+
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        if (uploading) return;
+        if (!files.length) {
+          setStatus('Bitte mindestens eine PDF-Datei auswählen.', true);
+          return;
+        }
+        uploading = true;
+        submit.disabled = true;
+        document.getElementById('start-partial')?.remove();
+        progress.hidden = false;
+        progress.max = files.length;
+        progress.value = 0;
+        stored = [];
+        for (const [index, file] of files.entries()) {
+          setStatus(`${file.name} wird hochgeladen … (${index + 1} von ${files.length})`);
+          const documentId = await uploadOne(file, items[index]);
+          if (documentId) stored.push(documentId);
+          progress.value = index + 1;
+        }
+        const failed = files.length - stored.length;
+        if (!failed) {
+          await startImport(stored);
+          return;
+        }
+        uploading = false;
+        submit.disabled = false;
+        if (!stored.length) {
+          setStatus(`Keine der ${label(files.length)} konnte gespeichert werden – Meldungen siehe Liste. Bitte erneut versuchen.`, true);
+          return;
+        }
+        setStatus(`${failed} von ${label(files.length)} fehlgeschlagen – Meldungen siehe Liste. Auswahl korrigieren und erneut starten oder ohne sie fortfahren.`, true);
+        const partial = document.createElement('button');
+        partial.type = 'button';
+        partial.id = 'start-partial';
+        partial.textContent = `Import mit den ${label(stored.length)} starten`;
+        partial.addEventListener('click', () => {
+          uploading = true;
+          submit.disabled = true;
+          partial.disabled = true;
+          startImport(stored);
+        });
+        list.after(partial);
       });
     })();
   </script>
-</body>
-</html>
+{% endblock %}

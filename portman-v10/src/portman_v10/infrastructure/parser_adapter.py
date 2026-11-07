@@ -4,6 +4,7 @@ from dataclasses import replace
 from decimal import Decimal
 from importlib.util import find_spec
 from importlib.metadata import PackageNotFoundError, version
+import re
 from typing import Any
 
 from portman_parsers.api import API_VERSION, SCHEMA_VERSION, MissingValue
@@ -19,12 +20,14 @@ from portman_v10.domain.values import ExactValue, canonical_decimal
 from portman_v10.infrastructure.sqlite_store import SQLiteStore
 
 V10_INFORMATION_HANDLERS = frozenset({("user.comdirect-ertraege", "kosteninformation_mifid_ii")})
+V10_SALDO_NEUTRAL_TAX_HANDLERS = frozenset({("user.comdirect-ertraege", "investment_ausschuettung")})
 V10_BOOKING_HANDLER_KINDS = {
     ("user.comdirect-ertraege", "wertpapierkauf"): frozenset({"BUY"}),
     ("user.comdirect-ertraege", "wertpapierverkauf"): frozenset({"SELL"}),
     ("user.comdirect-ertraege", "einloesung"): frozenset({"REDEMPTION"}),
     ("user.comdirect-ertraege", "dividendengutschrift"): frozenset({"DIVIDEND"}),
     ("user.comdirect-ertraege", "ertragsgutschrift"): frozenset({"DIVIDEND"}),
+    ("comdirect.finanzreport", "finanzreport"): frozenset({"CASH_BOOKING"}),
 }
 V10_EXECUTABLE_COMDIRECT_PLUGINS = frozenset({"user.comdirect-ertraege", "comdirect.finanzreport", "portfolio-performance.comdirect"})
 V10_INFORMATION_TYPES = frozenset({"ADVANCE_TAX", "TAX_NOTICE", "MIFID_COST_INFORMATION", "POSITION_SNAPSHOT", "ACCOUNT_SNAPSHOT"})
@@ -85,6 +88,16 @@ def _exact(value: Any) -> ExactValue | None:
     if not isinstance(value, Decimal):
         raise TypeError("Parserwert ist kein Decimal")
     return ExactValue(canonical_decimal(format(value, "f")))
+
+
+def _valid_isin(value: str | None) -> bool:
+    if not value or not re.fullmatch(r"[A-Z]{2}[A-Z0-9]{9}[0-9]", value):
+        return False
+    expanded = "".join(str(ord(char) - 55) if char.isalpha() else char for char in value)
+    checksum = sum((digit := int(char)) * (2 if (len(expanded) - index) % 2 == 0 else 1) // 10 +
+                   (digit * (2 if (len(expanded) - index) % 2 == 0 else 1)) % 10
+                   for index, char in enumerate(expanded))
+    return checksum % 10 == 0
 
 
 class PortmanParserAdapter:
@@ -162,12 +175,17 @@ class PortmanParserAdapter:
         relevant_document_issues = []
         for event in result.events:
             event_issues = tuple(issue for issue in issues if issue.event_id in {None, event.event_id})
+            saldo_neutral_tax = handler_key in V10_SALDO_NEUTRAL_TAX_HANDLERS and not event.cash_movements
             relevant_issues = self._relevant_issues(event, event_issues)
+            if saldo_neutral_tax:
+                transaction_requirements = {"COMDIRECT_SECURITY_MISSING", "COMDIRECT_QUANTITY_MISSING", "COMDIRECT_SETTLEMENT_MISSING",
+                                            "COMDIRECT_TRADE_VALUES_UNRESOLVED", "PP_SECURITY_MISSING", "PP_QUANTITY_MISSING", "PP_SETTLEMENT_MISSING"}
+                relevant_issues = tuple(issue for issue in relevant_issues if issue.code not in transaction_requirements)
             relevant_document_issues.extend(relevant_issues)
             event_warnings = tuple(PreviewIssue(value.code, value.severity.value, value.message, value.evidence_id) for value in relevant_issues)
             item = self._event_preview(document_id, name, detection, result, event, evidence_by_id, event_warnings, account_hint,
                                        "\n".join(page.text for page in document.pages)[:12000], preparation_version)
-            tax_quantity_gap = bool(event.tax_events and event.security_movements and not event.cash_movements)
+            tax_quantity_gap = bool(event.tax_events and event.security_movements and not event.cash_movements and not saldo_neutral_tax)
             if tax_quantity_gap:
                 parser_gap = "Parserlücke: Steuerereignis enthält nur eine Parser-Mengenbewegung, aber keine tatsächliche Geldbewegung; kein Bestandszugang oder -abgang wird erzeugt."
                 quantity_facts = "; ".join(f"{movement.quantity} {movement.security_id}" for movement in event.security_movements)
@@ -175,7 +193,7 @@ class PortmanParserAdapter:
                 item = replace(item, kind="parserluecke_steuerereignis", suggested_kind="parserluecke_steuerereignis",
                                movements=(), account_ids=(), instrument_ids=(), missing_fields=(parser_gap,),
                                review_status="needs_review", references=references, disposition="unclassified")
-            information_event = event.kind in V10_INFORMATION_TYPES and not event.cash_movements
+            information_event = (event.kind in V10_INFORMATION_TYPES or saldo_neutral_tax) and not event.cash_movements
             if not tax_quantity_gap and (information_event or handler_key in V10_INFORMATION_HANDLERS):
                 item = replace(item, kind="information", suggested_kind="information", review_status="information",
                                movements=(), account_ids=(), instrument_ids=(), missing_fields=(), conflicts=(), disposition="unclassified")
@@ -267,8 +285,12 @@ class PortmanParserAdapter:
                                              account_assignment=assignment))
         instrument_ids = set()
         instrument_issues = []
+        instrument_resolution = "not_applicable"
         parsed_depots = {depot.depot_id: depot for depot in result.depots}
         parsed_isin = _value(event.security_isin)
+        if not parsed_isin:
+            parsed_isin = next((movement.security_id for movement in event.security_movements
+                                if movement.security_id and len(movement.security_id) == 12), None)
         parsed_wkn = _value(event.security_wkn)
         parsed_name = _value(event.security_name)
         if not parsed_name:
@@ -277,8 +299,16 @@ class PortmanParserAdapter:
             instrument, instrument_issue = _resolve_instrument(self.store, parsed_isin, parsed_wkn, movement.security_id)
             if instrument:
                 instrument_ids.add(instrument)
+                instrument_resolution = "existing"
             elif instrument_issue:
-                instrument_issues.append(instrument_issue)
+                effective_isin = parsed_isin or (movement.security_id if movement.security_id and len(movement.security_id) == 12 else None)
+                creation_handler_allowed = (detection.plugin_id, detection.handler_id) in V10_BOOKING_HANDLER_KINDS and event.kind in {"BUY", "SELL", "REDEMPTION"}
+                if (creation_handler_allowed and instrument_issue.startswith("Kein V10-Instrument für ISIN ") and _valid_isin(effective_isin)
+                        and parsed_name and parsed_name.strip()):
+                    instrument_resolution = "will_create"
+                else:
+                    instrument_issues.append(instrument_issue)
+                    instrument_resolution = "unresolved"
             matched_account = None
             assignment = "unresolved"
             depot = parsed_depots.get(movement.depot_id or "")
@@ -352,7 +382,8 @@ class PortmanParserAdapter:
         elif movements and any(movement.account_id is None for movement in movements):
             missing.append("eindeutige V10-Zuordnung für jede Geld-/Mengenposition")
         if event.security_movements:
-            missing.extend(instrument_issues or ([] if instrument_ids else ["Keine eindeutige V10-Instrumentzuordnung möglich"]))
+            missing.extend(instrument_issues or ([] if instrument_ids or instrument_resolution == "will_create"
+                                                  else ["Keine eindeutige V10-Instrumentzuordnung möglich"]))
         if movements and event.bank_reference_status != "RECOGNIZED":
             missing.append("Bankreferenz fehlt oder ist nicht eindeutig; Dubletten können nicht sicher automatisch zugeordnet werden")
         if any(movement.status != "ACTUAL" for movement in event.cash_movements):
@@ -376,4 +407,7 @@ class PortmanParserAdapter:
             original_text=original, source_evidence=evidence, warnings=tuple(warnings), missing_fields=tuple(dict.fromkeys(missing)), review_status=status,
             parser_package_version=self.package_version, parser_api_version=self.api_version,
             extraction_preparation_version=preparation_version,
+            instrument_resolution=instrument_resolution,
+            instrument_message=(f"Neues Instrument wird angelegt: {parsed_name} ({parsed_isin})"
+                                if instrument_resolution == "will_create" else None),
         )

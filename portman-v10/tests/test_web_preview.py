@@ -241,7 +241,7 @@ IBAN DE00000000000000000001"""
         finally:
             workflow.close()
 
-    def test_instrument_match_issue_is_visible_and_clears_on_new_preview(self):
+    def test_new_instrument_preview_and_existing_mapping_are_distinguished(self):
         source_text = """comdirect
 Wertpapierkauf
 Depotnummer: 123456
@@ -259,9 +259,11 @@ IBAN DE00000000000000000001"""
 
         _job, url = self._submit(source, "instrument-review.pdf")
         html = self.client.get(url).get_data(as_text=True)
-        self.assertIn("Kein V10-Instrument für ISIN DE000LS9AVX3 vorhanden", html)
-        self.assertIn('class="check-point">Prüfen: Kein V10-Instrument für ISIN DE000LS9AVX3 vorhanden', html)
-        self.assertIn("color: #b00020; font-weight: 700", html)
+        preview = self.workflow.get_import_preview(_job.import_id)
+        self.assertEqual(preview.items[0].instrument_resolution, "will_create")
+        self.assertEqual(preview.items[0].instrument_message, "Neues Instrument wird angelegt: LANG+SCHWARZ O.E. INDEX (DE000LS9AVX3)")
+        self.assertNotIn("Kein V10-Instrument für ISIN DE000LS9AVX3 vorhanden", html)
+        self.assertIn("Importvorschau – noch nicht gebucht", html)
 
         matched = self.store.save_instrument(InstrumentInput("Lang & Schwarz", "equity", isin="DE000LS9AVX3"))
         job, url = self._submit(source, "instrument-review-rematched.pdf")

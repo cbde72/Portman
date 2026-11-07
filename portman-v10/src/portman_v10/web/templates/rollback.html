@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% set active = "imports_page" %}
+{% block title %}Rücknahme{% endblock %}
+{% block content %}
+  {% if plan %}
+    <h1>Rücknahme prüfen</h1>
+    <p class="banner danger">Vorschau – noch nichts zurückgenommen</p>
+    <h2>Betroffene Importe</h2>
+    <ul id="rollback-imports">{% for name in plan.imports %}<li>{{ name }}</li>{% endfor %}</ul>
+    <p>Vorgänge: {{ plan.events }} · Importbeiträge: {{ plan.contributions }} · Beleglinks: {{ plan.documents }} · Planrevision {{ plan.revision }}</p>
+
+    <h2>Entfernte Positionen</h2>
+    {% if plan.impacts %}
+      <table id="rollback-impacts">
+        <thead><tr><th>Konto/Depot</th><th>Währung/Instrument</th><th class="amount">Positionsbetrag</th></tr></thead>
+        <tbody>{% for impact in plan.impacts %}<tr><td>{{ impact.account }}</td><td>{{ impact.unit }}</td><td class="amount">{{ impact.amount }}</td></tr>{% endfor %}</tbody>
+      </table>
+      <p>Diese Geld- und Mengenpositionen entfallen. Der Kontostand ändert sich jeweils um den umgekehrten Betrag.</p>
+    {% else %}
+      <p>Keine Geld- oder Mengenposition betroffen.</p>
+    {% endif %}
+    {% if plan.removable_instruments %}<p>Automatisch angelegte, danach ungenutzte Instrumente werden entfernt: {{ plan.removable_instruments|join(", ") }}</p>{% endif %}
+
+    {% if plan.dependencies %}
+      <h2>Abhängigkeiten</h2>
+      {% for value in plan.dependencies %}<p class="check-point">Prüfen: {{ value }}</p>{% endfor %}
+      <p class="check-point">Rücknahme nicht möglich, solange diese Abhängigkeiten bestehen.</p>
+    {% else %}
+      <form method="post" action="{{ url_for('execute_rollback_route') }}" data-confirm="Rücknahme jetzt ausführen? Die aufgeführten Vorgänge und Positionen werden entfernt.">
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="plan_id" value="{{ plan.plan_id }}">
+        <input type="hidden" name="expected_revision" value="{{ plan.revision }}">
+        <input type="hidden" name="request_id" value="{{ plan.request_id }}">
+        <button type="submit">Rücknahme ausführen</button>
+        <a href="{{ url_for('imports_page') }}">Abbrechen</a>
+      </form>
+    {% endif %}
+  {% elif report %}
+    <h1>Rücknahme ausgeführt</h1>
+    <p class="notice" role="status">{% if report.replayed %}Diese Rücknahme war bereits ausgeführt; es wurde nichts erneut geändert.{% else %}Zurückgenommen.{% endif %}</p>
+    <ul id="rollback-report">{% for name in report.imports %}<li>{{ name }}</li>{% endfor %}</ul>
+    <p>Entfernte Vorgänge: {{ report.events }} · Positionen: {{ report.positions }} · Instrumente: {{ report.instruments }} · erhaltene Vorgänge: {{ report.retained }} · Datenrevision {{ report.data_revision }}</p>
+    <p>Die Belege können danach erneut importiert werden. <a href="{{ url_for('imports_page') }}">Zur Importliste</a></p>
+  {% endif %}
+{% endblock %}

@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% set active = "overview_page" %}
+{% block title %}Übersicht{% endblock %}
+{% block content %}
+  <h1>Stände am {{ as_of }}</h1>
+  <div class="toolbar">
+    <a id="previous" href="{{ navigation.previous }}">← zurück</a>
+    <a id="next" href="{{ navigation.next }}">vor →</a>
+    <a id="today" href="{{ navigation.today }}">Heute</a>
+    <span>Schritt:</span>
+    {% for value, label, link in navigation.steps %}<a href="{{ link }}"{% if value == step %} aria-current="true"{% endif %}>{{ label }}</a>{% endfor %}
+    <form method="get" action="{{ url_for('overview_page') }}">
+      <label for="as-of">Datum</label> <input id="as-of" type="date" name="date" value="{{ as_of }}">
+      <input type="hidden" name="step" value="{{ step }}">
+      <button type="submit">Anzeigen</button>
+    </form>
+  </div>
+  {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+  {% if notice %}<p class="warning" role="status">{{ notice }}</p>{% endif %}
+  {% if data_revision is not none %}
+    {% for group in groups %}
+      <h2{% if not group.active %} class="inactive"{% endif %}><a href="{{ url_for('account_detail', account_id=group.account_id) }}">{{ group.name }}</a> <small>{{ group.type }}{% if not group.active %} · deaktiviert{% endif %}</small></h2>
+      <table class="overview-lines">
+        <thead><tr><th>Währung/Instrument</th><th class="amount">Stand</th><th>Vollständigkeit</th></tr></thead>
+        <tbody>
+          {% for line in group.lines %}
+            <tr>
+              <td>{{ line.unit }}</td>
+              <td class="amount">{{ line.value }}{% if line.is_quantity and line.value != "Unbekannt" %} Stück{% endif %}</td>
+              <td{% if line.flag %} class="check-point"{% endif %}>{{ line.completeness }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p>Keine Stände zu diesem Stichtag.</p>
+    {% endfor %}
+    <p>Datenrevision {{ data_revision }}. Stände stammen aus dem Bestandsindex; unbekannte Werte werden nicht als 0 angezeigt.</p>
+  {% endif %}
+{% endblock %}

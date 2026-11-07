@@ -34,6 +34,20 @@ class ApplicationContractTests(unittest.TestCase):
         self.assertEqual(tax.consumptions[0].meaning, "cumulative")
         self.assertIsNone(tax.available)
 
+    def test_fake_import_list_exposes_summary_and_stable_page_contract(self):
+        job = self.service.start_import(ImportStart(("demo-buy-note",)))
+        page = self.service.list_imports(limit=1)
+        self.assertEqual(page.items[0].import_id, job.import_id)
+        self.assertEqual(page.items[0].job_id, job.job_id)
+        self.assertEqual(page.items[0].filenames, ("Beispielkauf.txt",))
+        self.assertEqual(page.items[0].candidate_count, 1)
+        self.assertFalse(page.items[0].committed)
+        preview = self.service.get_import_preview(job.import_id)
+        self.service.commit_import(CommitImport(job.import_id, preview.revision, "fake-import-list-commit"))
+        committed = self.service.list_imports().items[0]
+        self.assertTrue(committed.committed)
+        self.assertEqual(committed.job_status, "completed")
+
     def test_save_account_and_order_use_expected_revision(self):
         saved = self.service.save_account(AccountInput("Neues Demo", "cash", "checking", currency="EUR"), None)
         self.assertEqual(saved.revision, 1)

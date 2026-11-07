@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% set active = "imports_page" %}
+{% block title %}Importe{% endblock %}
+{% block content %}
+  <h1>Importe</h1>
+  {% if error %}<p class="error" role="alert">{{ error }} <a href="{{ url_for('imports_page') }}">Neu laden</a></p>{% endif %}
+  {% if rows %}
+    <p>Neueste zuerst.{% if is_continuation %} Fortsetzung – <a href="{{ url_for('imports_page') }}">zum Anfang</a>.{% endif %}</p>
+    <form id="rollback-selection" method="post" action="{{ url_for('preview_rollback_route') }}">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+    <table id="import-list">
+      <thead><tr><th><span class="visually-hidden">Auswahl</span></th><th>Gestartet</th><th>Dateien</th><th>Import</th><th>Job</th><th>Kandidaten</th><th></th></tr></thead>
+      <tbody>
+        {% for row in rows %}
+          <tr{% if row.rolled_back %} class="rolled-back"{% endif %}>
+            <td>{% if row.can_roll_back %}<input type="checkbox" name="import_id" value="{{ row.import_id }}" aria-label="Import vom {{ row.started_at }} auswählen">{% endif %}</td>
+            <td>{{ row.started_at }}</td>
+            <td>{% for name in row.filenames %}{{ name }}{% if not loop.last %}<br>{% endif %}{% else %}keine Datei{% endfor %}</td>
+            <td>{{ row.import_status }}</td>
+            <td>{{ row.job_status }}</td>
+            <td class="number">{{ row.candidates }}</td>
+            <td><a href="{{ url_for('job_page', job_id=row.job_id) }}">Öffnen</a></td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <button type="submit">Rücknahme der Auswahl prüfen</button> <span>Zeigt zuerst die Auswirkungen; es wird noch nichts geändert.</span>
+    </form>
+    <form method="post" action="{{ url_for('preview_rollback_route') }}" class="danger-zone">
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="all_imports" value="1">
+      <label><input type="checkbox" name="confirm_all" value="1" required> Ich möchte die Rücknahme <strong>aller</strong> übernommenen Importe prüfen.</label>
+      <button type="submit">Rücknahme aller Importe prüfen</button>
+    </form>
+    {% if next_cursor %}<p><a id="next-page" data-more-for="import-list" href="{{ url_for('imports_page', cursor=next_cursor) }}">Weitere Importe</a></p>{% endif %}
+  {% elif not error %}
+    <p>Noch keine Importe im Testprofil.</p>
+  {% endif %}
+{% endblock %}

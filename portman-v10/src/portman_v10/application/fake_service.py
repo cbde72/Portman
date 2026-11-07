@@ -3,13 +3,13 @@
 Er prüft DTO-/Anwendungsabläufe, aber keine persistente Transaktion und keine Finanzlogik.
 """
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime
 from hashlib import sha256
 
 from portman_v10.application.contracts import (
     Account, AccountInput, AccountPage, ApplicationError, BalanceLine, CommitImport,
     CommitReport, ConflictDecision, Document, DocumentContent, ErrorCode, ExecuteRollback,
-    ExemptionOrder, ExemptionOrderInput, ImportJob, ImportPreview, ImportStart,
+    ExemptionOrder, ExemptionOrderInput, ImportJob, ImportPage, ImportPreview, ImportStart, ImportSummary,
     Instrument, InstrumentInput, InstrumentPage, OpeningBalance, OpeningBalanceInput, Overview, PreviewItem, RollbackPreview,
     RollbackReport, RollbackSelection, Search, TaxConsumption, TaxSummary,
     TransactionDetail, TransactionPage, TransactionSummary,
@@ -45,6 +45,8 @@ class FakeService:
         self.documents["demo-dividend-note"] = DocumentContent(Document("demo-dividend-note", "Beispielausschuettung.txt", "text/plain", len(content), sha256(content).hexdigest()), content)
         self.jobs: dict[str, ImportJob] = {}
         self.previews: dict[str, ImportPreview] = {}
+        self.import_started_at: dict[str, str] = {}
+        self.import_documents: dict[str, tuple[str, ...]] = {}
         self.committed: dict[str, CommitReport] = {}
         self.rolled_back: dict[str, RollbackReport] = {}
         self.rollback_plans: dict[str, tuple[str, ...]] = {}
@@ -79,6 +81,18 @@ class FakeService:
         ordered = tuple(sorted(self.accounts.values(), key=lambda row: row.account_id))
         offset, next_cursor = self._page(cursor, limit, len(ordered))
         return AccountPage(ordered[offset:offset + limit], next_cursor, self.data_revision)
+
+    def list_imports(self, cursor: str | None = None, limit: int = 100) -> ImportPage:
+        ordered_jobs = tuple(sorted(self.jobs.values(), key=lambda job: (self.import_started_at[job.import_id], job.import_id), reverse=True))
+        offset, next_cursor = self._page(cursor, limit, len(ordered_jobs))
+        rolled_back_ids = {import_id for report in self.rolled_back.values() for import_id in report.removed_import_ids}
+        summaries = tuple(ImportSummary(
+            job.import_id, job.job_id, self.import_started_at[job.import_id],
+            "rolled_back" if job.import_id in rolled_back_ids else "committed" if job.import_id in self.committed else "preview",
+            job.state, tuple(self.documents[item].metadata.name for item in self.import_documents[job.import_id]),
+            len(self.previews[job.import_id].items), job.import_id in self.committed or job.import_id not in self.committed and any(job.import_id in report.removed_import_ids for report in self.rolled_back.values()),
+        ) for job in ordered_jobs[offset:offset + limit])
+        return ImportPage(summaries, next_cursor, self.data_revision)
 
     def get_account(self, account_id: str) -> Account:
         try:
@@ -188,6 +202,8 @@ class FakeService:
         import_id = f"demo-import-{len(self.jobs) + 1}"
         job = ImportJob(f"demo-job-{len(self.jobs) + 1}", import_id, "needs_review", 100, 1, document_count=len(value.document_ids), completed_documents=len(value.document_ids))
         self.jobs[job.job_id] = job
+        self.import_started_at[import_id] = datetime.now().astimezone().isoformat()
+        self.import_documents[import_id] = value.document_ids
         item = PreviewItem(f"{import_id}-candidate-1", "synthetic_confirmation", "unclassified", ("demo-giro",), (), (("cash", ExactValue("8"), "EUR"),), (date(2025, 3, 25),), "Synthetische Bestätigung")
         self.previews[import_id] = ImportPreview(import_id, 1, self.data_revision, (item,))
         return job
@@ -244,6 +260,9 @@ class FakeService:
         event_ids = tuple(item.candidate_id for item in preview.items)
         report = CommitReport(command.import_id, event_ids, self.data_revision + 1, False)
         self.committed[command.import_id] = report
+        job = next(job for job in self.jobs.values() if job.import_id == command.import_id)
+        self.jobs[job.job_id] = replace(job, state="completed", progress=100, revision=job.revision + 1,
+                                        completed_documents=job.document_count)
         self.request_inputs[command.request_id] = (fingerprint, report)
         self.data_revision += 1
         return report

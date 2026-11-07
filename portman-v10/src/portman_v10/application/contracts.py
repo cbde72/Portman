@@ -225,6 +225,25 @@ class InstrumentPage:
 
 
 @dataclass(frozen=True, slots=True)
+class ImportSummary:
+    import_id: str
+    job_id: str
+    started_at: str
+    import_status: Literal["started", "preview", "committed", "cancelled", "failed", "rolled_back"]
+    job_status: Literal["queued", "running", "needs_review", "completed", "failed", "cancelled"]
+    filenames: tuple[str, ...]
+    candidate_count: int
+    committed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ImportPage:
+    items: tuple[ImportSummary, ...]
+    next_cursor: str | None
+    data_revision: int
+
+
+@dataclass(frozen=True, slots=True)
 class ImportStart:
     document_ids: tuple[str, ...]
     account_hint: str | None = None
@@ -317,6 +336,8 @@ class PreviewItem:
     parser_package_version: str | None = None
     parser_api_version: str | None = None
     extraction_preparation_version: str | None = None
+    instrument_resolution: Literal["not_applicable", "existing", "will_create", "unresolved"] = "not_applicable"
+    instrument_message: str | None = None
 
     def __post_init__(self):
         _required(self.candidate_id, "candidate_id")
@@ -396,7 +417,7 @@ class RecordedDecision:
 @dataclass(frozen=True, slots=True)
 class ConflictDecision:
     candidate_id: str
-    decision: Literal["accept", "link", "ignore", "assign_account"]
+    decision: Literal["accept", "accept_unmatched", "link", "ignore", "assign_account"]
     target_id: str | None = None
     account_id: str | None = None
     candidate_revision: int = 1
@@ -428,6 +449,7 @@ class CommitReport:
     replayed: bool
     created_event_ids: tuple[str, ...] = ()
     linked_event_ids: tuple[str, ...] = ()
+    created_instrument_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -441,12 +463,30 @@ class RollbackSelection:
 
 
 @dataclass(frozen=True, slots=True)
+class RollbackContribution:
+    contribution_id: str
+    import_id: str
+    event_id: str | None
+    document_id: str | None
+    target_type: str
+    field_name: str
+    action: str
+    value_text: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class RollbackPreview:
     plan_id: str
     revision: int
     import_ids: tuple[str, ...]
     affected_event_ids: tuple[str, ...]
     unresolved_dependencies: tuple[str, ...]
+    affected_contribution_ids: tuple[str, ...] = ()
+    affected_document_links: tuple[str, ...] = ()
+    affected_instrument_ids: tuple[str, ...] = ()
+    balance_impacts: tuple[str, ...] = ()
+    removable_instrument_ids: tuple[str, ...] = ()
+    affected_contributions: tuple[RollbackContribution, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -466,6 +506,9 @@ class RollbackReport:
     retained_event_ids: tuple[str, ...]
     data_revision: int
     replayed: bool
+    removed_event_ids: tuple[str, ...] = ()
+    removed_instrument_ids: tuple[str, ...] = ()
+    removed_position_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -614,6 +657,7 @@ class TaxSummary:
 
 class ApplicationService(Protocol):
     def list_accounts(self, cursor: str | None = None, limit: int = 100) -> AccountPage: ...
+    def list_imports(self, cursor: str | None = None, limit: int = 100) -> ImportPage: ...
     def save_account(self, value: AccountInput, expected_revision: int | None) -> Account: ...
     def get_account(self, account_id: str) -> Account: ...
     def deactivate_account(self, account_id: str, expected_revision: int) -> Account: ...

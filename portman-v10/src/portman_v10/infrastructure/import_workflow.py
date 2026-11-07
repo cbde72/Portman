@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from portman_v10.application.contracts import (
     ApplicationError, CommitImport, Conflict, ConflictDecision, DocumentUpload, DocumentUploadResult,
-    ErrorCode, ImportDocumentResult, ImportJob, ImportPreview, ImportStart,
+    ErrorCode, ImportDocumentResult, ImportJob, ImportPage, ImportPreview, ImportStart,
     RecordedDecision,
 )
 from portman_v10.infrastructure.document_storage import DocumentStorage
@@ -181,6 +181,22 @@ class ImportWorkflow:
         except Exception as error:
             raise ApplicationError(ErrorCode.STORAGE_ERROR, "Import konnte nicht atomar übernommen werden") from error
 
+    def list_imports(self, cursor: str | None = None, limit: int = 100) -> ImportPage:
+        """Listet Importläufe über den Anwendungsadapter mit stabiler Seitennavigation."""
+        return self.store.list_imports(cursor, limit)
+
+    def preview_rollback(self, selection):
+        """Anwendungsschnittstelle für einzelne, ausgewählte oder ausdrücklich alle Importe."""
+        return self.store.preview_rollback(selection)
+
+    def execute_rollback(self, command):
+        """Anwendungsschnittstelle; SQL bleibt im SQLiteStore gekapselt."""
+        return self.store.execute_rollback(command)
+
+    def get_overview(self, as_of, account_ids=()):
+        """Liefert Bestände über den Anwendungsadapter aus dem persistenten Index."""
+        return self.store.get_overview(as_of, account_ids)
+
     def _data_revision(self) -> int:
         connection = self.store.connect()
         try:
@@ -267,16 +283,21 @@ class ImportWorkflow:
             self.store.save_import_progress(final, tuple(results), encode_preview(preview), preview.data_revision)
 
     def _classify_candidates(self, items):
-        """Nur sichere Kontokontext+erkannte Bankreferenzen klassifizieren."""
+        """Sichere Referenzen und exakte Finanzreport-Bewegungstreffer klassifizieren."""
         by_key = {}
         result = []
         for item in sorted(items, key=lambda value: (value.document_id, value.candidate_id)):
             connection = self.store.connect()
             try:
-                linked_events = connection.execute("SELECT event_id FROM event_documents WHERE document_id=? ORDER BY event_id", (item.document_id,)).fetchall()
+                linked_events = connection.execute("SELECT event_id,page_or_entry FROM event_documents WHERE document_id=? ORDER BY event_id", (item.document_id,)).fetchall()
             finally:
                 connection.close()
             if linked_events:
+                matching = tuple(value[0] for value in linked_events if value[1] == item.candidate_id)
+                if len(matching) == 1:
+                    result.append(replace(item, disposition="conflict", conflicts=(*item.conflicts, Conflict(
+                        ErrorCode.POSSIBLE_DUPLICATE, "Diese Belegzeile ist bereits einem Vorgang zugeordnet", item.candidate_id, matching[0]))))
+                    continue
                 event_ids = tuple(value[0] for value in linked_events)
                 if len(event_ids) == 1:
                     result.append(replace(item, disposition="conflict", conflicts=(*item.conflicts, Conflict(ErrorCode.POSSIBLE_DUPLICATE, "Dieser Dateiinhalt ist bereits einem Vorgang zugeordnet", item.candidate_id, event_ids[0]))))
@@ -300,6 +321,27 @@ class ImportWorkflow:
                         continue
                 finally:
                     connection.close()
+            if (item.plugin_id, item.handler_id, item.kind) == ("comdirect.finanzreport", "finanzreport", "CASH_BOOKING") and len(item.movements) == 1:
+                movement = item.movements[0]
+                if (movement.movement_type == "cash" and movement.account_id and movement.currency and movement.amount
+                        and movement.date and movement.status == "ACTUAL"):
+                    connection = self.store.connect()
+                    try:
+                        rows = connection.execute(
+                            "SELECT DISTINCT e.event_id,e.kind FROM positions p JOIN events e ON e.event_id=p.event_id "
+                            "WHERE p.account_id=? AND p.currency=? AND p.amount_decimal=? COLLATE PORTMAN_DECIMAL "
+                            "AND p.effective_date=? ORDER BY e.event_id",
+                            (movement.account_id, movement.currency, movement.amount.text, movement.date.isoformat()),
+                        ).fetchall()
+                    finally:
+                        connection.close()
+                    if rows:
+                        related = rows[0]["event_id"] if len(rows) == 1 and rows[0]["kind"] == item.kind else None
+                        message = ("Gleiche Konto-/Währungs-/Betrags-/Datumsposition gefunden; Vorgang prüfen und gezielt verknüpfen"
+                                   if related else "Mögliche Dublette anhand gleicher Konto-/Währungs-/Betrags-/Datumsposition; Treffer sind mehrdeutig oder haben einen anderen Vorgangstyp")
+                        result.append(replace(item, disposition="conflict", conflicts=(*item.conflicts, Conflict(
+                            ErrorCode.POSSIBLE_DUPLICATE, message, item.candidate_id, related))))
+                        continue
             reference = dict(item.references).get("bank_reference")
             reference_status = dict(item.references).get("bank_reference_status")
             cash_accounts = sorted({movement.account_id for movement in item.movements if movement.movement_type == "cash" and movement.account_id})
@@ -323,6 +365,26 @@ class ImportWorkflow:
                                     components=tuple(sorted(set((*previous.components, *item.components)), key=lambda value: (value.category, value.kind, value.amount.text if value.amount else "", value.currency or ""))))
                 result[result.index(previous)] = merged
                 by_key[key] = merged
+        ambiguous_rows = {}
+        for index, item in enumerate(result):
+            if (item.plugin_id, item.handler_id, item.kind) != ("comdirect.finanzreport", "finanzreport", "CASH_BOOKING"):
+                continue
+            if dict(item.references).get("bank_reference_status") == "RECOGNIZED" or len(item.movements) != 1:
+                continue
+            movement = item.movements[0]
+            if movement.movement_type == "cash" and movement.account_id and movement.amount and movement.currency and movement.date:
+                key = movement.account_id, movement.currency, movement.amount.text, movement.date.isoformat()
+                ambiguous_rows.setdefault(key, []).append(index)
+        for indices in ambiguous_rows.values():
+            if len(indices) < 2:
+                continue
+            for index in indices:
+                item = result[index]
+                result[index] = replace(item, disposition="conflict", conflicts=(*item.conflicts, Conflict(
+                    ErrorCode.POSSIBLE_DUPLICATE,
+                    "Mehrere Finanzreportzeilen haben dasselbe Konto, dieselbe Währung, denselben Betrag und dasselbe Datum; einzeln fachlich prüfen",
+                    item.candidate_id,
+                )))
         return tuple(sorted(result, key=lambda value: (value.document_id, value.candidate_id)))
 
     @staticmethod

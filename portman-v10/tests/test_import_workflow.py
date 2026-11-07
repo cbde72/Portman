@@ -2,17 +2,19 @@ from io import BytesIO
 from pathlib import Path
 from threading import Event
 from tempfile import TemporaryDirectory
+from datetime import date
 import unittest
 
 from pypdf import PdfWriter
 
 from portman_v10.application.contracts import (
-    AccountIdentifier, AccountInput, ApplicationError, CommitImport, Conflict, ConflictDecision,
-    DocumentUpload, ErrorCode, ImportDocumentResult, ImportJob, ImportStart,
+    AccountIdentifier, AccountInput, ApplicationError, CommitImport, Conflict, ConflictDecision, OpeningBalanceInput,
+    DocumentUpload, ErrorCode, ExecuteRollback, ImportDocumentResult, ImportJob, ImportStart, RollbackSelection,
     InstrumentInput,
 )
 from portman_v10.infrastructure.import_workflow import ImportWorkflow
 from portman_v10.infrastructure.sqlite_store import SQLiteStore
+from portman_v10.domain.values import ExactValue
 from synthetic_pdf import make_text_pdf
 
 
@@ -90,6 +92,37 @@ class ImportWorkflowTests(unittest.TestCase):
             self.assertEqual(connection.execute("SELECT count(*) FROM balance_index").fetchone()[0], 2)
         finally:
             connection.close()
+        overview = self.workflow.get_overview(date(2026, 7, 1))
+        self.assertEqual(overview.data_revision, report.data_revision)
+        self.assertEqual(len(overview.lines), 2)
+        self.assertTrue(all(line.value is None and line.completeness == "unknown" for line in overview.lines))
+
+    def test_list_imports_summary_sorting_and_revisioned_cursor(self):
+        uploaded_a, job_a, preview_a = self._ready_preview(name="first-source.pdf")
+        uploaded_b, job_b, _ = self._ready_preview(name="second-source.pdf")
+        self.workflow.commit_import(CommitImport(job_a.import_id, preview_a.revision, "list-imports-commit"))
+
+        first_page = self.workflow.list_imports(limit=1)
+        self.assertEqual(first_page.items[0].import_id, job_b.import_id)
+        self.assertEqual(first_page.items[0].job_id, job_b.job_id)
+        self.assertEqual(first_page.items[0].filenames, (uploaded_b.document.name,))
+        self.assertEqual(first_page.items[0].candidate_count, 1)
+        self.assertEqual(first_page.items[0].import_status, "preview")
+        self.assertFalse(first_page.items[0].committed)
+        self.assertIsNotNone(first_page.next_cursor)
+
+        second_page = self.workflow.list_imports(first_page.next_cursor, limit=1)
+        self.assertEqual(second_page.items[0].import_id, job_a.import_id)
+        self.assertEqual(second_page.items[0].filenames, (uploaded_a.document.name,))
+        self.assertTrue(second_page.items[0].committed)
+        self.assertEqual(second_page.items[0].import_status, "committed")
+        self.assertEqual(second_page.items[0].job_status, "completed")
+
+        stale_page = self.workflow.list_imports(limit=1)
+        self.store.save_instrument(InstrumentInput("Indexfonds angepasst", "fund", isin="DE0008474511", instrument_id=self.instrument.instrument_id), self.instrument.revision)
+        with self.assertRaises(ApplicationError) as stale:
+            self.workflow.list_imports(stale_page.next_cursor, limit=1)
+        self.assertEqual(stale.exception.code, ErrorCode.STALE_REVISION)
 
     def test_identical_real_purchases_without_safe_reference_remain_separate(self):
         first, job_a, preview_a = self._ready_preview(name="first.pdf")
@@ -133,6 +166,103 @@ class ImportWorkflowTests(unittest.TestCase):
         self.assertEqual(len(stored.positions), 2)
         self.assertEqual(len([row for row in stored.components if row.component_type == "fee"]), 1)
 
+    def test_complement_adds_missing_position_with_provenance_and_rollback_removes_it(self):
+        from dataclasses import replace
+        from portman_v10.infrastructure.preview_codec import encode_preview
+
+        uploaded_a, job_a, preview_a = self._ready_preview(name="partial-primary.pdf")
+        item_a = preview_a.items[0]
+        cash = next(value for value in item_a.movements if value.movement_type == "cash")
+        partial_item = replace(item_a, movements=(cash,))
+        self.store.replace_import_preview_items(job_a.import_id, preview_a.revision,
+                                                encode_preview(replace(preview_a, items=(partial_item,))))
+        preview_a = self.workflow.get_import_preview(job_a.import_id)
+        report_a = self.workflow.commit_import(CommitImport(job_a.import_id, preview_a.revision, "partial-primary-commit"))
+        event_id = report_a.created_event_ids[0]
+        self.assertEqual(len(self.store.load_event(event_id).positions), 1)
+
+        writer = PdfWriter(clone_from=BytesIO(make_text_pdf(COMDIRECT_BUY)))
+        writer.add_metadata({"/Title": "Teilbeleg mit Stückposition"})
+        complement_pdf = BytesIO()
+        writer.write(complement_pdf)
+        uploaded_b = self.workflow.upload_document(DocumentUpload("quantity-complement.pdf", complement_pdf.getvalue()))
+        job_b = self.workflow.wait(self.workflow.start_import(ImportStart((uploaded_b.document.document_id,))).job_id, 10)
+        preview_b = self.workflow.get_import_preview(job_b.import_id)
+        candidate_b = preview_b.items[0]
+        from dataclasses import replace
+        ready_b = replace(candidate_b, review_status="complete_candidate", missing_fields=(), disposition="unclassified",
+                          movements=tuple(replace(value, account_assignment="exact_identifier") for value in candidate_b.movements))
+        self.store.replace_import_preview_items(job_b.import_id, preview_b.revision,
+                                                encode_preview(replace(preview_b, items=(ready_b,))))
+        preview_b = self.workflow.get_import_preview(job_b.import_id)
+        self.workflow.resolve_import_item(job_b.import_id,
+                                          ConflictDecision(ready_b.candidate_id, "accept", candidate_revision=ready_b.revision),
+                                          preview_b.revision)
+        preview_b = self.workflow.get_import_preview(job_b.import_id)
+        item_b = preview_b.items[0]
+        linked_item = replace(item_b, disposition="complement",
+                              conflicts=(Conflict(ErrorCode.POSSIBLE_DUPLICATE, "gleicher Vorgang", item_b.candidate_id, event_id),))
+        self.store.replace_import_preview_items(job_b.import_id, preview_b.revision,
+                                                encode_preview(replace(preview_b, items=(linked_item,))))
+        preview_b = self.workflow.get_import_preview(job_b.import_id)
+        self.workflow.resolve_import_item(job_b.import_id,
+                                          ConflictDecision(item_b.candidate_id, "link", target_id=event_id, candidate_revision=item_b.revision),
+                                          preview_b.revision)
+        preview_b = self.workflow.get_import_preview(job_b.import_id)
+        report_b = self.workflow.commit_import(CommitImport(job_b.import_id, preview_b.revision, "quantity-complement-commit"))
+        self.assertEqual(report_b.linked_event_ids, (event_id,))
+        stored = self.store.load_event(event_id)
+        self.assertEqual(len(stored.positions), 2)
+        self.assertEqual(len([value for value in stored.contributions if value.import_id == job_b.import_id and value.field_name.startswith("position:") and value.action == "create"]), 1)
+        self.assertEqual(len(stored.document_ids), 2)
+
+        rollback = self.workflow.preview_rollback(RollbackSelection((job_b.import_id,)))
+        result = self.workflow.execute_rollback(ExecuteRollback(rollback.plan_id, rollback.revision, "quantity-complement-rollback"))
+        self.assertEqual(result.retained_event_ids, (event_id,))
+        self.assertEqual(len(self.store.load_event(event_id).positions), 1)
+        self.assertEqual(set(self.store.load_event(event_id).document_ids), {uploaded_a.document.document_id})
+        self.assertNotIn(uploaded_b.document.document_id, self.store.load_event(event_id).document_ids)
+
+    def test_complement_position_conflict_is_reported_and_atomic(self):
+        from dataclasses import replace
+        from portman_v10.infrastructure.preview_codec import encode_preview
+
+        _, job_a, preview_a = self._ready_preview(name="conflict-primary.pdf")
+        item_a = preview_a.items[0]
+        cash = next(value for value in item_a.movements if value.movement_type == "cash")
+        partial_item = replace(item_a, movements=(cash,))
+        self.store.replace_import_preview_items(job_a.import_id, preview_a.revision,
+                                                encode_preview(replace(preview_a, items=(partial_item,))))
+        preview_a = self.workflow.get_import_preview(job_a.import_id)
+        report_a = self.workflow.commit_import(CommitImport(job_a.import_id, preview_a.revision, "conflict-primary-commit"))
+        event_id = report_a.created_event_ids[0]
+        before = self.store.load_event(event_id)
+
+        _, job_b, preview_b = self._ready_preview(name="conflicting-complement.pdf")
+        item_b = preview_b.items[0]
+        cash_b = next(value for value in item_b.movements if value.movement_type == "cash")
+        wrong_cash = replace(cash_b, amount=ExactValue("999"))
+        mismatched = replace(item_b, movements=tuple(wrong_cash if value == cash_b else value for value in item_b.movements),
+                             disposition="complement",
+                             conflicts=(Conflict(ErrorCode.POSSIBLE_DUPLICATE, "gleicher Vorgang", item_b.candidate_id, event_id),))
+        self.store.replace_import_preview_items(job_b.import_id, preview_b.revision,
+                                                encode_preview(replace(preview_b, items=(mismatched,))))
+        preview_b = self.workflow.get_import_preview(job_b.import_id)
+        self.workflow.resolve_import_item(job_b.import_id,
+                                          ConflictDecision(item_b.candidate_id, "link", target_id=event_id, candidate_revision=item_b.revision),
+                                          preview_b.revision)
+        preview_b = self.workflow.get_import_preview(job_b.import_id)
+        with self.assertRaises(ApplicationError) as conflict:
+            self.workflow.commit_import(CommitImport(job_b.import_id, preview_b.revision, "conflicting-complement-commit"))
+        self.assertEqual(conflict.exception.code, ErrorCode.SOURCE_CONFLICT)
+        self.assertEqual(self.store.load_event(event_id).positions, before.positions)
+        self.assertEqual(self.store.load_event(event_id).document_ids, before.document_ids)
+        connection = self.store.connect()
+        try:
+            self.assertEqual(connection.execute("SELECT status FROM imports WHERE import_id=?", (job_b.import_id,)).fetchone()[0], "preview")
+        finally:
+            connection.close()
+
     def test_identical_file_reimport_requires_link_and_does_not_duplicate_booking(self):
         first_upload, first_job, first_preview = self._ready_preview(name="original.pdf")
         first_report = self.workflow.commit_import(CommitImport(first_job.import_id, first_preview.revision, "original-commit"))
@@ -162,7 +292,8 @@ class ImportWorkflowTests(unittest.TestCase):
         try:
             self.assertEqual(connection.execute("SELECT count(*) FROM events").fetchone()[0], 1)
             self.assertEqual(connection.execute("SELECT count(*) FROM positions").fetchone()[0], 2)
-            self.assertEqual(connection.execute("SELECT count(*) FROM import_contributions WHERE event_id=?", (first_report.event_ids[0],)).fetchone()[0], 2)
+            self.assertEqual(connection.execute("SELECT count(*) FROM import_contributions WHERE import_id=? AND event_id=? AND field_name LIKE 'position:%' AND action='link'",
+                                                 (repeated_job.import_id, first_report.event_ids[0])).fetchone()[0], 2)
         finally:
             connection.close()
 
@@ -197,7 +328,7 @@ class ImportWorkflowTests(unittest.TestCase):
             connection.close()
 
     def test_concurrent_commit_requests_with_same_request_id_commit_once(self):
-        _, job, preview = self._ready_preview()
+        uploaded, job, preview = self._ready_preview()
         command = CommitImport(job.import_id, preview.revision, "concurrent-request")
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=2) as executor:
@@ -211,7 +342,7 @@ class ImportWorkflowTests(unittest.TestCase):
             connection.close()
 
     def test_commit_fault_rolls_back_every_write(self):
-        _, job, preview = self._ready_preview()
+        uploaded, job, preview = self._ready_preview()
         original = self.store._insert_import_event
         def fail_after_insert(*args, **kwargs):
             original(*args, **kwargs)
@@ -226,6 +357,296 @@ class ImportWorkflowTests(unittest.TestCase):
             self.assertEqual(connection.execute("SELECT status FROM imports WHERE import_id=?", (job.import_id,)).fetchone()[0], "preview")
         finally:
             connection.close()
+        self.store._insert_import_event = original
+        _, repeat_job, repeat_preview = self._ready_preview(name="same-source-after-rollback.pdf")
+        reimported = self.workflow.commit_import(CommitImport(repeat_job.import_id, repeat_preview.revision, "rollback-source-reimport"))
+        self.assertEqual(len(reimported.created_event_ids), 1)
+        self.assertEqual(self.workflow.get_document(uploaded.document.document_id).content, make_text_pdf(COMDIRECT_BUY))
+
+    def test_rollback_preview_execution_replay_staleness_and_reopen(self):
+        from datetime import date
+
+        self.store.record_opening(OpeningBalanceInput("rollback-cash-opening", self.cash.account_id, date(2026, 1, 1), currency="EUR", amount=ExactValue("1000")))
+        self.store.record_opening(OpeningBalanceInput("rollback-position-opening", self.depot.account_id, date(2026, 1, 1), instrument_id=self.instrument.instrument_id, quantity=ExactValue("5")))
+        with self.store.transaction() as connection:
+            revision = connection.execute("SELECT data_revision FROM app_state WHERE singleton=1").fetchone()[0]
+            self.store._rebuild_balance_index(connection, revision)
+        _, job, preview = self._ready_preview()
+        committed = self.workflow.commit_import(CommitImport(job.import_id, preview.revision, "rollback-source-commit"))
+        connection = self.store.connect()
+        try:
+            components = connection.execute("SELECT component_id FROM event_components WHERE event_id=?", (committed.created_event_ids[0],)).fetchall()
+            self.assertEqual(len(components), 1)
+            self.assertTrue(connection.execute("SELECT 1 FROM import_contributions WHERE event_id=? AND field_name LIKE 'component:%'", (committed.created_event_ids[0],)).fetchone())
+            after_import_index = tuple(tuple(row) for row in connection.execute("SELECT account_id,asset_key,as_of,value_decimal,data_revision FROM balance_index ORDER BY account_id,asset_key,as_of"))
+            self.assertIn((self.cash.account_id, "CURRENCY:EUR", "2026-07-01", "873.5", committed.data_revision), after_import_index)
+            self.assertIn((self.depot.account_id, f"INSTRUMENT:{self.instrument.instrument_id}", "2026-07-01", "5.125", committed.data_revision), after_import_index)
+        finally:
+            connection.close()
+        plan = self.workflow.preview_rollback(RollbackSelection((job.import_id,)))
+        self.assertEqual(plan.affected_event_ids, committed.created_event_ids)
+        self.assertTrue(plan.affected_contribution_ids)
+        self.assertTrue(any(self.cash.account_id in item and "CURRENCY:EUR" in item for item in plan.balance_impacts))
+        connection = self.store.connect()
+        try:
+            self.assertEqual(tuple(tuple(row) for row in connection.execute("SELECT account_id,asset_key,as_of,value_decimal,data_revision FROM balance_index ORDER BY account_id,asset_key,as_of")), after_import_index)
+        finally:
+            connection.close()
+        command = ExecuteRollback(plan.plan_id, plan.revision, "rollback-source-once")
+        report = self.workflow.execute_rollback(command)
+        self.assertEqual(report.removed_import_ids, (job.import_id,))
+        self.assertEqual(report.removed_event_ids, committed.created_event_ids)
+        connection = self.store.connect()
+        try:
+            self.assertEqual(connection.execute("SELECT count(*) FROM event_components WHERE event_id=?", (committed.created_event_ids[0],)).fetchone()[0], 0)
+            final_balances = {(row["account_id"], row["asset_key"], row["value_decimal"]) for row in connection.execute("SELECT account_id,asset_key,value_decimal FROM balance_index")}
+            self.assertEqual(final_balances, {(self.cash.account_id, "CURRENCY:EUR", "1000"),
+                                               (self.depot.account_id, f"INSTRUMENT:{self.instrument.instrument_id}", "5")})
+        finally:
+            connection.close()
+        self.assertTrue(self.workflow.execute_rollback(command).replayed)
+        with self.assertRaises(ApplicationError) as reused:
+            self.workflow.execute_rollback(ExecuteRollback("different-plan", plan.revision, "rollback-source-once"))
+        self.assertEqual(reused.exception.code, ErrorCode.REQUEST_ID_REUSED)
+        with self.assertRaises(ApplicationError) as stale:
+            self.workflow.execute_rollback(ExecuteRollback(plan.plan_id, plan.revision, "rollback-source-again"))
+        self.assertEqual(stale.exception.code, ErrorCode.STALE_REVISION)
+        self.workflow.close()
+        reopened_store = SQLiteStore(self.root / "v10.sqlite")
+        self.workflow = ImportWorkflow(reopened_store, self.root)
+        self.assertTrue(self.workflow.execute_rollback(command).replayed)
+        summary = self.workflow.list_imports().items[0]
+        self.assertEqual(summary.import_status, "rolled_back")
+        self.assertEqual(summary.job_status, "completed")
+        self.assertTrue(summary.committed)  # Historische erfolgreiche Übernahme; aktueller Zustand steht in import_status.
+        connection = reopened_store.connect()
+        try:
+            self.assertEqual(connection.execute("SELECT status FROM imports WHERE import_id=?", (job.import_id,)).fetchone()[0], "rolled_back")
+            self.assertEqual(connection.execute("SELECT count(*) FROM events").fetchone()[0], 2)
+            self.assertEqual(connection.execute("SELECT count(*) FROM balance_index").fetchone()[0], 2)
+            self.assertEqual(connection.execute("SELECT count(*) FROM operations WHERE request_id='rollback-source-once'").fetchone()[0], 1)
+        finally:
+            connection.close()
+
+    def test_rollback_shared_evidence_orders_and_auto_instrument_lifecycle(self):
+        source = """comdirect\nWertpapierkauf\nDepotnummer: 123456\nWKN: A2H57N\nISIN: LU1681041973\nStk. 0,25 AIS-AM.E.H.D.F.EOC, WKN / ISIN: A2H57N / LU1681041973\nIBAN DE00000000000000000001\nValuta 02.05.2025\nZu Ihren Lasten EUR 49,92\nReferenz: A2HROLLBACK01"""
+
+        def ready(text, name):
+            uploaded = self._upload(text, name)
+            job = self.workflow.wait(self.workflow.start_import(ImportStart((uploaded.document.document_id,))).job_id, 10)
+            preview = self.workflow.get_import_preview(job.import_id)
+            item = preview.items[0]
+            self.workflow.resolve_import_item(job.import_id, ConflictDecision(item.candidate_id, "accept", candidate_revision=item.revision), preview.revision)
+            return job, self.workflow.get_import_preview(job.import_id)
+
+        job_a, preview_a = ready(source, "rollback-a.pdf")
+        report_a = self.workflow.commit_import(CommitImport(job_a.import_id, preview_a.revision, "rollback-a-commit"))
+        instrument_id = report_a.created_instrument_ids[0]
+        writer = PdfWriter(clone_from=BytesIO(make_text_pdf(source)))
+        writer.add_metadata({"/Title": "zweiter Beleg"})
+        second_pdf = BytesIO()
+        writer.write(second_pdf)
+        uploaded_b = self.workflow.upload_document(DocumentUpload("rollback-b.pdf", second_pdf.getvalue()))
+        job_b = self.workflow.wait(self.workflow.start_import(ImportStart((uploaded_b.document.document_id,))).job_id, 10)
+        preview_b = self.workflow.get_import_preview(job_b.import_id)
+        item_b = preview_b.items[0]
+        from dataclasses import replace
+        linked = replace(item_b, review_status="complete_candidate", missing_fields=(), disposition="complement",
+                         movements=tuple(replace(value, account_assignment="exact_identifier") for value in item_b.movements),
+                         original_text=self.store.load_event(report_a.event_ids[0]).event.original_text,
+                         conflicts=(Conflict(ErrorCode.POSSIBLE_DUPLICATE, "same purchase", item_b.candidate_id, report_a.event_ids[0]),))
+        from portman_v10.infrastructure.preview_codec import encode_preview
+        self.store.replace_import_preview_items(job_b.import_id, preview_b.revision, encode_preview(replace(preview_b, items=(linked,))))
+        preview_b = self.workflow.get_import_preview(job_b.import_id)
+        self.workflow.resolve_import_item(job_b.import_id, ConflictDecision(item_b.candidate_id, "link", target_id=report_a.event_ids[0], candidate_revision=item_b.revision), preview_b.revision)
+        preview_b = self.workflow.get_import_preview(job_b.import_id)
+        self.workflow.commit_import(CommitImport(job_b.import_id, preview_b.revision, "rollback-b-commit"))
+        with self.store.transaction() as connection:
+            connection.execute("INSERT INTO import_contributions(contribution_id,import_id,event_id,document_id,source_kind,target_type,field_name,action,previous_value_text,value_text,created_at) VALUES('later-field',?,?,?,'import','event','original_text','set',NULL,'Belegergänzung','2026-11-07T00:00:00+01:00')",
+                               (job_b.import_id, report_a.event_ids[0], uploaded_b.document.document_id))
+            connection.execute("UPDATE events SET original_text='Manuelle spätere Notiz',revision=revision+1 WHERE event_id=?", (report_a.event_ids[0],))
+            connection.execute("INSERT INTO import_contributions(contribution_id,event_id,source_kind,target_type,field_name,action,value_text,created_at) VALUES('manual-later-field',?,'manual','event','original_text','set','Manuelle spätere Notiz','2026-11-07T00:00:00+01:00')", (report_a.event_ids[0],))
+
+        # A zurücknehmen: der von B belegte Kauf und das Instrument bleiben erhalten.
+        plan_a = self.workflow.preview_rollback(RollbackSelection((job_a.import_id,)))
+        self.assertNotIn(instrument_id, plan_a.removable_instrument_ids)
+        rollback_a = self.workflow.execute_rollback(ExecuteRollback(plan_a.plan_id, plan_a.revision, "rollback-a"))
+        self.assertEqual(rollback_a.retained_event_ids, report_a.event_ids)
+        self.assertEqual(self.store.match_instrument_identifier("ISIN", "standard", "LU1681041973"), (instrument_id,))
+
+        # Nach B verschwindet das letzte aktive Ereignis; die instrumenteigene Importherkunft erlaubt Bereinigung.
+        plan_b = self.workflow.preview_rollback(RollbackSelection((job_b.import_id,)))
+        self.assertIn(instrument_id, plan_b.removable_instrument_ids)
+        rollback_b = self.workflow.execute_rollback(ExecuteRollback(plan_b.plan_id, plan_b.revision, "rollback-b"))
+        self.assertEqual(rollback_b.retained_event_ids, report_a.event_ids)
+        retained_event = self.store.load_event(report_a.event_ids[0])
+        self.assertEqual(retained_event.event.original_text, "Manuelle spätere Notiz")
+        self.assertEqual(retained_event.positions, ())
+        self.assertEqual(self.store.match_instrument_identifier("ISIN", "standard", "LU1681041973"), ())
+
+    def test_rollback_retains_manually_edited_import_instrument(self):
+        source = """comdirect\nWertpapierkauf\nDepotnummer: 123456\nWKN: A2H57N\nISIN: LU1681041973\nStk. 0,25 AIS-AM.E.H.D.F.EOC, WKN / ISIN: A2H57N / LU1681041973\nIBAN DE00000000000000000001\nValuta 02.05.2025\nZu Ihren Lasten EUR 49,92\nReferenz: A2HMANUAL01"""
+        _, job, preview = self._ready_preview(source, "rollback-manual-instrument.pdf")
+        report = self.workflow.commit_import(CommitImport(job.import_id, preview.revision, "rollback-manual-commit"))
+        instrument_id = report.created_instrument_ids[0]
+        instrument = self.store.get_instrument(instrument_id)
+        self.store.save_instrument(InstrumentInput("Manuell bearbeitet", instrument.asset_type, instrument_id=instrument_id), instrument.revision)
+        plan = self.workflow.preview_rollback(RollbackSelection((job.import_id,)))
+        self.assertNotIn(instrument_id, plan.removable_instrument_ids)
+        result = self.workflow.execute_rollback(ExecuteRollback(plan.plan_id, plan.revision, "rollback-manual"))
+        self.assertEqual(result.removed_instrument_ids, ())
+        self.assertEqual(self.store.get_instrument(instrument_id).name, "Manuell bearbeitet")
+
+    def test_rollback_creator_keeps_auto_instrument_used_by_another_import(self):
+        source_a = """comdirect
+Wertpapierkauf
+Depotnummer: 123456
+WKN: A2H57N
+ISIN: LU1681041973
+Stk. 0,25 AIS-AM.E.H.D.F.EOC, WKN / ISIN: A2H57N / LU1681041973
+IBAN DE00000000000000000001
+Valuta 02.05.2025
+Zu Ihren Lasten EUR 49,92
+Referenz: A2HSEPARATE01"""
+        _, job_a, preview_a = self._ready_preview(source_a, "separate-a.pdf")
+        report_a = self.workflow.commit_import(CommitImport(job_a.import_id, preview_a.revision, "separate-a-commit"))
+        instrument_id = report_a.created_instrument_ids[0]
+        source_b = source_a.replace("02.05.2025", "03.05.2025").replace("A2HSEPARATE01", "A2HSEPARATE02")
+        _, job_b, preview_b = self._ready_preview(source_b, "separate-b.pdf")
+        self.assertEqual(preview_b.items[0].instrument_resolution, "existing")
+        report_b = self.workflow.commit_import(CommitImport(job_b.import_id, preview_b.revision, "separate-b-commit"))
+        plan_a = self.workflow.preview_rollback(RollbackSelection((job_a.import_id,)))
+        self.assertNotIn(instrument_id, plan_a.removable_instrument_ids)
+        rolled_a = self.workflow.execute_rollback(ExecuteRollback(plan_a.plan_id, plan_a.revision, "separate-a-rollback"))
+        self.assertEqual(rolled_a.removed_event_ids, report_a.created_event_ids)
+        self.assertIsNotNone(self.store.load_event(report_b.created_event_ids[0]))
+        self.assertEqual(self.store.match_instrument_identifier("ISIN", "standard", "LU1681041973"), (instrument_id,))
+
+    def test_rollback_shared_event_second_source_first_then_creator(self):
+        from dataclasses import replace
+        from portman_v10.infrastructure.preview_codec import encode_preview
+
+        source = COMDIRECT_BUY + "\nVermerk A"
+        uploaded_a, job_a, preview_a = self._ready_preview(source, "order-a.pdf")
+        report_a = self.workflow.commit_import(CommitImport(job_a.import_id, preview_a.revision, "order-a-commit"))
+        uploaded_b = self._upload(source.replace("Vermerk A", "Vermerk B"), "order-b.pdf")
+        job_b = self.workflow.wait(self.workflow.start_import(ImportStart((uploaded_b.document.document_id,))).job_id, 10)
+        preview_b = self.workflow.get_import_preview(job_b.import_id)
+        item_b = preview_b.items[0]
+        linked = replace(item_b, review_status="complete_candidate", missing_fields=(), disposition="complement",
+                          movements=tuple(replace(value, account_assignment="exact_identifier") for value in item_b.movements),
+                          original_text=self.store.load_event(report_a.event_ids[0]).event.original_text,
+                          conflicts=(Conflict(ErrorCode.POSSIBLE_DUPLICATE, "gleiche Referenz", item_b.candidate_id, report_a.event_ids[0]),))
+        self.store.replace_import_preview_items(job_b.import_id, preview_b.revision, encode_preview(replace(preview_b, items=(linked,))))
+        preview_b = self.workflow.get_import_preview(job_b.import_id)
+        self.workflow.resolve_import_item(job_b.import_id, ConflictDecision(item_b.candidate_id, "link", target_id=report_a.event_ids[0], candidate_revision=item_b.revision), preview_b.revision)
+        preview_b = self.workflow.get_import_preview(job_b.import_id)
+        self.workflow.commit_import(CommitImport(job_b.import_id, preview_b.revision, "order-b-commit"))
+
+        plan_b = self.workflow.preview_rollback(RollbackSelection((job_b.import_id,)))
+        report_b = self.workflow.execute_rollback(ExecuteRollback(plan_b.plan_id, plan_b.revision, "order-b-rollback"))
+        self.assertEqual(report_b.retained_event_ids, report_a.event_ids)
+        self.assertEqual(len(self.store.load_event(report_a.event_ids[0]).positions), 2)
+        plan_a = self.workflow.preview_rollback(RollbackSelection((job_a.import_id,)))
+        report_a_rollback = self.workflow.execute_rollback(ExecuteRollback(plan_a.plan_id, plan_a.revision, "order-a-rollback"))
+        self.assertEqual(report_a_rollback.removed_event_ids, report_a.event_ids)
+        self.assertIsNone(self.store.load_event(report_a.event_ids[0]))
+        # Interne Originale bleiben über Import-/Jobhistorie referenziert und externe Quelldateien werden nie gelöscht.
+        self.assertEqual(self.workflow.get_document(uploaded_a.document.document_id).metadata.document_id, uploaded_a.document.document_id)
+        self.assertEqual(self.workflow.get_document(uploaded_b.document.document_id).metadata.document_id, uploaded_b.document.document_id)
+
+    def test_rollback_all_retains_manual_opening_and_fault_is_atomic(self):
+        from datetime import date
+
+        opening = self.store.record_opening(OpeningBalanceInput(
+            "manual-cash-opening", self.cash.account_id, date(2026, 1, 1), currency="EUR", amount=ExactValue("500")))
+        source = """comdirect
+Wertpapierkauf
+Depotnummer: 123456
+WKN: A2H57N
+ISIN: LU1681041973
+Stk. 0,25 AIS-AM.E.H.D.F.EOC, WKN / ISIN: A2H57N / LU1681041973
+IBAN DE00000000000000000001
+Valuta 02.05.2025
+Zu Ihren Lasten EUR 49,92
+Referenz: A2HALL0001"""
+        _, job, preview = self._ready_preview(source, "all-import.pdf")
+        committed = self.workflow.commit_import(CommitImport(job.import_id, preview.revision, "all-import-commit"))
+        created_instrument = committed.created_instrument_ids[0]
+        _, job_b, preview_b = self._ready_preview(name="all-selection-second-import.pdf")
+        committed_b = self.workflow.commit_import(CommitImport(job_b.import_id, preview_b.revision, "all-selection-second-commit"))
+        selected_plan = self.workflow.preview_rollback(RollbackSelection((job.import_id, job_b.import_id)))
+        self.assertEqual(set(selected_plan.import_ids), {job.import_id, job_b.import_id})
+        plan = self.workflow.preview_rollback(RollbackSelection(all_imports=True))
+        self.assertEqual(plan.import_ids, tuple(sorted((job.import_id, job_b.import_id))))
+        self.assertTrue(plan.balance_impacts)
+        original_rebuild = self.store._rebuild_balance_index
+
+        def fail_during_index(connection, revision):
+            original_rebuild(connection, revision)
+            raise RuntimeError("synthetic rollback failure after index write")
+
+        self.store._rebuild_balance_index = fail_during_index
+        with self.assertRaises(ApplicationError) as failed:
+            self.workflow.execute_rollback(ExecuteRollback(plan.plan_id, plan.revision, "all-rollback-fault"))
+        self.assertEqual(failed.exception.code, ErrorCode.STORAGE_ERROR)
+        self.store._rebuild_balance_index = original_rebuild
+        connection = self.store.connect()
+        try:
+            self.assertEqual(connection.execute("SELECT status FROM imports WHERE import_id=?", (job.import_id,)).fetchone()[0], "committed")
+            self.assertEqual(connection.execute("SELECT count(*) FROM events").fetchone()[0], 3)
+            self.assertEqual(connection.execute("SELECT count(*) FROM operations WHERE request_id='all-rollback-fault'").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT count(*) FROM instruments WHERE instrument_id=?", (created_instrument,)).fetchone()[0], 1)
+        finally:
+            connection.close()
+        report = self.workflow.execute_rollback(ExecuteRollback(plan.plan_id, plan.revision, "all-rollback-retry"))
+        self.assertEqual(set(report.removed_event_ids), set((*committed.created_event_ids, *committed_b.created_event_ids)))
+        self.assertIsNotNone(self.store.load_event(opening.event_id))
+        self.assertEqual(self.store.get_opening(opening.opening_id).source_kind, "manual")
+        self.assertIsNotNone(self.store.get_account(self.cash.account_id))
+        self.assertIsNotNone(self.store.get_instrument(self.instrument.instrument_id))
+        self.assertEqual(self.store.match_instrument_identifier("ISIN", "standard", "LU1681041973"), ())
+
+    def test_rollback_preview_reports_and_blocks_later_correction_dependency(self):
+        _, job, preview = self._ready_preview(name="dependency-import.pdf")
+        committed = self.workflow.commit_import(CommitImport(job.import_id, preview.revision, "dependency-commit"))
+        with self.store.transaction() as connection:
+            connection.execute("INSERT INTO events(event_id,kind,booking_date,completeness,correction_of_event_id,revision) VALUES('manual-correction','correction','2026-07-03','complete',?,1)", (committed.created_event_ids[0],))
+        plan = self.workflow.preview_rollback(RollbackSelection((job.import_id,)))
+        self.assertTrue(any("späterer Korrektur" in dependency for dependency in plan.unresolved_dependencies))
+        with self.assertRaises(ApplicationError) as blocked:
+            self.workflow.execute_rollback(ExecuteRollback(plan.plan_id, plan.revision, "dependency-rollback"))
+        self.assertEqual(blocked.exception.code, ErrorCode.DEPENDENCY_CONFLICT)
+        self.assertIsNotNone(self.store.load_event(committed.created_event_ids[0]))
+
+    def test_rollback_keeps_manually_changed_field_but_removes_import_positions(self):
+        source = """comdirect
+Wertpapierkauf
+Depotnummer: 123456
+WKN: A2H57N
+ISIN: LU1681041973
+Stk. 0,25 AIS-AM.E.H.D.F.EOC, WKN / ISIN: A2H57N / LU1681041973
+IBAN DE00000000000000000001
+Valuta 02.05.2025
+Zu Ihren Lasten EUR 49,92
+Referenz: A2HMANUALFIELD"""
+        _, job, preview = self._ready_preview(source, "manual-field.pdf")
+        committed = self.workflow.commit_import(CommitImport(job.import_id, preview.revision, "manual-field-commit"))
+        event_id = committed.created_event_ids[0]
+        with self.store.transaction() as connection:
+            # Historischer Datensatz vor 0006: nur der Eventbeitrag, keine Positionsbeiträge.
+            connection.execute("DELETE FROM import_contributions WHERE event_id=? AND field_name LIKE 'position:%'", (event_id,))
+            connection.execute("UPDATE events SET original_text='Manuelle spätere Notiz',revision=revision+1 WHERE event_id=?", (event_id,))
+            connection.execute("INSERT INTO import_contributions(contribution_id,event_id,source_kind,target_type,field_name,action,value_text,created_at) VALUES('manual-field',?,'manual','event','original_text','set','Manuelle spätere Notiz','2026-11-07T00:00:00+01:00')", (event_id,))
+        plan = self.workflow.preview_rollback(RollbackSelection((job.import_id,)))
+        self.assertTrue(plan.balance_impacts)
+        report = self.workflow.execute_rollback(ExecuteRollback(plan.plan_id, plan.revision, "manual-field-rollback"))
+        self.assertEqual(report.retained_event_ids, (event_id,))
+        self.assertEqual(len(report.removed_position_ids), 2)
+        retained = self.store.load_event(event_id)
+        self.assertEqual(retained.event.original_text, "Manuelle spätere Notiz")
+        self.assertEqual(retained.positions, ())
+        self.assertEqual(self.store.match_instrument_identifier("ISIN", "standard", "LU1681041973"), ())
 
     def test_real_pinned_comdirect_handler_upload_preview_and_reopen(self):
         other_context = self.store.save_account(AccountInput(
@@ -454,6 +875,161 @@ IBAN DE00000000000000000001"""
         self.assertEqual([(movement.movement_type, movement.amount.text) for movement in item.movements], [("cash", "-49.92"), ("quantity", "0.25")])
         self.assertTrue(item.source_evidence)
 
+    def test_a2h57n_confirmed_import_creates_instrument_once_and_reuses_it(self):
+        from portman_v10.application.contracts import CommitImport
+
+        source = """comdirect
+Wertpapierkauf
+Depotnummer: 123456
+WKN: A2H57N
+ISIN: LU1681041973
+Nennwert Zum Kurs von
+St. 0,25 EUR 199,68
+Kurswert : EUR 49,92
+Valuta 02.05.2025
+Zu Ihren Lasten EUR 49,92
+Steuerliche Behandlung: Wertpapierkauf Nr. 266D25000000001 vom 02.05.2025
+Stk. 0,25 AIS-AM.E.H.D.F.EOC, WKN / ISIN: A2H57N / LU1681041973
+IBAN DE00000000000000000001
+Referenz: A2HBUY000001"""
+
+        def preview_for(document_text, document_name):
+            uploaded = self._upload(document_text, document_name)
+            job = self.workflow.wait(self.workflow.start_import(ImportStart((uploaded.document.document_id,))).job_id, 10)
+            return uploaded, job, self.workflow.get_import_preview(job.import_id)
+
+        uploaded, job, preview = preview_for(source, "a2h57n-original.pdf")
+        item = preview.items[0]
+        self.assertEqual(item.instrument_resolution, "will_create")
+        self.assertEqual(item.instrument_message, "Neues Instrument wird angelegt: AIS-AM.E.H.D.F.EOC (LU1681041973)")
+        self.assertEqual(item.review_status, "complete_candidate")
+        self.assertEqual(self.store.match_instrument_identifier("ISIN", "standard", "LU1681041973"), ())
+        self.workflow.resolve_import_item(job.import_id, ConflictDecision(item.candidate_id, "accept", candidate_revision=item.revision), preview.revision)
+        preview = self.workflow.get_import_preview(job.import_id)
+        committed = self.workflow.commit_import(CommitImport(job.import_id, preview.revision, "a2h57n-create"))
+        self.assertEqual(len(committed.created_event_ids), 1)
+        self.assertEqual(len(committed.created_instrument_ids), 1)
+        instrument_id = committed.created_instrument_ids[0]
+        replay = self.workflow.commit_import(CommitImport(job.import_id, preview.revision, "a2h57n-create"))
+        self.assertTrue(replay.replayed)
+        self.assertEqual(replay.created_instrument_ids, (instrument_id,))
+        self.assertEqual(self.store.match_instrument_identifier("ISIN", "standard", "LU1681041973"), (instrument_id,))
+        self.assertEqual(self.store.get_instrument(instrument_id).asset_type, "security")
+        event = self.store.load_event(committed.created_event_ids[0])
+        self.assertEqual([(position.instrument_id, position.quantity.text) for position in event.positions if position.instrument_id], [(instrument_id, "0.25")])
+
+        repeated_upload, repeated_job, repeated_preview = preview_for(source, "a2h57n-repeat.pdf")
+        repeated = repeated_preview.items[0]
+        self.assertEqual(repeated.disposition, "conflict")
+        self.workflow.resolve_import_item(repeated_job.import_id, ConflictDecision(
+            repeated.candidate_id, "link", target_id=committed.created_event_ids[0], candidate_revision=repeated.revision
+        ), repeated_preview.revision)
+        repeated_preview = self.workflow.get_import_preview(repeated_job.import_id)
+        repeated_report = self.workflow.commit_import(CommitImport(repeated_job.import_id, repeated_preview.revision, "a2h57n-repeat"))
+        self.assertEqual(repeated_report.created_event_ids, ())
+        self.assertEqual(repeated_report.created_instrument_ids, ())
+        self.assertEqual(repeated_report.linked_event_ids, committed.created_event_ids)
+
+        second_source = source.replace("02.05.2025", "03.05.2025").replace("A2HBUY000001", "A2HBUY000002")
+        _, second_job, second_preview = preview_for(second_source, "a2h57n-second.pdf")
+        second_item = second_preview.items[0]
+        self.assertEqual(second_item.instrument_resolution, "existing")
+        self.assertEqual(second_item.instrument_ids, (instrument_id,))
+        self.workflow.resolve_import_item(second_job.import_id, ConflictDecision(
+            second_item.candidate_id, "accept", candidate_revision=second_item.revision
+        ), second_preview.revision)
+        second_preview = self.workflow.get_import_preview(second_job.import_id)
+        second_report = self.workflow.commit_import(CommitImport(second_job.import_id, second_preview.revision, "a2h57n-second"))
+        self.assertEqual(len(second_report.created_event_ids), 1)
+        self.assertEqual(second_report.created_instrument_ids, ())
+        self.assertEqual(self.store.match_instrument_identifier("ISIN", "standard", "LU1681041973"), (instrument_id,))
+        self.assertEqual(uploaded.document.document_id, repeated_upload.document.document_id)
+
+    def test_failed_a2h57n_commit_rolls_back_new_instrument_with_event(self):
+        from portman_v10.application.contracts import CommitImport
+
+        source = """comdirect
+Wertpapierkauf
+Depotnummer: 123456
+WKN: A2H57N
+ISIN: LU1681041973
+Stk. 0,25 AIS-AM.E.H.D.F.EOC, WKN / ISIN: A2H57N / LU1681041973
+IBAN DE00000000000000000001
+Valuta 02.05.2025
+Zu Ihren Lasten EUR 49,92
+Referenz: A2HFAULT0001"""
+        _, job, preview = self._ready_preview(source, "a2h57n-fault.pdf")
+        item = preview.items[0]
+        self.assertEqual(item.instrument_resolution, "will_create")
+        connection = self.store.connect()
+        try:
+            baseline_instruments = connection.execute("SELECT count(*) FROM instruments").fetchone()[0]
+        finally:
+            connection.close()
+        original = self.store._insert_import_event
+
+        def fail_after_event_insert(*args, **kwargs):
+            original(*args, **kwargs)
+            raise RuntimeError("synthetic failure after event insert")
+
+        self.store._insert_import_event = fail_after_event_insert
+        with self.assertRaises(ApplicationError):
+            self.workflow.commit_import(CommitImport(job.import_id, preview.revision, "a2h57n-fault"))
+        connection = self.store.connect()
+        try:
+            self.assertEqual(connection.execute("SELECT count(*) FROM instruments").fetchone()[0], baseline_instruments)
+            self.assertEqual(connection.execute("SELECT count(*) FROM instrument_identifiers WHERE value='LU1681041973'").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT count(*) FROM events").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT count(*) FROM import_contributions WHERE target_type='instrument'").fetchone()[0], 0)
+        finally:
+            connection.close()
+
+    def test_parallel_imports_for_same_new_isin_do_not_create_duplicate_instruments(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from portman_v10.application.contracts import CommitImport
+
+        base = """comdirect
+Wertpapierkauf
+Depotnummer: 123456
+WKN: A2H57N
+ISIN: LU1681041973
+Stk. 0,25 AIS-AM.E.H.D.F.EOC, WKN / ISIN: A2H57N / LU1681041973
+IBAN DE00000000000000000001
+Valuta 02.05.2025
+Zu Ihren Lasten EUR 49,92"""
+        previews = []
+        for index in range(2):
+            source = f"{base}\nReferenz: PARALLEL{index:06d}"
+            uploaded = self._upload(source, f"parallel-{index}.pdf")
+            job = self.workflow.wait(self.workflow.start_import(ImportStart((uploaded.document.document_id,))).job_id, 10)
+            preview = self.workflow.get_import_preview(job.import_id)
+            item = preview.items[0]
+            self.assertEqual(item.instrument_resolution, "will_create")
+            self.workflow.resolve_import_item(job.import_id, ConflictDecision(
+                item.candidate_id, "accept", candidate_revision=item.revision
+            ), preview.revision)
+            previews.append((job, self.workflow.get_import_preview(job.import_id)))
+        commands = tuple(CommitImport(job.import_id, preview.revision, f"parallel-commit-{index}")
+                         for index, (job, preview) in enumerate(previews))
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = tuple(executor.submit(self.workflow.commit_import, command) for command in commands)
+            outcomes = []
+            for future in futures:
+                try:
+                    outcomes.append(future.result())
+                except ApplicationError as error:
+                    outcomes.append(error)
+        self.assertEqual(sum(not isinstance(value, ApplicationError) for value in outcomes), 1)
+        self.assertEqual(sum(isinstance(value, ApplicationError) and value.code == ErrorCode.STALE_REVISION for value in outcomes), 1)
+        connection = self.store.connect()
+        try:
+            self.assertEqual(connection.execute(
+                "SELECT count(DISTINCT instrument_id) FROM instrument_identifiers WHERE identifier_type='ISIN' AND value='LU1681041973'"
+            ).fetchone()[0], 1)
+            self.assertEqual(connection.execute("SELECT count(*) FROM events WHERE kind='BUY'").fetchone()[0], 1)
+        finally:
+            connection.close()
+
     def test_real_pinned_comdirect_tax_information_has_no_booking_candidate(self):
         source = "comdirect\nSteuerliche Behandlung: Vorabpauschale\nVorabpauschale EUR 5,00\nSteuerbemessungsgrundlage EUR 4,00\nKapitalertragsteuer EUR 1,00\nFreistellungsauftrag EUR 2,00\nIBAN DE00000000000000000001\nDepotnummer: 123456"
         uploaded = self._upload(source, "vorabpauschale.pdf")
@@ -513,6 +1089,32 @@ Freistellungsauftrag EUR 0,00"""
                     self.assertEqual(details[key], value)
                 self.assertTrue(item.source_evidence)
 
+    def test_investment_distribution_tax_notice_preserves_identity_without_position(self):
+        """Wertpapieridentität bleibt auch bei einer bewegungsneutralen Steuermitteilung sichtbar."""
+        source = """comdirect
+Steuerliche Behandlung: Investment-Ausschüttung
+Wertpapier-Bezeichnung                 WKN/ISIN
+iShares MSCI World                     A0H074
+Inhaber-Anteile                        DE000A0H0744
+STK 16,471
+Bruttoertrag EUR 5,00
+Kapitalertragsteuer EUR 1,00
+Steuerbemessungsgrundlage EUR 4,00
+IBAN DE00000000000000000001
+Depotnummer: 123456"""
+        uploaded = self._upload(source, "investment-distribution-tax-notice.pdf")
+        job = self.workflow.wait(self.workflow.start_import(ImportStart((uploaded.document.document_id,))).job_id, 10)
+        preview = self.workflow.get_import_preview(job.import_id)
+        item = preview.items[0]
+        self.assertEqual(preview.documents[0].handler_id, "investment_ausschuettung")
+        self.assertEqual(item.review_status, "information")
+        self.assertEqual(item.movements, ())
+        self.assertFalse(item.missing_fields)
+        self.assertFalse(item.warnings)
+        references = dict(item.references)
+        self.assertEqual(references["security_isin"], "DE000A0H0744")
+        self.assertEqual(references["security_wkn"], "A0H074")
+
     def test_real_pinned_comdirect_mifid_information_is_non_bookable(self):
         source = "comdirect\nKosteninformation zum Wertpapiergeschäft\nProduktkosten 1,00 EUR\nDienstleistungskosten 0,50 EUR"
         uploaded = self._upload(source, "mifid-costs.pdf")
@@ -545,7 +1147,84 @@ Freistellungsauftrag EUR 0,00"""
         self.assertEqual({item.movements[0].account_id for item in preview.items}, {self.cash.account_id})
         self.assertEqual([item.review_status for item in preview.items], ["needs_review", "needs_review"])
         self.assertTrue(all(item.source_evidence and item.source_evidence[0].excerpt for item in preview.items))
-        self.assertTrue(all(any("Übernahme" in missing for missing in item.missing_fields) for item in preview.items))
+        self.assertTrue(all(item.missing_fields == (
+            "Bankreferenz fehlt oder ist nicht eindeutig; Dubletten können nicht sicher automatisch zugeordnet werden",
+        ) for item in preview.items))
+
+    def test_finanzreport_cash_rows_need_explicit_unmatched_acceptance_and_reimport_links_each_row(self):
+        source = "comdirect\nFinanzreport Nr. 124 per 01.07.2026\nGirokonto DE00000000000000000001\nAlter Saldo 01.06.2026 100,00\n01.07.2026 01.07.2026 Habenzinsen +10,00\n01.07.2026 01.07.2026 Kartenzahlung -2,50\nNeuer Saldo 01.07.2026 107,50"
+        self.store.record_opening(OpeningBalanceInput("finanzreport-opening", self.cash.account_id, date(2026, 6, 30), currency="EUR", amount=ExactValue("100")))
+        uploaded = self._upload(source, "finanzreport-explicit-acceptance.pdf")
+        first_job = self.workflow.wait(self.workflow.start_import(ImportStart((uploaded.document.document_id,))).job_id, 10)
+        preview = self.workflow.get_import_preview(first_job.import_id)
+        self.assertEqual(len(preview.items), 2)
+        self.assertTrue(all(item.review_status == "needs_review" for item in preview.items))
+        self.assertTrue(all(item.missing_fields == (
+            "Bankreferenz fehlt oder ist nicht eindeutig; Dubletten können nicht sicher automatisch zugeordnet werden",
+        ) for item in preview.items))
+
+        for item in preview.items:
+            preview = self.workflow.resolve_import_item(
+                first_job.import_id,
+                ConflictDecision(item.candidate_id, "accept_unmatched", candidate_revision=item.revision),
+                preview.revision,
+            )
+        first_report = self.workflow.commit_import(CommitImport(first_job.import_id, preview.revision, "finanzreport-first"))
+        self.assertEqual(len(first_report.created_event_ids), 2)
+        overview = self.store.get_overview(date(2026, 7, 1), (self.cash.account_id,))
+        self.assertEqual(overview.lines[0].value.text, "107.5")
+
+        overlapping_source = "comdirect\nFinanzreport Nr. 125 per 01.07.2026\nGirokonto DE00000000000000000001\n01.07.2026 01.07.2026 Habenzinsen +10,00"
+        overlapping_upload = self._upload(overlapping_source, "finanzreport-overlap.pdf")
+        overlapping_job = self.workflow.wait(self.workflow.start_import(ImportStart((overlapping_upload.document.document_id,))).job_id, 10)
+        overlapping_preview = self.workflow.get_import_preview(overlapping_job.import_id)
+        overlapping_item = overlapping_preview.items[0]
+        self.assertEqual(overlapping_item.disposition, "conflict")
+        duplicate_event_id = overlapping_item.conflicts[0].related_event_id
+        self.assertIn(duplicate_event_id, first_report.created_event_ids)
+        overlapping_preview = self.workflow.resolve_import_item(
+            overlapping_job.import_id,
+            ConflictDecision(overlapping_item.candidate_id, "accept_unmatched", candidate_revision=overlapping_item.revision),
+            overlapping_preview.revision,
+        )
+        with self.assertRaises(ApplicationError):
+            self.workflow.commit_import(CommitImport(overlapping_job.import_id, overlapping_preview.revision, "finanzreport-overlap-reject-new"))
+        overlapping_item = overlapping_preview.items[0]
+        overlapping_preview = self.workflow.resolve_import_item(
+            overlapping_job.import_id,
+            ConflictDecision(overlapping_item.candidate_id, "link", target_id=duplicate_event_id, candidate_revision=overlapping_item.revision),
+            overlapping_preview.revision,
+        )
+        linked_report = self.workflow.commit_import(CommitImport(overlapping_job.import_id, overlapping_preview.revision, "finanzreport-overlap-link"))
+        self.assertEqual(linked_report.created_event_ids, ())
+        self.assertEqual(linked_report.linked_event_ids, (duplicate_event_id,))
+        self.assertEqual(self.store.get_overview(date(2026, 7, 1), (self.cash.account_id,)).lines[0].value.text, "107.5")
+
+        source_bytes = self.workflow.get_document(uploaded.document.document_id).content
+        repeated_upload = self.workflow.upload_document(DocumentUpload(uploaded.document.name, source_bytes))
+        self.assertTrue(repeated_upload.identical_content_already_stored)
+        second_job = self.workflow.wait(self.workflow.start_import(ImportStart((repeated_upload.document.document_id,))).job_id, 10)
+        repeated_preview = self.workflow.get_import_preview(second_job.import_id)
+        self.assertEqual(len(repeated_preview.items), 2)
+        for item in repeated_preview.items:
+            target = next(value.related_event_id for value in item.conflicts if value.related_event_id)
+            repeated_preview = self.workflow.resolve_import_item(
+                second_job.import_id,
+                ConflictDecision(item.candidate_id, "link", target_id=target, candidate_revision=item.revision),
+                repeated_preview.revision,
+            )
+        repeated_report = self.workflow.commit_import(CommitImport(second_job.import_id, repeated_preview.revision, "finanzreport-replay"))
+        self.assertEqual(len(repeated_report.created_event_ids), 0)
+        self.assertEqual(len(repeated_report.linked_event_ids), 2)
+        connection = self.store.connect()
+        try:
+            self.assertEqual(connection.execute("SELECT count(*) FROM events WHERE kind='CASH_BOOKING'").fetchone()[0], 2)
+            self.assertEqual(connection.execute(
+                "SELECT count(*) FROM positions p JOIN events e ON e.event_id=p.event_id WHERE p.account_id=? AND e.kind='CASH_BOOKING'",
+                (self.cash.account_id,),
+            ).fetchone()[0], 2)
+        finally:
+            connection.close()
 
     def test_executable_comdirect_handler_registry_is_fully_listed(self):
         from portman_parsers.registry import default_registry

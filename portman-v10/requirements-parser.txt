@@ -1,2 +1,2 @@
-# Geprüfter vollständiger Kopfcommit des offenen Parser-PRs gegen main.
-portman-parsers @ git+https://github.com/cbde72/Portman.git@227eaafb4fb49e4357006546a0855ea7a0668c0a#subdirectory=portman-parsers
+# Gemergter Parserstand mit Investment-Steuermitteilungs-Identität.
+portman-parsers @ git+https://github.com/cbde72/Portman.git@074c3404d08e082c5f9b2a987ed302cfcf929f13#subdirectory=portman-parsers

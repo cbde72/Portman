@@ -104,9 +104,10 @@ Fertig, wenn Kauf, Ausschüttung, Geldtransfer und Depotübertrag eindeutig mit 
 
 Tatsächlich verfügbare portman-parsers-API und Paketversion prüfen. Mit einem freigegebenen comdirect-Dokumenttyp beginnen. Der Adapter übersetzt Strukturen und ergänzt keine Bankextraktion. Unvollständige Konto-/Instrumentzuordnung wird sichtbar zurückgehalten.
 
-Geprüfter Paketstand für die weitere Adapterarbeit ist `portman-parsers` 0.7.0
-auf Commit `227eaafb4fb49e4357006546a0855ea7a0668c0a` im offenen PR gegen
-`main`. API 0.6 und Ergebnisschema 1.6.0 bleiben unverändert.
+Der aktuell gepinnte Paketstand für die Adapterarbeit ist `portman-parsers`
+0.7.0 auf gemergtem Main-Commit
+`074c3404d08e082c5f9b2a987ed302cfcf929f13`. API 0.6 und Ergebnisschema 1.6.0
+bleiben unverändert.
 
 Die installierte Default-Registry des Pins enthält 19 ausführbare comdirect-Handler in drei Plugins. V10 führt sie über `registry.parse` und `validate_parsed_document` aus; Metadaten-Handler bleiben ausdrücklich „Parser noch nicht ausführbar“. Die folgende Matrix beschreibt Parserausführung/Vorschau, keine pauschale Produktivfreigabe:
 

@@ -3,12 +3,17 @@ from dataclasses import dataclass
 
 from portman_v10.application.contracts import Account, AccountIdentifier, AccountInput, ApplicationError, ErrorCode
 
-# Formulartyp → (kind, subtype, Anzeige). Nur diese drei Arten werden in der Maske gepflegt.
+# Formulartyp → (kind, subtype, Anzeige). Entspricht den vereinbarten Paaren aus docs/Schnittstelle.md.
 FORM_TYPES = {
     "checking": ("cash", "checking", "Girokonto"),
+    "savings": ("cash", "savings", "Tagesgeld"),
+    "fixed_term": ("cash", "fixed_term", "Festgeld"),
     "settlement": ("cash", "settlement", "Verrechnungskonto"),
     "depot": ("position", "depot", "Depot"),
+    "crypto": ("position", "crypto", "Kryptokonto"),
 }
+CASH_FORM_TYPES = tuple((key, label) for key, (kind, _subtype, label) in FORM_TYPES.items() if kind == "cash")
+POSITION_FORM_TYPES = tuple((key, label) for key, (kind, _subtype, label) in FORM_TYPES.items() if kind == "position")
 SUBTYPE_LABELS = {
     "checking": "Girokonto",
     "savings": "Tagesgeld",
@@ -43,13 +48,14 @@ class AccountForm:
         return FORM_TYPES[self.form_type][0] == "cash"
 
 
-def primary_identifier_type(kind: str) -> str:
-    return "iban" if kind == "cash" else "depot_number"
+def primary_identifier_type(subtype: str) -> str:
+    # Depotnummer nutzt der Importadapter zur Zuordnung; Kryptokonten haben keine Depotnummer.
+    return {"depot": "depot_number", "crypto": "account_number"}.get(subtype, "iban")
 
 
 def _split_identifiers(account: Account):
     """Trennt die in der Maske editierbare Hauptkennung von allen übrigen beizubehaltenden Kennungen."""
-    primary_type = primary_identifier_type(account.kind)
+    primary_type = primary_identifier_type(account.subtype)
     primary = next((item for item in account.identifiers if item.identifier_type.casefold() == primary_type), None)
     others = tuple(item for item in account.identifiers if item is not primary)
     return primary, others
@@ -114,7 +120,7 @@ def account_input_from_form(form, current: Account | None) -> tuple[AccountInput
     """
     form_type = form.get("account_type", "")
     if form_type not in FORM_TYPES:
-        raise AccountFormError("Bitte Girokonto, Verrechnungskonto oder Depot wählen.")
+        raise AccountFormError("Bitte eine gültige Kontoart wählen.")
     kind, subtype, _label = FORM_TYPES[form_type]
     account_id = form.get("account_id", "").strip() or None
     expected_revision = None
@@ -150,10 +156,10 @@ def account_input_from_form(form, current: Account | None) -> tuple[AccountInput
         reference_account_id = form.get("reference_account_id", "").strip() or None
     if primary_value:
         if not institution:
-            label = "IBAN" if kind == "cash" else "Depotnummer"
+            label = "IBAN" if kind == "cash" else "Depot-/Kontonummer"
             raise AccountFormError(f"Für die {label} wird die Bank als Kennungskontext benötigt.")
         # Kontext wie im Parseradapter: Bankname, Vergleich ohne Groß-/Kleinschreibung.
-        identifiers.append(AccountIdentifier(primary_identifier_type(kind), institution.casefold(), primary_value))
+        identifiers.append(AccountIdentifier(primary_identifier_type(subtype), institution.casefold(), primary_value))
     identifiers = list(dict.fromkeys(identifiers))
     try:
         value = AccountInput(

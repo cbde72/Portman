@@ -62,7 +62,7 @@ class WebAccountTests(unittest.TestCase):
         html = self.client.get("/accounts", base_url=BASE_URL).get_data(as_text=True)
         self.assertIn("IBAN DE00000000000000000001 (comdirect)", html)
         self.assertIn("Depotnummer 123456 (comdirect)", html)
-        depot_row = re.search(r"<tr>\s*<td>comdirect Depot</td>.*?</tr>", html, re.S).group(0)
+        depot_row = re.search(r"<tr>\s*<td><a [^>]*>comdirect Depot</a></td>.*?</tr>", html, re.S).group(0)
         self.assertIn("<td>comdirect Giro</td>", depot_row)
         self.assertIn("test-web", html)
 
@@ -121,7 +121,8 @@ class WebAccountTests(unittest.TestCase):
             ({"account_type": "depot", "name": "Depot 2", "institution": "comdirect", "reference_account_id": depot.account_id}, "Referenzkonto muss ein Geldkonto sein"),
             ({"account_type": "checking", "name": "Ohne Bank", "currency": "EUR", "iban": "DE11"}, "Bank als Kennungskontext"),
             ({"account_type": "checking", "name": "Ohne Währung", "institution": "x"}, "Währung"),
-            ({"account_type": "savings", "name": "Tagesgeld", "currency": "EUR"}, "Girokonto, Verrechnungskonto oder Depot"),
+            ({"account_type": "bausparen", "name": "Unbekannt", "currency": "EUR"}, "gültige Kontoart"),
+            ({"account_type": "crypto", "name": "Wallet", "institution": "x", "reference_account_id": depot.account_id}, "Referenzkonto muss ein Geldkonto sein"),
         )
         for fields, message in cases:
             with self.subTest(fields=fields):
@@ -142,12 +143,36 @@ class WebAccountTests(unittest.TestCase):
         self.assertEqual(foreign.status_code, 403)
         self.assertEqual(self.store.list_accounts().items, ())
 
-    def test_other_subtypes_are_listed_but_not_editable_here(self):
-        savings = self.store.save_account(AccountInput("Tagesgeld", "cash", "savings", "bank", "EUR"), None)
+    def test_savings_fixed_term_and_crypto_accounts_can_be_created_and_edited(self):
+        giro, _depot = self._create_linked_pair()
+        for fields in (
+            {"account_type": "savings", "name": "Tagesgeld", "institution": "Bank A", "currency": "EUR", "iban": "DE22 2222"},
+            {"account_type": "fixed_term", "name": "Festgeld", "institution": "Bank A", "currency": "USD"},
+            {"account_type": "crypto", "name": "Wallet", "institution": "Börse", "depot_number": "W-1", "reference_account_id": giro.account_id},
+        ):
+            with self.subTest(fields["account_type"]):
+                self.assertEqual(self._post(**fields).status_code, 303)
+        accounts = self._accounts()
+        self.assertEqual((accounts["Tagesgeld"].kind, accounts["Tagesgeld"].subtype, accounts["Tagesgeld"].identifiers),
+                         ("cash", "savings", (AccountIdentifier("iban", "bank a", "DE222222"),)))
+        self.assertEqual((accounts["Festgeld"].subtype, accounts["Festgeld"].currency), ("fixed_term", "USD"))
+        wallet = accounts["Wallet"]
+        self.assertEqual((wallet.kind, wallet.subtype, wallet.currency, wallet.reference_account_id), ("position", "crypto", None, giro.account_id))
+        self.assertEqual(wallet.identifiers, (AccountIdentifier("account_number", "börse", "W-1"),))
+
         html = self.client.get("/accounts", base_url=BASE_URL).get_data(as_text=True)
-        self.assertIn("Tagesgeld", html)
-        self.assertIn("nicht in dieser Maske", html)
-        self.assertEqual(self.client.get(f"/accounts/{savings.account_id}/edit", base_url=BASE_URL).status_code, 400)
+        self.assertNotIn("nicht in dieser Maske", html)
+        for label in ("<td>Tagesgeld</td>", "<td>Festgeld</td>", "<td>Kryptokonto</td>"):
+            self.assertIn(label, html)
+        edit_html = self.client.get(f"/accounts/{wallet.account_id}/edit", base_url=BASE_URL).get_data(as_text=True)
+        self.assertIn('<option value="crypto" selected>Kryptokonto</option>', edit_html)
+        self.assertIn('name="depot_number" value="W-1"', edit_html)
+
+        tagesgeld = accounts["Tagesgeld"]
+        changed = self._post(account_type="fixed_term", account_id=tagesgeld.account_id, expected_revision=str(tagesgeld.revision),
+                             name="Tagesgeld", institution="Bank A", currency="EUR", iban="DE222222")
+        self.assertEqual(changed.status_code, 303)
+        self.assertEqual(self.store.get_account(tagesgeld.account_id).subtype, "fixed_term")
         self.assertEqual(self.client.get("/accounts/unbekannt/edit", base_url=BASE_URL).status_code, 404)
 
 

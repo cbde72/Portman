@@ -1,27 +1,7 @@
-<!doctype html>
-<html lang="de">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Konten &amp; Depots · Portman V10</title>
-  <style>
-    body { max-width: 76rem; margin: 2rem auto; padding: 0 1rem; color: #17212b; font: 1rem/1.5 system-ui, sans-serif; }
-    nav a { margin-right: 1rem; }
-    .error { border-left: .3rem solid #a11; padding: .75rem; background: #fff0f0; }
-    .notice { border-left: .3rem solid #1a6b2f; padding: .75rem; background: #eef8f0; }
-    .inactive { color: #6b7680; }
-    table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
-    th, td { text-align: left; vertical-align: top; border: 1px solid #bbc4cc; padding: .5rem; }
-    fieldset { margin: 1rem 0; border: 1px solid #bbc4cc; padding: 1rem; }
-    .field { display: grid; grid-template-columns: 12rem minmax(0, 24rem); gap: .5rem; margin: .5rem 0; align-items: center; }
-    .field input, .field select { padding: .3rem; }
-    button { padding: .5rem 1rem; margin-top: .5rem; }
-    footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid #bbc4cc; color: #46535f; font-size: .9rem; }
-    @media (max-width: 40rem) { .field { grid-template-columns: 1fr; } }
-  </style>
-</head>
-<body>
-  <nav><a href="{{ url_for('index') }}">Import</a><a href="{{ url_for('accounts_page') }}" aria-current="page">Konten &amp; Depots</a></nav>
+{% extends "base.html" %}
+{% set active = "accounts_page" %}
+{% block title %}Konten &amp; Depots{% endblock %}
+{% block content %}
   <h1>Konten &amp; Depots</h1>
   {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
   {% if saved %}<p class="notice" role="status">Gespeichert: {{ saved }}</p>{% endif %}
@@ -33,7 +13,7 @@
       <tbody>
         {% for row in rows %}
           <tr{% if not row.active %} class="inactive"{% endif %}>
-            <td>{{ row.name }}</td>
+            <td><a href="{{ url_for('account_detail', account_id=row.account_id) }}">{{ row.name }}</a></td>
             <td>{{ row.type }}</td>
             <td>{{ row.institution }}</td>
             <td>{{ row.currency }}</td>
@@ -57,22 +37,17 @@
         <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
         <input type="hidden" name="account_id" value="{{ form.account_id }}">
         <input type="hidden" name="expected_revision" value="{{ form.expected_revision }}">
-        {% if form.is_cash %}
-          <div class="field"><label for="type-{{ form.form_type }}{{ form.account_id }}">Typ</label>
-            <select id="type-{{ form.form_type }}{{ form.account_id }}" name="account_type">
-              <option value="checking"{% if form.form_type == 'checking' %} selected{% endif %}>Girokonto</option>
-              <option value="settlement"{% if form.form_type == 'settlement' %} selected{% endif %}>Verrechnungskonto</option>
-            </select></div>
-        {% else %}
-          <input type="hidden" name="account_type" value="depot">
-        {% endif %}
+        <div class="field"><label for="type-{{ form.form_type }}">Typ</label>
+          <select id="type-{{ form.form_type }}" name="account_type">
+            {% for value, label in (cash_types if form.is_cash else position_types) %}<option value="{{ value }}"{% if form.form_type == value %} selected{% endif %}>{{ label }}</option>{% endfor %}
+          </select></div>
         <div class="field"><label for="name-{{ form.form_type }}">Name</label><input id="name-{{ form.form_type }}" name="name" value="{{ form.name }}" required maxlength="200"></div>
         <div class="field"><label for="bank-{{ form.form_type }}">Bank</label><input id="bank-{{ form.form_type }}" name="institution" value="{{ form.institution }}" list="known-banks" maxlength="200"></div>
         {% if form.is_cash %}
           <div class="field"><label for="currency-{{ form.form_type }}">Währung</label><input id="currency-{{ form.form_type }}" name="currency" value="{{ form.currency }}" required maxlength="3" pattern="[A-Za-z]{3}"></div>
           <div class="field"><label for="iban-{{ form.form_type }}">IBAN</label><input id="iban-{{ form.form_type }}" name="iban" value="{{ form.iban }}" maxlength="42" autocomplete="off"></div>
         {% else %}
-          <div class="field"><label for="depot-number">Depotnummer</label><input id="depot-number" name="depot_number" value="{{ form.depot_number }}" maxlength="64" autocomplete="off"></div>
+          <div class="field"><label for="depot-number">Depot-/Kontonummer</label><input id="depot-number" name="depot_number" value="{{ form.depot_number }}" maxlength="64" autocomplete="off"></div>
           <div class="field"><label for="reference-account">Referenzkonto</label>
             <select id="reference-account" name="reference_account_id">
               <option value="">kein Referenzkonto</option>
@@ -94,14 +69,12 @@
   {% if edit_form %}
     <h2>Konto bearbeiten</h2>
     <p>Revision {{ edit_form.expected_revision }} · Kennungen ohne Haken werden beim Speichern entfernt.</p>
-    {{ account_form(edit_form, "Depot" if not edit_form.is_cash else "Geldkonto") }}
+    {{ account_form(edit_form, "Bestandskonto" if not edit_form.is_cash else "Geldkonto") }}
     <p><a href="{{ url_for('accounts_page') }}">Abbrechen</a></p>
   {% else %}
     <h2>Neues Konto anlegen</h2>
     <p>IBAN und Depotnummer werden mit der Bank als Kontext gespeichert. Bei einem späteren Import werden sie nur bei exakt eindeutiger Kennung zugeordnet.</p>
-    {{ account_form(cash_form, "Geldkonto (Girokonto oder Verrechnungskonto)") }}
-    {{ account_form(depot_form, "Depot") }}
+    {{ account_form(cash_form, "Geldkonto (Giro, Tagesgeld, Festgeld, Verrechnung)") }}
+    {{ account_form(depot_form, "Bestandskonto (Depot oder Krypto)") }}
   {% endif %}
-  <footer>Branch: {{ branch }} · Commit: {{ commit }} · Datenbankprofil: {{ profile }}</footer>
-</body>
-</html>
+{% endblock %}

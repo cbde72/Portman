@@ -137,7 +137,7 @@ class MasterDataTests(unittest.TestCase):
         finally:
             connection.close()
         upgraded = SQLiteStore(prior_database)
-        self.assertEqual(upgraded.migrate(), ("0003_master_data_context.sql", "0004_import_workflow.sql", "0005_import_commit.sql"))
+        self.assertEqual(upgraded.migrate(), ("0003_master_data_context.sql", "0004_import_workflow.sql", "0005_import_commit.sql", "0006_rollback_plans.sql"))
         migrated = upgraded.get_instrument("migration-instrument")
         self.assertEqual(migrated.identifiers, (InstrumentIdentifier("legacy-provider", "ticker", "unspecified", "ABC"),))
 
@@ -172,9 +172,10 @@ class MasterDataTests(unittest.TestCase):
             self.assertEqual(connection.execute("SELECT kind FROM events").fetchall()[0][0], "opening_balance")
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM events WHERE kind='buy'").fetchone()[0], 0)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM positions").fetchone()[0], 1)
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM balance_index").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT value_decimal FROM balance_index").fetchone()[0], "50")
         finally:
             connection.close()
+        self.assertEqual(self.store.get_overview(date(2025, 1, 1)).lines[0].value, ExactValue("50"))
 
     def test_opening_rejects_currency_account_and_instrument_mismatches(self):
         eur = self._account("EUR account")
@@ -192,36 +193,65 @@ class MasterDataTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             OpeningBalanceInput("zero-units", depot.account_id, date(2025, 1, 1), instrument_id=instrument.instrument_id, quantity=ExactValue("0"))
 
-    def test_opening_increments_data_revision_and_leaves_existing_index_stale(self):
+    def test_opening_updates_index_atomically_and_supports_stichtag_reads(self):
         cash = self._account("Indexed cash")
         current = self._revision()
-        self.store.put_balance_index(account_id=cash.account_id, currency="EUR", instrument_id=None, as_of=date(2025, 1, 1), value=ExactValue("100"), rational_value=None, completeness="complete", data_revision=current)
         self.store.record_opening(OpeningBalanceInput("opening-indexed-cash", cash.account_id, date(2025, 1, 2), currency="EUR", amount=ExactValue("10")))
         self.assertEqual(self._revision(), current + 1)
         connection = self.store.connect()
         try:
-            stored_index_revision = connection.execute("SELECT data_revision FROM balance_index").fetchone()[0]
-            self.assertEqual(stored_index_revision, current)
-            self.assertNotEqual(stored_index_revision, self._revision())
+            row = connection.execute("SELECT data_revision,value_decimal FROM balance_index").fetchone()
+            self.assertEqual((row["data_revision"], row["value_decimal"]), (current + 1, "10"))
         finally:
             connection.close()
+        self.assertEqual(self.store.get_overview(date(2025, 1, 1)).lines, ())
+        line, = self.store.get_overview(date(2025, 1, 2)).lines
+        self.assertEqual((line.value, line.currency, line.completeness), (ExactValue("10"), "EUR", "complete"))
 
-    def test_booking_change_advances_revision_and_does_not_relabel_old_index(self):
+    def test_booking_changes_refresh_only_touched_series_and_late_posting_rebuilds_later_days(self):
         cash = self._account("Booked cash")
-        current = self._revision()
-        self.store.put_balance_index(account_id=cash.account_id, currency="EUR", instrument_id=None, as_of=date(2025, 1, 1), value=ExactValue("100"), rational_value=None, completeness="complete", data_revision=current)
-        effective = date(2025, 1, 2)
-        record = PersistedEventInput(
-            EventInput("manual-posting-event", "manual_adjustment", effective),
-            (PositionInput("manual-posting", cash.account_id, effective, currency="EUR", amount=ExactValue("5")),),
-        )
-        self.store.save_event(record)
-        self.assertEqual(self._revision(), current + 1)
+        other_cash = self._account("Untouched cash")
+        self.store.record_opening(OpeningBalanceInput("other-opening", other_cash.account_id, date(2025, 1, 1), currency="EUR", amount=ExactValue("40")))
+        self.store.record_opening(OpeningBalanceInput("booking-open", cash.account_id, date(2025, 1, 1), currency="EUR", amount=ExactValue("100")))
+        for event_id, position_id, effective, amount in (
+            ("posting-later", "posting-later-position", date(2025, 1, 3), "5"),
+            ("posting-backdated", "posting-backdated-position", date(2025, 1, 2), "10"),
+        ):
+            self.store.save_event(PersistedEventInput(
+                EventInput(event_id, "manual_adjustment", effective),
+                (PositionInput(position_id, cash.account_id, effective, currency="EUR", amount=ExactValue(amount)),),
+            ))
+        expected_revision = self._revision()
         connection = self.store.connect()
         try:
-            self.assertEqual(connection.execute("SELECT data_revision FROM balance_index").fetchone()[0], current)
+            self.assertEqual({row[0] for row in connection.execute("SELECT DISTINCT data_revision FROM balance_index")}, {expected_revision})
+            self.assertEqual(connection.execute("SELECT value_decimal FROM balance_index WHERE as_of='2025-01-03'").fetchone()[0], "115")
         finally:
             connection.close()
+        self.assertEqual(self.store.get_overview(date(2025, 1, 1), (cash.account_id,)).lines[0].value, ExactValue("100"))
+        self.assertEqual(self.store.get_overview(date(2025, 1, 2), (cash.account_id,)).lines[0].value, ExactValue("110"))
+        self.assertEqual(self.store.get_overview(date(2025, 1, 3), (cash.account_id,)).lines[0].value, ExactValue("115"))
+        other_line, = self.store.get_overview(date(2025, 1, 3), (other_cash.account_id,)).lines
+        self.assertEqual(other_line.value, ExactValue("40"))
+        reopened = SQLiteStore(self.database).get_overview(date(2025, 1, 3))
+        self.assertEqual(reopened.data_revision, expected_revision)
+        self.assertEqual({line.value for line in reopened.lines}, {ExactValue("115"), ExactValue("40")})
+
+    def test_opening_resets_unknown_preopening_history(self):
+        cash = self._account("Opening reset cash")
+        self.store.save_event(PersistedEventInput(
+            EventInput("pre-opening-event", "manual_adjustment", date(2025, 1, 1)),
+            (PositionInput("pre-opening-position", cash.account_id, date(2025, 1, 1), currency="EUR", amount=ExactValue("7")),),
+        ))
+        self.store.record_opening(OpeningBalanceInput("reset-opening", cash.account_id, date(2025, 1, 2), currency="EUR", amount=ExactValue("100")))
+        self.store.save_event(PersistedEventInput(
+            EventInput("post-opening-event", "manual_adjustment", date(2025, 1, 3)),
+            (PositionInput("post-opening-position", cash.account_id, date(2025, 1, 3), currency="EUR", amount=ExactValue("5")),),
+        ))
+        self.assertIsNone(self.store.get_overview(date(2025, 1, 1), (cash.account_id,)).lines[0].value)
+        self.assertEqual(self.store.get_overview(date(2025, 1, 1), (cash.account_id,)).lines[0].completeness, "unknown")
+        self.assertEqual(self.store.get_overview(date(2025, 1, 2), (cash.account_id,)).lines[0].value, ExactValue("100"))
+        self.assertEqual(self.store.get_overview(date(2025, 1, 3), (cash.account_id,)).lines[0].value, ExactValue("105"))
 
     def test_failed_update_rolls_back_data_and_revision(self):
         cash = self._account("Atomic account")

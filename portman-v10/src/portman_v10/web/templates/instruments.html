@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% set active = "instruments_page" %}
+{% block title %}Instrumente{% endblock %}
+{% block content %}
+  <h1>Instrumente</h1>
+  {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+  {% if saved %}<p class="notice" role="status">Art gespeichert: {{ saved }}</p>{% endif %}
+  <p>{{ rows|length }} Instrument{% if rows|length != 1 %}e{% endif %} im Testprofil. Die Art ist per Auswahl änderbar; Name und Kennungen bleiben unverändert. Import ordnet ausschließlich über ISIN bzw. eindeutige WKN zu.</p>
+  {% if rows %}
+    <table id="instrument-list">
+      <thead><tr><th>Name</th><th>Art</th><th>ISIN</th><th>WKN</th><th>Weitere Kennungen</th><th>Revision</th><th></th></tr></thead>
+      <tbody>
+        {% for row in rows %}
+          <tr id="instrument-{{ row.instrument_id }}">
+            <td>{{ row.name }}</td>
+            <td>
+              <form method="post" action="{{ url_for('save_instrument_type', instrument_id=row.instrument_id) }}">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="expected_revision" value="{{ row.revision }}">
+                <label class="visually-hidden" for="type-{{ row.instrument_id }}">Art von {{ row.name }}</label>
+                <select id="type-{{ row.instrument_id }}" name="asset_type">
+                  {% if not row.asset_type_known %}<option value="{{ row.asset_type }}" selected disabled>{{ row.asset_type }} (nicht festgelegt)</option>{% endif %}
+                  {% for value, label in types %}<option value="{{ value }}"{% if value == row.asset_type %} selected{% endif %}>{{ label }}</option>{% endfor %}
+                </select>
+                <button type="submit">Speichern</button>
+              </form>
+            </td>
+            <td>{{ row.isin }}</td>
+            <td>{{ row.wkn }}</td>
+            <td>{% for value in row.identifiers %}{{ value }}{% if not loop.last %}<br>{% endif %}{% else %}keine{% endfor %}</td>
+            <td>{{ row.revision }}</td>
+            <td><a href="{{ url_for('edit_instrument', instrument_id=row.instrument_id) }}">Bearbeiten</a></td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p>Noch keine Instrumente im Testprofil.</p>
+  {% endif %}
+
+  <h2 id="instrument-form">{{ "Instrument bearbeiten" if form.instrument_id else "Neues Instrument anlegen" }}</h2>
+  <form method="post" action="{{ url_for('save_instrument') }}">
+    <fieldset>
+      <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="instrument_id" value="{{ form.instrument_id }}">
+      <input type="hidden" name="expected_revision" value="{{ form.expected_revision }}">
+      <input type="hidden" name="return_to" value="{{ form.return_to }}">
+      <div class="field"><label for="instrument-name">Name</label><input id="instrument-name" name="name" value="{{ form.name }}" required maxlength="200"></div>
+      <div class="field"><label for="instrument-type">Art</label>
+        <select id="instrument-type" name="asset_type" required>
+          {% if not form.asset_type %}<option value="" selected disabled>bitte wählen</option>{% endif %}
+          {% if form.asset_type and form.asset_type not in types|map('first')|list %}<option value="{{ form.asset_type }}" selected>{{ form.asset_type }} (nicht festgelegt)</option>{% endif %}
+          {% for value, label in types %}<option value="{{ value }}"{% if value == form.asset_type %} selected{% endif %}>{{ label }}</option>{% endfor %}
+        </select></div>
+      <div class="field"><label for="instrument-isin">ISIN</label><input id="instrument-isin" name="isin" value="{{ form.isin }}" maxlength="12" autocomplete="off"></div>
+      <div class="field"><label for="instrument-wkn">WKN</label><input id="instrument-wkn" name="wkn" value="{{ form.wkn }}" maxlength="6" autocomplete="off"></div>
+      {% if form.kept_identifiers %}<p>Weitere Kennungen bleiben unverändert: {{ form.kept_identifiers|join(", ") }}</p>{% endif %}
+      <p>ISIN oder WKN ist erforderlich. Der Import ordnet nur über diese Kennungen zu{% if form.return_to %}; nach dem Speichern geht es zurück zur Importseite – für die Zuordnung den Beleg danach erneut zur Vorschau einreichen{% endif %}.</p>
+      <button type="submit">{{ "Änderung speichern" if form.instrument_id else "Anlegen" }}</button>
+      {% if form.instrument_id or form.return_to %}<a href="{{ form.return_to or url_for('instruments_page') }}">Abbrechen</a>{% endif %}
+    </fieldset>
+  </form>
+{% endblock %}
