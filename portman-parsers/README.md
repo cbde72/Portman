@@ -1,42 +1,56 @@
 # portman-parsers
 
-`portman-parsers` is the independent, versioned parser core for Portman PDF Lab.
-It contains DTOs, deterministic plugin selection and bank-independent financial
-validation. It intentionally has no dependency on Portman V09, PDF engines,
-OCR packages, GUI frameworks or persistence code.
+`portman-parsers` is the independent, versioned parser core for Portman. It
+contains immutable DTOs, deterministic plugin selection, evidence tracking and
+bank-independent financial validation. It has no dependency on Portman V09,
+PDF Lab, GUI frameworks or persistence code.
 
-Version `0.6.0` provides the Phase-5 public contract and executable Bank of Scotland
-and FNZ/finvesto parsers. The FNZ handlers cover turnover statements and depot
-statements; snapshots never create synthetic security transactions and unknown
-settlement accounts remain unknown.
+## Version 0.7.0
 
-The earlier `0.5.0` contract introduced the consolidated Phase-4 public contract, the first executable bank
-parser and metadata placeholders
-for all 33 approved handlers. Bank-specific parsing is deliberately not yet
-implemented. Positive cash amounts are inflows and negative amounts are
-outflows. Tax and cost amounts are unsigned components and have no cash effect
-unless they explicitly reference a `CashMovement`.
+Version `0.7.0` packages the parser functionality developed through commit
+`bdc8eb82ea2bd68a760f62716546e898a30023a6`. The public DTO/API contract remains
+`0.6` and the serialized result schema remains `1.6.0`; this release adds and
+hardens parser implementations without changing those contracts.
 
-The advance-tax contract separates immutable extracted values from sourced
-calculations, tax carryforwards and evidenced account debits. It validates
-partial exemptions, distributions, appreciation caps, intra-year purchases,
-allowances and loss offsets without guessing missing data. An advance-tax event
-never creates cash or security movements by itself.
+The fixed allowlist contains 42 handlers. The following 35 handlers are
+executable:
 
-Depot and account master data are modeled independently from balances,
-holdings snapshots, transactions and economic events. Every extracted field is
-represented by a `FieldValue` containing origin, PDF page, Evidence references
-and review status; missing properties remain explicitly unknown.
+- comdirect: nine security/tax document handlers, the Finanzreport handler and
+  nine Portfolio Performance-informed handlers;
+- Baader: quarterly and annual depot statements, dividends, advance tax,
+  depot transfers and security settlements;
+- ING: dividends, purchases, sales, advance tax, tax settlement and annual
+  depot statements;
+- Deka: quarterly reports and annual depot statements through the combined
+  `quartalsbericht` handler;
+- FNZ/finvesto: turnover statements and depot statements;
+- Bank of Scotland: account statements.
 
-The cross-bank fee model distinguishes booked, settlement-included,
-informational, estimated, refunded and reversed costs. It deduplicates economic
-fee positions, keeps MiFID disclosures cash-neutral and aggregates currencies
-separately unless a documented conversion is supplied by a future adapter.
+Executable means that a concrete parser is registered and covered by package
+tests. It is not a blanket guarantee for every historical layout. Parsers keep
+unknown values explicit, validate evidence and reconciliation where supported,
+and return issues or reject unsafe input rather than inventing values. Renault's
+six handlers and the generic account-statement handler remain metadata-only.
+`pbb_direkt` and `baader_krypto` remain explicitly blocked.
 
-PDF text extraction uses `pypdf>=6,<7`. It is pure Python, preserves page order,
-supports encrypted-file detection and can flag pages without a text layer for
-optional OCR. Bank of Scotland is the first executable parser; all remaining
-approved handlers stay explicit metadata-only placeholders.
+Notable 0.7.0 changes include executable Baader, ING and Deka plugins, stricter
+FNZ evidence and tax handling, and comdirect improvements for security identity,
+quantities, fees, damaged-font documents and historical Finanzreports. Baader
+layout extraction uses `pypdf` layout mode and may use the optional PDFium
+fallback for damaged text. The synthetic fallback test is covered; validation
+with authorized real damaged Baader PDFs remains outstanding.
+
+Positive cash amounts are inflows and negative amounts are outflows. Tax and
+cost amounts are unsigned components and have no cash effect unless they
+explicitly reference a `CashMovement`. Holdings snapshots never create
+synthetic security transactions, and unknown settlement accounts remain
+unknown. MiFID disclosures remain cash-neutral.
+
+## Dependencies and tests
+
+PDF text extraction uses `pypdf>=6,<7`. Rule profiles use `PyYAML>=6,<7`.
+`pypdfium2>=4,<6` is an optional extra for fallback extraction; no OCR engine is
+a mandatory runtime dependency.
 
 ```powershell
 python -m pip install -e ".[test]"
@@ -45,14 +59,14 @@ python -m pytest
 
 ## Optional rule profiles
 
-The parser library exposes an optional profile API without changing the normal
-plugin registry or parser implementations:
+The optional profile API does not change the normal registry or parser
+implementations:
 
 ```python
 from portman_parsers.rules import ProfileStore, RuleEngine, RuleMode
 
 standard_result = registry.parse(document, detection)
-store = ProfileStore()  # user application-data directory
+store = ProfileStore()
 profile = store.active(detection.plugin_id, detection.handler_id,
                        detection.document_type, "annotated",
                        detection.plugin_version)
@@ -60,10 +74,7 @@ extended = RuleEngine().apply(standard_result, document.text, profile,
                               RuleMode.EXTENDED)
 ```
 
-`STANDARD` needs no profile and returns the original immutable parser result.
-`EXTENDED` produces explicit field decisions alongside that original result;
-it never silently mutates parser DTOs. Profiles are validated YAML with a
-SHA-256 hash, known rule types, known merge strategies and bounded regexes.
-`ProfileStore` supports immutable versions, atomic activation, deactivation,
-export and import without PDF Lab or its SQLite database.
-
+`STANDARD` returns the original immutable parser result. `EXTENDED` produces
+explicit field decisions alongside that result and never silently mutates the
+public DTOs. Profiles are validated YAML with a SHA-256 hash, known rule types,
+known merge strategies and bounded regular expressions.

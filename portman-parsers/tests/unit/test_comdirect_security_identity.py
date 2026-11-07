@@ -1,3 +1,5 @@
+import json
+
 from portman_parsers.api import PdfDocument, PdfPage
 from portman_parsers.plugins import ComdirectPlugin
 from portman_parsers.plugins.comdirect import (
@@ -311,6 +313,89 @@ def test_dividend_identity_evidence_uses_the_real_source_page():
     identity_evidence = [evidence[item] for item in event.security_identity_evidence_ids]
     assert {item.page_number for item in identity_evidence} == {2}
     assert any(item.field == "security_name" and "A0H074iSh.DJ" in item.excerpt for item in identity_evidence)
+
+
+def test_investment_tax_notice_keeps_security_identity_and_evidence():
+    page1 = (
+        "comdirect\nSteuerliche Behandlung: Investment-Ausschüttung\n"
+        "Depotnummer: 123456\nBruttoertrag EUR 5,00\n"
+        "Kapitalertragsteuer EUR 1,00\nSteuerbemessungsgrundlage EUR 4,00"
+    )
+    page2 = (
+        "Wertpapier-Bezeichnung WKN/ISIN\n"
+        "iShares MSCI World A0H074\n"
+        "Inhaber-Anteile DE000A0H0744\nSTK 16,471"
+    )
+    plugin = ComdirectPlugin()
+    document = _document(page1, page2)
+    result = plugin.parse(document, plugin.detect(document)[0])
+    event = result.events[0]
+    evidence = {item.evidence_id: item for item in result.evidence}
+    identity_evidence = [evidence[item] for item in event.security_identity_evidence_ids]
+
+    assert event.kind == "TAX_NOTICE"
+    assert (event.security_name, event.security_wkn, event.security_isin) == (
+        "iShares MSCI World Inhaber-Anteile",
+        "A0H074",
+        "DE000A0H0744",
+    )
+    assert event.tax_events[0].isin == "DE000A0H0744"
+    assert {item.page_number for item in identity_evidence} == {2}
+    assert {item.field for item in identity_evidence} == {"security_name", "security_wkn", "security_isin"}
+    assert not event.cash_movements
+    assert not event.security_movements
+
+
+def test_tax_notice_does_not_restore_isin_rejected_as_ambiguous():
+    page1 = "comdirect\nSteuerliche Behandlung: Inländische Dividende\nDepotnummer: 123456"
+    page2 = (
+        "Wertpapier-Bezeichnung WKN/ISIN\n"
+        "per 01.02.2025 716460 SAP SE\n"
+        "STK 1,000 DE0007164600 Inhaber-Aktien\n"
+        "Weitere Position DE000A0H0744\n"
+        "Kapitalertragsteuer EUR 1,00"
+    )
+    plugin = ComdirectPlugin()
+    document = _document(page1, page2)
+    result = plugin.parse(document, plugin.detect(document)[0])
+    event = result.events[0]
+
+    assert event.tax_events[0].isin is None
+    assert str(event.security_isin) == "NOT_FOUND"
+    assert "COMDIRECT_SECURITY_AMBIGUOUS" in {issue.code for issue in result.issues}
+    evidence = {item.evidence_id: item for item in result.evidence}
+    assert not any(evidence[item].field == "security_isin" for item in event.security_identity_evidence_ids)
+
+
+def test_tax_notice_name_evidence_uses_page_text_when_layout_reorders_columns():
+    page = (
+        "comdirect\nSteuerliche Behandlung: Inländische Dividende\n"
+        "Depotnummer: 123456\nWertpapier-Bezeichnung WKN/ISIN\n"
+        "per 01.02.2025 716460 SAP SE\n"
+        "STK 1,000 DE0007164600 Inhaber-Aktien"
+    )
+    layout = (
+        "Wertpapier-Bezeichnung WKN/ISIN\n"
+        "p er 01.02.2025 SAP SE 716460\n"
+        "STK 1,000 DE0007164600 Inhaber-Aktien"
+    )
+    document = PdfDocument(
+        "layout-identity-doc",
+        "f" * 64,
+        (PdfPage(1, page),),
+        metadata={"text_preparation_json": json.dumps({"pages": [{"layout_text": layout}]})},
+    )
+    plugin = ComdirectPlugin()
+    result = plugin.parse(document, plugin.detect(document)[0])
+    event = result.events[0]
+    evidence = {item.evidence_id: item for item in result.evidence}
+    name_sources = [evidence[item] for item in event.security_identity_evidence_ids
+                    if evidence[item].field == "security_name"]
+
+    assert str(event.security_name) == "SAP SE Inhaber-Aktien"
+    assert len(name_sources) == 1
+    assert name_sources[0].excerpt in page
+    assert "p er 01.02.2025" not in name_sources[0].excerpt
 
 
 def test_conflicting_isin_elsewhere_in_document_is_ambiguous():
