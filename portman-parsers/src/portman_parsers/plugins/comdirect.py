@@ -447,18 +447,32 @@ class ComdirectPlugin:
    advance=re.search(r"Vorabpauschale\s+EUR\s+("+A+r")",text,re.I); taxable=re.search(r"Steuerbemessungsgrundlage.*?EUR\s+("+A+r")",text,re.I|re.S); fsa=re.search(r"Freistellungsauftrag\s+EUR\s+("+A+r")",text,re.I)
    loss=re.search(r"Verlustverrechnung[^\n]*?EUR\s+("+A+r")",text,re.I); partial=re.search(r"Teilfreistellung\s+("+A+r")\s*%",text,re.I); accrual=re.search(r"(?:steuerlicher Zufluss|Zuflussdatum)\s*("+D+r")",text,re.I); booking=re.search(r"Buchungstag\s*("+D+r")",text,re.I)
    withheld=sum((x.amount for x in comps),Decimal())
-   tax=TaxEvent(stable_id("tax",event_id),event_id,"ADVANCE_TAX" if d.handler_id=="vorabpauschale" else d.handler_id,comps,evidence_ids=(eid,),depot_id=depot_id,isin=isin or column_isin,bank_id="comdirect",tax_year=date(accrual.group(1)).year if accrual else None,accrual_date=date(accrual.group(1)) if accrual else None,booking_date=date(booking.group(1)) if booking else MissingValue.NOT_FOUND,advance_before_partial_exemption=dec(advance.group(1)) if advance else MissingValue.NOT_FOUND,taxable_amount=dec(taxable.group(1)) if taxable else MissingValue.NOT_FOUND,exemption_order_used=dec(fsa.group(1)) if fsa else MissingValue.UNKNOWN,loss_offset_used=dec(loss.group(1)) if loss else MissingValue.UNKNOWN,partial_exemption_rate=dec(partial.group(1))/Decimal("100") if partial else MissingValue.UNKNOWN,actually_withheld_tax=withheld)
-   identity_evidence=tuple(ev(field,identity.name_source if field=="security_name" and identity.name_source else value,value)
-                           for field,value in (("security_name",security_name),("security_wkn",column_wkn),("security_isin",column_isin)) if value)
+   identity_name_excerpt=_original_excerpt(doc,(identity.name_source,*identity.name_rows,security_name)) if security_name else None
+   identity_wkn_excerpt=_original_excerpt(doc,(column_wkn,)) if column_wkn else None
+   identity_isin_excerpt=_original_excerpt(doc,(isin,)) if isin else None
+   identity_issues=[]
+   if security_name and not identity_name_excerpt:
+    identity_issues.append(Issue(stable_id("issue",event_id,"security-name-evidence"),"COMDIRECT_SECURITY_NAME_UNVERIFIED",IssueSeverity.WARNING,
+                                 "Wertpapiername im PDF-Text nicht belegbar; Name bleibt leer.",event_id=event_id,nature=IssueNature.MISSING_INFORMATION))
+   if identity.status in {"AMBIGUOUS","INVALID"}:
+    identity_issues.append(Issue(stable_id("issue",event_id,"security-identity",identity.status),"COMDIRECT_SECURITY_"+identity.status,IssueSeverity.WARNING,
+                                 identity.reason or "Wertpapieridentität muss manuell geprüft werden.",event_id=event_id,nature=IssueNature.UNSECURED_ASSIGNMENT))
+   tax=TaxEvent(stable_id("tax",event_id),event_id,"ADVANCE_TAX" if d.handler_id=="vorabpauschale" else d.handler_id,comps,evidence_ids=(eid,),depot_id=depot_id,isin=isin,bank_id="comdirect",tax_year=date(accrual.group(1)).year if accrual else None,accrual_date=date(accrual.group(1)) if accrual else None,booking_date=date(booking.group(1)) if booking else MissingValue.NOT_FOUND,advance_before_partial_exemption=dec(advance.group(1)) if advance else MissingValue.NOT_FOUND,taxable_amount=dec(taxable.group(1)) if taxable else MissingValue.NOT_FOUND,exemption_order_used=dec(fsa.group(1)) if fsa else MissingValue.UNKNOWN,loss_offset_used=dec(loss.group(1)) if loss else MissingValue.UNKNOWN,partial_exemption_rate=dec(partial.group(1))/Decimal("100") if partial else MissingValue.UNKNOWN,actually_withheld_tax=withheld)
+   identity_evidence=tuple(ev(field,excerpt)
+                           for field,value,excerpt in (("security_name",security_name,identity_name_excerpt),
+                                                       ("security_wkn",column_wkn,identity_wkn_excerpt),
+                                                       ("security_isin",isin,identity_isin_excerpt)) if value and excerpt)
    events=(FinancialEvent(event_id,doc.document_id,"ADVANCE_TAX" if d.handler_id=="vorabpauschale" else "TAX_NOTICE",
-                          tax_events=(tax,),evidence_ids=(eid,),security_name=security_name or MissingValue.NOT_FOUND,
-                          security_wkn=column_wkn or MissingValue.NOT_FOUND,security_isin=isin or column_isin or MissingValue.NOT_FOUND,
+                          tax_events=(tax,),evidence_ids=(eid,),
+                          security_name=(security_name if identity_name_excerpt else MissingValue.NOT_FOUND),
+                          security_wkn=column_wkn if identity_wkn_excerpt else MissingValue.NOT_FOUND,
+                          security_isin=isin if identity_isin_excerpt else MissingValue.NOT_FOUND,
                           security_identity_evidence_ids=identity_evidence),)
    calculations=(); carryforwards=()
    if d.handler_id=="vorabpauschale":
     calculations=(AdvanceTaxCalculation(tax.tax_event_id,MissingValue.UNKNOWN,MissingValue.UNKNOWN,MissingValue.UNKNOWN,tax.advance_before_partial_exemption,tax.taxable_amount,withheld,comps,approval_status=TaxApprovalStatus.SYNTHETIC_ONLY),)
     if depot_id and isin and tax.tax_year and isinstance(tax.taxable_amount,Decimal): carryforwards=(AdvanceTaxCarryforward(stable_id("carryforward",tax.tax_event_id),tax.tax_event_id,depot_id,isin,tax.tax_year,tax.taxable_amount,(eid,)),)
-   return self.result(doc,d,evidence,events,depots,tax_calculations=calculations,tax_carryforwards=carryforwards)
+   return self.result(doc,d,evidence,events,depots,issues=tuple(identity_issues),tax_calculations=calculations,tax_carryforwards=carryforwards)
   return self.transaction(doc,d,evidence,ev,fv,depots,depot_id,isin,eid,security_name,column_wkn,column_isin,identity)
  def transaction(self,doc,d,evidence,ev,fv,depots,depot_id,isin,eid,security_name=None,column_wkn=None,column_isin=None,identity=None):
   text=doc.text; h=d.handler_id; kind="BUY" if h=="wertpapierkauf" else "SELL" if h=="wertpapierverkauf" else "REDEMPTION" if h=="einloesung" else "DIVIDEND"
