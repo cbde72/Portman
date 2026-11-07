@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "portman-v10"
+version = "0.0.1"
+requires-python = ">=3.11"
+description = "Unabhängige Vorbereitung von Portman V10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["ruff>=0.11,<1"]
+web = ["Flask>=3.1,<4"]
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+portman_v10 = ["infrastructure/migrations/*.sql", "web/templates/*.html"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 160
+
+[tool.ruff.lint]
+select = ["F"]

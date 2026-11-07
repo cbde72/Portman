@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Portman V10 · Importvorschau</title>
+  <style>
+    body { max-width: 70rem; margin: 2rem auto; padding: 0 1rem; color: #17212b; font: 1rem/1.5 system-ui, sans-serif; }
+    .banner { padding: 1rem; border: 2px solid #a54b00; background: #fff5e8; font-weight: 700; }
+    .error { border-left: .3rem solid #a11; padding: .75rem; background: #fff0f0; }
+    .upload-status { min-height: 1.5em; font-weight: 600; }
+    label, button { display: inline-block; margin: .8rem .4rem .8rem 0; }
+    button { padding: .5rem 1rem; }
+    footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid #bbc4cc; color: #46535f; font-size: .9rem; }
+  </style>
+</head>
+<body>
+  <h1>Portman V10</h1>
+  <p class="banner">Importvorschau – noch nicht gebucht</p>
+  {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+  <h2>PDF zur Prüfung auswählen</h2>
+  <form id="upload-form" action="{{ url_for('upload_import') }}" method="post" enctype="multipart/form-data">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+    <label for="pdf">PDF-Datei (max. 50 MiB)</label>
+    <input id="pdf" name="pdf" type="file" accept="application/pdf,.pdf" required>
+    <button id="upload-submit" type="submit">Importvorschau starten</button>
+  </form>
+  <p id="upload-status" class="upload-status" role="status" aria-live="polite">Keine Datei ausgewählt.</p>
+  <p>Die Datei wird in das getrennte lokale Testprofil kopiert und verarbeitet. Es werden keine Buchungen übernommen.</p>
+  <footer>Branch: {{ branch }} · Commit: {{ commit }} · Datenbankprofil: {{ profile }}</footer>
+  <script>
+    (() => {
+      const form = document.getElementById('upload-form');
+      const fileInput = document.getElementById('pdf');
+      const submit = document.getElementById('upload-submit');
+      const status = document.getElementById('upload-status');
+      let uploading = false;
+
+      fileInput.addEventListener('change', () => {
+        const file = fileInput.files && fileInput.files[0];
+        status.textContent = file ? `${file.name} – bereit zum Hochladen.` : 'Keine Datei ausgewählt.';
+        status.className = 'upload-status';
+      });
+
+      form.addEventListener('submit', (event) => {
+        if (uploading) {
+          event.preventDefault();
+          return;
+        }
+        const file = fileInput.files && fileInput.files[0];
+        if (!file) return;
+        event.preventDefault();
+        uploading = true;
+        submit.disabled = true;
+        status.textContent = `${file.name} wird hochgeladen …`;
+        status.className = 'upload-status';
+
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', form.action);
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300 && new URL(xhr.responseURL).pathname.startsWith('/jobs/')) {
+            status.textContent = `${file.name} hochgeladen. Importvorschau wird erstellt …`;
+            window.location.assign(xhr.responseURL);
+            return;
+          }
+          let message = `Upload fehlgeschlagen (HTTP ${xhr.status}). Bitte erneut versuchen.`;
+          try {
+            const page = new DOMParser().parseFromString(xhr.responseText, 'text/html');
+            const detail = page.querySelector('[role="alert"]');
+            if (detail && detail.textContent.trim()) message = `${detail.textContent.trim()} Bitte erneut versuchen.`;
+          } catch (_) { /* die konkrete HTTP-Meldung bleibt sichtbar */ }
+          status.textContent = `${file.name}: ${message}`;
+          status.className = 'upload-status error';
+          uploading = false;
+          submit.disabled = false;
+        };
+        xhr.onerror = () => {
+          status.textContent = `${file.name}: Netzwerkfehler beim Upload. Bitte Verbindung prüfen und erneut versuchen.`;
+          status.className = 'upload-status error';
+          uploading = false;
+          submit.disabled = false;
+        };
+        xhr.onabort = () => {
+          status.textContent = `${file.name}: Upload abgebrochen. Bitte erneut versuchen.`;
+          status.className = 'upload-status error';
+          uploading = false;
+          submit.disabled = false;
+        };
+        xhr.send(new FormData(form));
+      });
+    })();
+  </script>
+</body>
+</html>
