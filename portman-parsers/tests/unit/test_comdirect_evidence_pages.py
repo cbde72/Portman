@@ -13,7 +13,7 @@ import pytest
 
 from portman_parsers.api import (Account, AccountBalance, CashMovement, CashMovementType, CashStatus,
                                  DepotAccountLink, DepotPosition, DepotSnapshot, Depot, Evidence,
-                                 FieldValue, FinancialEvent, ParsedDocument, PdfDocument, PdfPage)
+                                 FieldValue, FinancialEvent, MissingValue, ParsedDocument, PdfDocument, PdfPage)
 from portman_parsers.plugins.comdirect import (ComdirectFinanzreportPlugin, ComdirectPlugin,
                                                evidence_page, evidence_recorder, _page_for_offset)
 
@@ -171,6 +171,32 @@ def test_finanzreport_multiseite_ohne_validierungsabbruch_und_mit_korrekten_seit
                              if item.evidence_id == position.market_value.evidence_ids[0])
     assert position_evidence.page_number == 3
     assert position.market_value.page_number == 3
+
+
+@pytest.mark.parametrize(("price", "expected"), [
+    ("0,000", Decimal("0.000")),
+    ("0,001", MissingValue.UNKNOWN),
+])
+def test_finanzreport_depotposition_ohne_kurswaehrung(price, expected):
+    row = f"0,999 {price} 0,00"
+    depot_page = FINANZREPORT_SEITE3.replace(
+        "Gesamtkurswert\n",
+        f"X0TEST / Girosammelverwahrung\nTestwert\n{row}\n+0,00\n0,00 +0,00\nGesamtkurswert\n",
+    )
+    document = _document({1: FINANZREPORT_SEITE1, 2: FINANZREPORT_SEITE2, 3: depot_page})
+    plugin = ComdirectFinanzreportPlugin()
+    result = plugin.parse(document, plugin.detect(document)[0])
+    position = next(item for item in result.depot_snapshots[0].positions if item.security_id.value == "X0TEST")
+    assert position.quantity.value == Decimal("0.999")
+    assert position.price.value == expected
+    assert position.market_value.value == Decimal("0.00")
+    assert position.currency.value == "EUR"
+    evidence = next(item for item in result.evidence if item.evidence_id in position.market_value.evidence_ids)
+    assert evidence.page_number == 3
+    assert row in evidence.excerpt
+    if expected is not MissingValue.UNKNOWN:
+        assert position.price.evidence_ids == (evidence.evidence_id,)
+    assert not result.issues
 
 
 def test_finanzreport_split_heading_tagesgeld_plus_konto():

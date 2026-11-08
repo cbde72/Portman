@@ -585,7 +585,7 @@ FR_DIRECT_DEBIT_REFERENCE=re.compile(
 )
 FR_HISTORICAL_AMOUNT=re.compile(r"(?<!\d)([+-]"+A+r")(?!\d)")
 FR_POSITION_HEAD=re.compile(r"^([A-Z0-9]{6})\s*/\s*(Girosammelverwahrung|Wertpapierrechnung)$")
-FR_POSITION_VALUES=re.compile(r"^("+A+r")\s+("+A+r")\s+([A-Z]{3})\s+("+A+r")$")
+FR_POSITION_VALUES=re.compile(r"^("+A+r")\s+("+A+r")(?:\s+([A-Z]{3}))?\s+("+A+r")$")
 FR_POSITION_REST=re.compile(r"^([+-]?"+A+r")(?:\s+([+-]"+A+r"))?$")
 FR_POSITION_ROW=re.compile(r"^([A-Z]{2}[A-Z0-9]{9}\d)\s+("+A+r")\s+("+A+r")\s+EUR\s+("+A+r")\s+EUR\s+("+D+r")$")
 FR_CUSTOMER=re.compile(r"Kundennummer:?\s*\d{3}\s+(\d+)")
@@ -1091,7 +1091,11 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
     for block in positions:
      pe=ev("depot_position","\n".join(block["raw"]),offset=block["offset"])
      price_date=date(block.get("price_date") or (report_date if report_date is not None else max(position_dates)))
-     dto_positions.append(DepotPosition(stable_id("position",did,block["wkn"]),fv(block["wkn"],pe),fv(block["quantity"],pe),security_name=fv(block["name"],pe) if block["name"] else FieldValue.unknown(),market_value=fv(block["value"],pe),currency=fv("EUR",pe),price=fv(block["price"],pe) if block["price_currency"]=="EUR" else FieldValue.unknown(),price_date=fv(price_date,pe)))
+     # Der Kurswert ist laut Spaltenkopf in EUR. Ohne Kurswährung ist nur ein
+     # expliziter Nullkurs in der gemeinsamen Währungseinheit darstellbar.
+     price,price_currency=block["price"],block["price_currency"]
+     price_field=fv(price,pe) if price_currency=="EUR" or (price_currency is None and price==0) else FieldValue.unknown()
+     dto_positions.append(DepotPosition(stable_id("position",did,block["wkn"]),fv(block["wkn"],pe),fv(block["quantity"],pe),security_name=fv(block["name"],pe) if block["name"] else FieldValue.unknown(),market_value=fv(block["value"],pe),currency=fv("EUR",pe),price=price_field,price_date=fv(price_date,pe)))
     snapshots.append(DepotSnapshot(stable_id("snapshot",did,asof,doc.document_id),did,fv(asof,report_ev) if report_ev else fv(asof,dto_positions[0].price_date.evidence_ids[0]),tuple(dto_positions),total_value,fv("EUR",te) if te else FieldValue.unknown()))
     reported=depot_values[0] if depot_values else (dec(total.group(1)) if (total:=re.search(r"Depotgesamtwert\s+("+A+r")\s+EUR",text,re.I)) else None)
     if reported is not None:
