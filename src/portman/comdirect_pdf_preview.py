@@ -41,8 +41,9 @@ class ComdirectPdfPreviewDialog(QDialog):
         self.choices = {}
         self.sources = {}
         layout = QVBoxLayout(self)
-        note = QLabel('Buchungen, Kontosalden und Depotwerte importieren. Konten werden anhand ihrer IBAN zugeordnet. '
-                      'Zielkonto bei Bedarf ändern und auf „Importieren“ klicken.')
+        note = QLabel('Finanzreports enthalten nicht für alle Buchungen eine eindeutige Bankreferenz; Dubletten sind daher '
+                      'nicht sicher automatisch erkennbar. Bitte nur Buchungen übernehmen, die noch nicht gebucht sind. '
+                      'Gespeichert wird erst nach Klick auf „Übernehmen“ unten. Kontoziele bei Bedarf prüfen.')
         note.setWordWrap(True)
         layout.addWidget(note)
         split = QSplitter(Qt.Orientation.Vertical)
@@ -132,7 +133,7 @@ class ComdirectPdfPreviewDialog(QDialog):
         self.status.setTextFormat(Qt.TextFormat.PlainText)
         layout.addWidget(self.status)
         self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText('Importieren')
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText('Übernehmen')
         self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText('Abbrechen')
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)

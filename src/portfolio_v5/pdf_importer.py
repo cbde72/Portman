@@ -86,6 +86,46 @@ def _validate_plugin_batch(batch, document):
     if batch.file_hash != document.file_hash: raise ValueError('Plugin darf den PDF-Dateihash nicht verändern.')
 
 
+def _resolve_comdirect_appendix_accounts(batch):
+    """Use the historical Finanzreport's labelled IBAN appendix for account identity."""
+    if batch.document_type != 'comdirect Finanzreport' or not batch.pdf_text:
+        return
+    labels = {}
+    for match in re.finditer(
+            r'^\s*-\s*(Girokonto|Tagesgeld PLUS(?:-Konto)?|Verrechnungskonto)\s*:\s*'
+            r'Konto\s+\d+\s+IBAN\s+(DE(?:\s*\d){20})\s*$',
+            batch.pdf_text, re.I | re.M):
+        label = re.sub(r'\s+', ' ', match[1]).casefold()
+        iban = re.sub(r'\s+', '', match[2]).upper()
+        if int(iban[4:] + '1314' + iban[2:4]) % 97 == 1:
+            labels.setdefault(label, set()).add('IBAN ' + iban)
+
+    aliases = {
+        'girokonto': ('girokonto',),
+        'tagesgeld plus': ('tagesgeld plus', 'tagesgeld plus-konto'),
+        'tagesgeld plus-konto': ('tagesgeld plus', 'tagesgeld plus-konto'),
+        'verrechnungskonto': ('verrechnungskonto',),
+    }
+    replacements = {}
+    for name in batch.account_names:
+        match = re.fullmatch(r'comdirect (.+?) \(Stammkonto \d+\)', name, re.I)
+        if not match:
+            continue
+        product = re.sub(r'\s+', ' ', match[1]).casefold()
+        candidates = set().union(*(labels.get(label, set()) for label in aliases.get(product, ())))
+        if len(candidates) == 1:
+            replacements[name] = next(iter(candidates))
+    if not replacements:
+        return
+    for value in (*batch.transactions, *batch.balances, *batch.documents):
+        if value.account in replacements:
+            value.account = replacements[value.account]
+    batch.account_names = sorted({replacements.get(name, name) for name in batch.account_names})
+    for snapshot in batch.snapshots:
+        if snapshot.account in replacements:
+            snapshot.account = replacements[snapshot.account]
+
+
 def parse_pdf(path, *, allow_ocr=True, preferred_plugin=None, preferred_handler=None, profile_dirs=(),
               document_tags=None, plugin_catalog=None):
     path = Path(path).resolve()
@@ -98,6 +138,7 @@ def parse_pdf(path, *, allow_ocr=True, preferred_plugin=None, preferred_handler=
         from pdf_plugins._comdirect_fast import try_fast_finanzreport
         fast = try_fast_finanzreport(path, content)
         if fast is not None:
+            _resolve_comdirect_appendix_accounts(fast)
             fast.plugin_id, fast.plugin_version, fast.plugin_handler = 'comdirect.finanzreport', '2.0', 'finanzreport'
             fast.detection_confidence = 1.0
             fast.warnings.append('PDF-Plugin: comdirect · Finanzreport · Erkennung 100 %')
@@ -165,6 +206,7 @@ def parse_pdf(path, *, allow_ocr=True, preferred_plugin=None, preferred_handler=
             batch.document_type = detection.document_type
             batch.pdf_text = '\n\n'.join(f'--- Seite {n} ---\n{text}' for n, text in enumerate(pages, 1))
             result = plugin.parse(document, detection, ParseContext(batch, {'allow_ocr': allow_ocr}))
+            _resolve_comdirect_appendix_accounts(result)
             if fallback_pages:
                 while len(result.pdf_booking_evidence) < len(result.transactions):
                     result.pdf_booking_evidence.append({})
