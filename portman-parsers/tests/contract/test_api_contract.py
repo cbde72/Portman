@@ -21,7 +21,7 @@ from portman_parsers.api import (
 
 
 def test_api_and_schema_are_versioned():
-    assert __version__ == "0.7.0"
+    assert __version__ == "0.7.1"
     assert version("portman-parsers") == __version__
     assert API_VERSION == "0.6"
     assert SCHEMA_VERSION == "1.6.0"

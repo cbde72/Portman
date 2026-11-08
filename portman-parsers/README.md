@@ -5,6 +5,14 @@ contains immutable DTOs, deterministic plugin selection, evidence tracking and
 bank-independent financial validation. It has no dependency on Portman V09,
 PDF Lab, GUI frameworks or persistence code.
 
+## Version 0.7.1
+
+Version `0.7.1` adds a separate legacy parser path for historical comdirect
+Finanzreports whose account tables contain account numbers instead of IBANs.
+It supports both split and compacted PDF text layouts while leaving the parser
+path for newer IBAN-based reports unchanged. API and serialized result schema
+contracts are unchanged from version `0.7.0`.
+
 ## Version 0.7.0
 
 Version `0.7.0` packages the parser functionality developed through commit

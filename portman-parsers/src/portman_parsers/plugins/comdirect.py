@@ -592,6 +592,8 @@ FR_CUSTOMER=re.compile(r"Kundennummer:?\s*\d{3}\s+(\d+)")
 FR_INTEREST_HEAD=re.compile(r"AbschlussZinsenKto(\d+)EUR.*?von("+D+r")bis("+D+r").*?Habenzinsen",re.I)
 FR_INTEREST_CLOSING=re.compile(r"Abschlussrechnung("+A+r")EUR",re.I)
 FR_INTEREST_RATES=re.compile(r"(\d[\d.]*,\d{2,4})%ab(\d{2}\.\d{2}\.)("+A+r")EUR",re.I)
+FR_ACCOUNT_NUMBER=re.compile(r"Ihre\s+Kontonummer:\s*(\d+)",re.I)
+FR_REPORT_HEADER=re.compile(r"Finanzreport\s+Nr\.?\s*(\S+)",re.I)
 FR_REPORT_DATE=re.compile(r"Finanzreport\s+Nr\.\s*\d+\s+(?:per|vom)\s+("+D+r")",re.I)
 FR_SKIP_EXACT=frozenset({"Buchungstag","Valuta","Vorgang","Referenz","Auftraggeber/Empfänger","IBAN/BIC","Buchungstext Ausgang","Eingang","Kontoübersicht","Ihre aktuellen Salden IBAN Saldo in","EUR","WKN / Verwahrart","Bezeichnung","Anzahl / Nominal letzter","Kurs","Währung Kurswert","Stückzinsen","Kaufwert Gewinn /","Verlust","Depotbestand","Depotbestand EUR EUR","Zinsübersicht","Steuerübersicht","Wichtige Hinweise","Ihre Kontodaten IBAN BIC"})
 
@@ -614,6 +616,117 @@ def _account_kind(name):
  return AccountType.OTHER, AccountFunction.SETTLEMENT
 
 
+def _parse_legacy_finanzreport(plugin, document, detection, lines, report_date, evidence, ev, fv):
+ """Parse Finanzreports ohne IBAN im getrennten Tabellenlayout älterer PDFs."""
+ text = document.text
+ account_number_match = FR_ACCOUNT_NUMBER.search(text) or re.search(r"Kontonummer\s*:?\s*(\d+)\s*/\s*BLZ", text, re.I)
+ account_number = account_number_match.group(1) if account_number_match else None
+ if not account_number:
+  return None
+ heading_positions = []
+ for index, (page, offset, line) in enumerate(lines):
+  heading = FR_HEADING.match(line)
+  if heading:
+   tail=lines[index+1:index+15]
+   name=heading.group(1)
+   if any(item[2].startswith("Buchungstag") for item in tail) and name not in {item[3] for item in heading_positions}:
+    heading_positions.append((index, page, offset, name))
+ if not heading_positions:
+  return None
+ for section_index,(start_index,_page,_offset,_name) in enumerate(heading_positions):
+  stop_index=heading_positions[section_index+1][0] if section_index+1<len(heading_positions) else len(lines)
+  if any(IBAN.search(row[2]) for row in lines[start_index:stop_index]):
+   return None
+ if any(re.search(r"(?:Girokonto|Tagesgeld(?:\s+PLUS(?:-Konto)?)?|Tagesgeldkonto|Verrechnungskonto)\s+DE(?:\s*\d){20}", row[2], re.I) for row in lines):
+  return None
+ accounts=[]; balances=[]; events=[]; issues=[]; events_seen=set()
+ account_ids={}
+ for _index,page,offset,name in heading_positions:
+  aid=stable_id("account","comdirect-legacy",account_number,name)
+  if name in account_ids: continue
+  account_ids[name]=aid
+  account_ev=ev("account", f"{name} – Kontonummer {account_number}", offset=offset)
+  account_type,function=_account_kind(name)
+  accounts.append(Account(aid,bank_name=fv("comdirect",account_ev),account_name=fv(name,account_ev),account_type=fv(account_type,account_ev),account_number=fv(account_number,account_ev),currency=fv("EUR",account_ev),functions=(FieldValue.manual(function),)))
+ for section_index,(start_index,_page,_offset,name) in enumerate(heading_positions):
+  if name not in account_ids: continue
+  stop_index=heading_positions[section_index+1][0] if section_index+1<len(heading_positions) else len(lines)
+  section=lines[start_index+1:stop_index]
+  if not any(row[2].startswith("Buchungstag") or row[2].startswith("Umsätze") for row in section): continue
+  aid=account_ids[name]; dates=[]; description=[]; pending_amount=None; pending_offset=None; pending_page=None; opening=None; closing=None
+  def flush_booking():
+   nonlocal pending_amount,dates,description,pending_offset,pending_page
+   if pending_amount is not None and len(dates)==2:
+    add_booking(str(pending_amount),pending_amount,dates,description,pending_offset,pending_page)
+   pending_amount=None; dates=[]; description=[]; pending_offset=None; pending_page=None
+  def add_booking(amount_line, amount, booking_dates, body_lines, row_offset, row_page):
+   if len(booking_dates)!=2:
+    return
+   booked=date(booking_dates[0]); valuta=date(booking_dates[1]); purpose=" ".join(body_lines).strip()
+   key=(aid,booked,valuta,purpose,amount)
+   if key in events_seen: return
+   events_seen.add(key)
+   event_id=stable_id("event",*key)
+   excerpt="\n".join([*booking_dates,*body_lines,amount_line]).strip()
+   evidence_id=ev("booking",excerpt,offset=row_offset)
+   movement=CashMovement(stable_id("cash",event_id),event_id,amount,"EUR",CashStatus.ACTUAL,account_id=aid,evidence_ids=(evidence_id,),movement_type=CashMovementType.INTEREST_CREDIT if re.search(r"Zinsgutschrift|Habenzins|Kontoabschluss",purpose,re.I) else CashMovementType.OTHER)
+   events.append(FinancialEvent(event_id,document.document_id,"CASH_BOOKING",booked,(movement,),evidence_ids=(evidence_id,)))
+  cursor=0
+  while cursor<len(section):
+   page,offset,line=section[cursor]; cursor+=1
+   if line in {"Umsätze","Umsätze EUR","Umsätze","EUR","Buchungstag","Buchungstag Valuta Soll / Haben","Valuta","Soll / Haben","Kto. / IBAN BLZ / BIC"}: continue
+   saldo_inline=FR_SALDO.match(line)
+   if line.startswith(("Alter Saldo","Neuer Saldo")):
+    flush_booking()
+    saldo_inline=saldo_inline or re.match(r"^(Alter|Neuer) Saldo(?:\s+("+D+r"))?\s+([+-]?"+A+r")$",line,re.I)
+    value=saldo_inline.group(3) if saldo_inline and saldo_inline.lastindex>=3 else (saldo_inline.group(2) if saldo_inline else (section[cursor][2] if cursor<len(section) else ""))
+    if FR_AMOUNT.fullmatch(value):
+     amount=dec(value); kind="opening" if saldo_inline and saldo_inline.group(1).lower()=="alter" else "closing"
+     balance_ev=ev(kind+"_balance",line+"\n"+value,offset=offset)
+     balance_date=date(report_date) if report_date else None
+     balances.append(AccountBalance(stable_id("balance",aid,kind,offset),aid,fv(balance_date,balance_ev) if balance_date else FieldValue.unknown(),fv(amount,balance_ev),fv("EUR",balance_ev),FieldValue.manual(kind)))
+     if kind=="opening": opening=amount
+     else: closing=amount
+     if not saldo_inline: cursor+=1
+    continue
+   combined=FR_ROW.match(line)
+   type_first=FR_ROW_TYPE_FIRST.match(line)
+   if combined and combined.group(2):
+    flush_booking()
+    add_booking(line,dec(combined.group(4)),[combined.group(1),combined.group(2)],[combined.group(3)],offset,page)
+    continue
+   if type_first:
+    flush_booking()
+    add_booking(line,dec(type_first.group(4)),[type_first.group(2),type_first.group(3)],[type_first.group(1)],offset,page)
+    continue
+   if FR_DATE_LINE.fullmatch(line):
+    if len(dates)==2:
+     flush_booking()
+    dates.append(line)
+    continue
+   amount_matches=list(FR_HISTORICAL_AMOUNT.finditer(line))
+   if len(amount_matches)==1:
+    amount_match=amount_matches[0]
+    amount=dec(amount_match.group(1)); purpose=(line[:amount_match.start()]+" "+line[amount_match.end():]).strip()
+    if len(dates)==2:
+     pending_amount=amount; pending_offset=offset; pending_page=page
+     if purpose: description.append(purpose)
+    elif pending_amount is None:
+     issues.append(Issue(stable_id("issue",aid,"legacy-booking",offset),"HISTORICAL_BOOKING_LAYOUT_UNSUPPORTED",IssueSeverity.ERROR,"Historischer Buchungsblock hat keine zwei eindeutigen Datumszeilen.",nature=IssueNature.MISSING_INFORMATION))
+    continue
+   if line in {"Kontoabschluss","Saldo nach Abschluss","Habenzinsen"} or line.startswith(("Abschluss Zinsen Kto","von ","Abschlussrechnung","0,250%","3,800%")):
+    if pending_amount is not None and line.startswith("Abschluss Zinsen Kto"):
+     flush_booking()
+    continue
+   if line.strip(): description.append(line)
+  flush_booking()
+  if opening is not None and closing is not None:
+   total=sum((event.cash_movements[0].amount for event in events if event.cash_movements and event.cash_movements[0].account_id==aid and event.event_date is not None and report_date and event.event_date<=date(report_date)),Decimal())
+   if opening+total!=closing:
+    issues.append(Issue(stable_id("issue",aid,"balance"),"BALANCE_MISMATCH",IssueSeverity.ERROR,"Anfangssaldo plus Buchungen entspricht nicht dem Endsaldo.",nature=IssueNature.MATHEMATICAL_INCONSISTENCY))
+ return ParsedDocument(stable_id("result",document.document_id,plugin.metadata.version),document.document_id,plugin.metadata.plugin_id,plugin.metadata.version,detection.handler_id,events=tuple(events),evidence=tuple(evidence),issues=tuple(issues),attributes={"document_number":FR_REPORT_HEADER.search(text).group(1) if FR_REPORT_HEADER.search(text) else MissingValue.NOT_FOUND,"report_date":report_date or MissingValue.NOT_FOUND,"layout_path":"legacy"},accounts=tuple(accounts),account_balances=tuple(balances))
+
+
 class ComdirectFinanzreportPlugin(ComdirectPlugin):
  metadata=next(x for x in APPROVED_PLUGINS if x.plugin_id=="comdirect.finanzreport")
  def detect(self,doc): return (Detection(self.metadata.plugin_id,self.metadata.version,"finanzreport","comdirect Finanzreport",Decimal("0.99"),"Finanzreport header recognized"),) if re.search("comdirect",doc.text,re.I) and re.search(r"Finanzreport\s+Nr",doc.text,re.I) else ()
@@ -625,6 +738,8 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
   report_dates={hit.group(1) for hit in FR_REPORT_DATE.finditer(text)}
   report_date=report_dates.pop() if len(report_dates)==1 else None
   lines=_finanzreport_lines(doc)
+  legacy_result=_parse_legacy_finanzreport(self,doc,d,lines,report_date,evidence,ev,fv)
+  if legacy_result is not None: return legacy_result
   issues=[]; accounts=[]; by_iban={}; names={}; overview={}; depot_expected=None
   events=[]; balances=[]; seen=set(); opened={}; closed={}; section_accounts=set()
   current=None; depot_mode=False; depot_done=False

@@ -351,3 +351,111 @@ Neuer Saldo 31.01.2013 +90,00
     result = _parse(text)
     assert [event.cash_movements[0].amount for event in result.events] == [Decimal("-10.00")]
     assert not result.issues
+
+
+def test_finanzreport_2007_getrennte_spalten_ohne_iban_erhaelt_buchungen_und_salden():
+    text = """comdirect
+Ihre Kontonummer:
+1234567
+Finanzreport Nr. 12 per 31.12.2007
+Girokonto
+Umsätze
+EUR
+Buchungstag
+Valuta
+Soll / Haben
+Alter Saldo
++4.277,72
+Lastschrift Einzug
+04.12.2007
+04.12.2007
+-24,42
+PLUS KLEINE PREISE
+Übertrag/Überweisung
+05.12.2007
+05.12.2007
++1.019,45
+Gutschrift Beispiel
+Kontoabschluss
+31.12.2007
+31.12.2007
++3,19
+Abschluss Zinsen Kto 123456700EUR
+Habenzinsen
+Abschlussrechnung 3,19 EUR
+Neuer Saldo
++5.275,94
+Tagesgeld PLUS
+Umsätze
+EUR
+Buchungstag
+Valuta
+Soll / Haben
+Alter Saldo
++5.001,00
+Kontoabschluss
+31.12.2007
+31.12.2007
++136,88
+Abschluss Zinsen Kto 123456705EUR
+Habenzinsen
+Abschlussrechnung 136,88 EUR
+Neuer Saldo
++5.137,88
+Tagesgeldkonto
+Umsätze
+EUR
+Buchungstag
+Valuta
+Soll / Haben
+Alter Saldo
+0,00
+Neuer Saldo
+0,00
+"""
+    result = _parse(text)
+    assert result.attributes["layout_path"] == "legacy"
+    assert [account.account_name.value for account in result.accounts] == ["Girokonto", "Tagesgeld PLUS", "Tagesgeldkonto"]
+    assert [account.account_number.value for account in result.accounts] == ["1234567"] * 3
+    assert all(account.iban.value.value == "UNKNOWN" for account in result.accounts)
+    assert [event.cash_movements[0].amount for event in result.events] == [Decimal("-24.42"), Decimal("1019.45"), Decimal("3.19"), Decimal("136.88")]
+    assert len(result.account_balances) == 6
+    assert not result.issues
+
+
+def test_finanzreport_mit_iban_verwendet_unveraendert_core_parser():
+    text = """comdirect
+Finanzreport Nr. 7 per 01.02.2026
+Girokonto DE00 0000 0000 0000 0000 01
+Alter Saldo 01.01.2026 +100,00
+02.01.2026 02.01.2026 Gutschrift +10,00
+Neuer Saldo 31.01.2026 +110,00
+"""
+    result = _parse(text)
+    assert result.accounts[0].iban.value == IBAN_GIRO.replace(" ", "")
+    assert [event.cash_movements[0].amount for event in result.events] == [Decimal("10.00")]
+    assert not result.issues
+
+
+def test_historischer_parser_unterstuetzt_pypdf_kompaktierte_tabellenzeilen():
+    text = """comdirect
+Ihre Kontonummer: 1234567
+Finanzreport Nr. 12 per 31.12.2007
+Girokonto ec Tages-/Wochenlimit
+Umsätze EUR
+Buchungstag Valuta Soll / Haben
+Alter Saldo +100,00
+Gutschrift 02.12.2007 02.12.2007 +10,00
+Neuer Saldo +110,00
+Tagesgeldkonto
+Umsätze EUR
+Buchungstag Valuta Soll / Haben
+Alter Saldo 0,00
+Neuer Saldo 0,00
+"""
+    result = _parse(text)
+    assert result.attributes["layout_path"] == "legacy"
+    assert [account.account_name.value for account in result.accounts] == ["Girokonto", "Tagesgeldkonto"]
+    assert [event.cash_movements[0].amount for event in result.events] == [Decimal("10.00")]
+    assert len(result.account_balances) == 4
+    assert not result.issues
