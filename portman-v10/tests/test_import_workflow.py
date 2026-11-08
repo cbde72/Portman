@@ -124,6 +124,39 @@ class ImportWorkflowTests(unittest.TestCase):
             self.workflow.list_imports(stale_page.next_cursor, limit=1)
         self.assertEqual(stale.exception.code, ErrorCode.STALE_REVISION)
 
+    def test_discard_preview_is_revision_checked_and_keeps_original_for_reimport(self):
+        uploaded, job, preview = self._ready_preview()
+        discarded = self.workflow.discard_import(job.import_id, preview.revision)
+        self.assertEqual(discarded.state, "cancelled")
+        self.assertEqual(self.workflow.get_job(job.job_id).state, "cancelled")
+        with self.assertRaises(ApplicationError) as missing_preview:
+            self.workflow.get_import_preview(job.import_id)
+        self.assertEqual(missing_preview.exception.code, ErrorCode.NOT_FOUND)
+        self.assertEqual(self.workflow.get_document(uploaded.document.document_id).metadata.document_id, uploaded.document.document_id)
+        listed = next(item for item in self.workflow.list_imports().items if item.import_id == job.import_id)
+        self.assertEqual(listed.import_status, "cancelled")
+        self.assertEqual(listed.candidate_count, 0)
+
+        with self.assertRaises(ApplicationError) as repeated:
+            self.workflow.discard_import(job.import_id, preview.revision)
+        self.assertEqual(repeated.exception.code, ErrorCode.VALIDATION_ERROR)
+
+        # Der ursprüngliche Beleg kann ohne erneuten Upload wieder eingereicht werden.
+        reimport = self.workflow.start_import(ImportStart((uploaded.document.document_id,)))
+        self.workflow.wait(reimport.job_id, 10)
+        self.assertEqual(self.workflow.get_import_preview(reimport.import_id).items[0].document_id, uploaded.document.document_id)
+
+    def test_discard_preview_rejects_stale_revision_and_committed_import(self):
+        _, job, preview = self._ready_preview()
+        with self.assertRaises(ApplicationError) as stale:
+            self.workflow.discard_import(job.import_id, preview.revision - 1)
+        self.assertEqual(stale.exception.code, ErrorCode.STALE_REVISION)
+        current = self.workflow.get_import_preview(job.import_id)
+        self.workflow.commit_import(CommitImport(job.import_id, current.revision, "discard-guard-commit"))
+        with self.assertRaises(ApplicationError) as committed:
+            self.workflow.discard_import(job.import_id, current.revision)
+        self.assertEqual(committed.exception.code, ErrorCode.VALIDATION_ERROR)
+
     def test_identical_real_purchases_without_safe_reference_remain_separate(self):
         first, job_a, preview_a = self._ready_preview(name="first.pdf")
         second, job_b, preview_b = self._ready_preview(name="second.pdf")

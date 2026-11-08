@@ -6,6 +6,7 @@ if (-not (Test-Path -LiteralPath $python)) {
 
 Push-Location $PSScriptRoot
 $previousPythonPath = $env:PYTHONPATH
+$previousDataDir = $env:PORTMAN_V10_WEB_DATA
 $server = $null
 try {
     $env:PYTHONPATH = Join-Path $PSScriptRoot 'src'
@@ -29,8 +30,9 @@ try {
     $commit = (& git rev-parse --short HEAD).Trim()
     if ($LASTEXITCODE -ne 0 -or -not $commit) { throw 'Git-Commit konnte nicht ermittelt werden.' }
 
-    $dataDir = Join-Path $PSScriptRoot 'data\web-test'
+    $dataDir = Join-Path $PSScriptRoot 'data\web-test-neu-2026-11-07'
     New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+    $env:PORTMAN_V10_WEB_DATA = $dataDir
 
     $server = Start-Process -FilePath $python -ArgumentList @('-m', 'portman_v10.web.server') -WorkingDirectory $PSScriptRoot -PassThru -NoNewWindow
     $uri = 'http://127.0.0.1:8765/'
@@ -46,12 +48,13 @@ try {
     if (-not $ready) { throw 'Lokaler Webserver wurde nicht rechtzeitig erreichbar; pruefen Sie die sichtbare Servermeldung oben.' }
 
     Write-Host "Web-Testoberfläche bereit: $uri"
-    Write-Host "Branch: $branch | Commit: $commit | Datenbankprofil: data/web-test"
+    Write-Host "Branch: $branch | Commit: $commit | Datenbankprofil: data/web-test-neu-2026-11-07"
     Start-Process $uri
     Write-Host 'Der Server laeuft. Mit Strg+C beenden.'
     Wait-Process -Id $server.Id
 } finally {
     if ($server -and -not $server.HasExited) { $server.Kill($true); $server.WaitForExit() }
     $env:PYTHONPATH = $previousPythonPath
+    $env:PORTMAN_V10_WEB_DATA = $previousDataDir
     Pop-Location
 }

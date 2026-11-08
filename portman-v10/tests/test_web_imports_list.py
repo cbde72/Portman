@@ -82,6 +82,26 @@ class WebImportListTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertIn("Importliste hat sich geändert; bitte von vorn laden.", response.get_data(as_text=True))
 
+    def test_preview_can_be_discarded_from_job_and_import_list(self):
+        job_id = self._upload("offen.pdf", "Unbekanntes Dokument")
+        job = self.workflow.get_job(job_id)
+        preview = self.workflow.get_import_preview(job.import_id)
+        page = self._get(f"/jobs/{job_id}")
+        self.assertIn("Vorschau verwerfen", page.get_data(as_text=True))
+        token = re.search(r'name="_csrf_token" value="([^"]+)"', page.get_data(as_text=True)).group(1)
+
+        response = self.client.post(
+            "/imports/discard",
+            data={"_csrf_token": token, "discard_id": job.import_id, "expected_revision": str(preview.revision)},
+            base_url=BASE_URL,
+            headers={"Origin": BASE_URL},
+        )
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(self.workflow.get_job(job_id).state, "cancelled")
+        self.assertIn("1 Vorschau verworfen", self.client.get(response.headers["Location"], base_url=BASE_URL).get_data(as_text=True))
+        document_id = self.workflow.get_import_document_results(job_id)[0].document_id
+        self.assertEqual(self.workflow.get_document(document_id).metadata.document_id, document_id)
+
 
 if __name__ == "__main__":
     unittest.main()

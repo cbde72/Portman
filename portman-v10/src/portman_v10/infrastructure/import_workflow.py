@@ -185,6 +185,10 @@ class ImportWorkflow:
         """Listet Importläufe über den Anwendungsadapter mit stabiler Seitennavigation."""
         return self.store.list_imports(cursor, limit)
 
+    def discard_import(self, import_id: str, expected_revision: int) -> ImportJob:
+        """Verwirft eine offene Vorschau über den Anwendungskern."""
+        return self.store.discard_import(import_id, expected_revision)
+
     def preview_rollback(self, selection):
         """Anwendungsschnittstelle für einzelne, ausgewählte oder ausdrücklich alle Importe."""
         return self.store.preview_rollback(selection)

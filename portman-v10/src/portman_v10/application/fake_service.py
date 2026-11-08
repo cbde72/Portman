@@ -48,6 +48,7 @@ class FakeService:
         self.import_started_at: dict[str, str] = {}
         self.import_documents: dict[str, tuple[str, ...]] = {}
         self.committed: dict[str, CommitReport] = {}
+        self.discarded: set[str] = set()
         self.rolled_back: dict[str, RollbackReport] = {}
         self.rollback_plans: dict[str, tuple[str, ...]] = {}
         self.request_inputs: dict[str, tuple[str, object]] = {}
@@ -88,9 +89,10 @@ class FakeService:
         rolled_back_ids = {import_id for report in self.rolled_back.values() for import_id in report.removed_import_ids}
         summaries = tuple(ImportSummary(
             job.import_id, job.job_id, self.import_started_at[job.import_id],
-            "rolled_back" if job.import_id in rolled_back_ids else "committed" if job.import_id in self.committed else "preview",
+            "rolled_back" if job.import_id in rolled_back_ids else "committed" if job.import_id in self.committed else "cancelled" if job.import_id in self.discarded else "preview",
             job.state, tuple(self.documents[item].metadata.name for item in self.import_documents[job.import_id]),
-            len(self.previews[job.import_id].items), job.import_id in self.committed or job.import_id not in self.committed and any(job.import_id in report.removed_import_ids for report in self.rolled_back.values()),
+            len(self.previews[job.import_id].items) if job.import_id in self.previews else 0,
+            job.import_id in self.committed or job.import_id not in self.committed and any(job.import_id in report.removed_import_ids for report in self.rolled_back.values()),
         ) for job in ordered_jobs[offset:offset + limit])
         return ImportPage(summaries, next_cursor, self.data_revision)
 
@@ -227,6 +229,19 @@ class FakeService:
             return self.previews[import_id]
         except KeyError as error:
             raise ApplicationError(ErrorCode.NOT_FOUND, "Importvorschau nicht gefunden") from error
+
+    def discard_import(self, import_id: str, expected_revision: int) -> ImportJob:
+        preview = self.get_import_preview(import_id)
+        if preview.revision != expected_revision:
+            raise ApplicationError(ErrorCode.STALE_REVISION, "Vorschau-Revision ist veraltet")
+        if import_id in self.committed or self.jobs[next(job_id for job_id, job in self.jobs.items() if job.import_id == import_id)].state != "needs_review":
+            raise ApplicationError(ErrorCode.VALIDATION_ERROR, "Nur eine offene Vorschau kann verworfen werden")
+        job_id = next(job_id for job_id, job in self.jobs.items() if job.import_id == import_id)
+        updated = replace(self.jobs[job_id], state="cancelled", progress=100, revision=self.jobs[job_id].revision + 1)
+        self.jobs[job_id] = updated
+        self.previews.pop(import_id, None)
+        self.discarded.add(import_id)
+        return updated
 
     def resolve_import_item(self, import_id: str, decision: ConflictDecision, expected_revision: int) -> ImportPreview:
         preview = self.get_import_preview(import_id)

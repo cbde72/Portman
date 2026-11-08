@@ -3,17 +3,23 @@
 {% block title %}Importe{% endblock %}
 {% block content %}
   <h1>Importe</h1>
+  {% if discarded %}<p class="notice" role="status">{{ discarded }} Vorschau{% if discarded != 1 %}en{% endif %} verworfen. Gebucht wurde nichts.</p>{% endif %}
   {% if error %}<p class="error" role="alert">{{ error }} <a href="{{ url_for('imports_page') }}">Neu laden</a></p>{% endif %}
   {% if rows %}
     <p>Neueste zuerst.{% if is_continuation %} Fortsetzung – <a href="{{ url_for('imports_page') }}">zum Anfang</a>.{% endif %}</p>
     <form id="rollback-selection" method="post" action="{{ url_for('preview_rollback_route') }}">
     <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+    <p id="selection-tools" class="toolbar" hidden>
+      <button type="button" data-select="discard_id" data-label="offenen Vorschauen" data-one="offene Vorschau">Alle offenen Vorschauen auswählen</button>
+      <button type="button" data-select="import_id" data-label="übernommenen Importe" data-one="übernommenen Import">Alle übernommenen Importe auswählen</button>
+      <span id="selection-count" role="status" aria-live="polite"></span>
+    </p>
     <table id="import-list">
       <thead><tr><th><span class="visually-hidden">Auswahl</span></th><th>Gestartet</th><th>Dateien</th><th>Import</th><th>Job</th><th>Kandidaten</th><th></th></tr></thead>
       <tbody>
         {% for row in rows %}
           <tr{% if row.rolled_back %} class="rolled-back"{% endif %}>
-            <td>{% if row.can_roll_back %}<input type="checkbox" name="import_id" value="{{ row.import_id }}" aria-label="Import vom {{ row.started_at }} auswählen">{% endif %}</td>
+            <td>{% if row.can_roll_back %}<input type="checkbox" name="import_id" value="{{ row.import_id }}" aria-label="Import vom {{ row.started_at }} auswählen">{% elif row.can_discard and discard_available %}<input type="checkbox" name="discard_id" value="{{ row.import_id }}" aria-label="Vorschau vom {{ row.started_at }} zum Verwerfen auswählen">{% endif %}</td>
             <td>{{ row.started_at }}</td>
             <td>{% for name in row.filenames %}{{ name }}{% if not loop.last %}<br>{% endif %}{% else %}keine Datei{% endfor %}</td>
             <td>{{ row.import_status }}</td>
@@ -24,7 +30,8 @@
         {% endfor %}
       </tbody>
     </table>
-    <button type="submit">Rücknahme der Auswahl prüfen</button> <span>Zeigt zuerst die Auswirkungen; es wird noch nichts geändert.</span>
+    <button type="submit">Rücknahme der Auswahl prüfen</button> <span>Übernommene Importe: zeigt zuerst die Auswirkungen; es wird noch nichts geändert.</span>
+    {% if discard_available %}<br><button type="submit" formaction="{{ url_for('discard_previews') }}" data-confirm-button="Ausgewählte offene Vorschauen verwerfen? Es wird nichts gebucht; die Belege bleiben abgelegt.">Ausgewählte Vorschauen verwerfen</button> <span>Offene, nicht übernommene Vorschauen.</span>{% endif %}
     </form>
     <form method="post" action="{{ url_for('preview_rollback_route') }}" class="danger-zone">
       <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
@@ -36,4 +43,48 @@
   {% elif not error %}
     <p>Noch keine Importe im Testprofil.</p>
   {% endif %}
+{% endblock %}
+{% block scripts %}
+  <script nonce="{{ csp_nonce() }}">
+    // „Alle auswählen“ für Vorschauen bzw. übernommene Importe; ohne JavaScript bleibt die Einzelauswahl.
+    (() => {
+      const form = document.getElementById('rollback-selection');
+      const tools = document.getElementById('selection-tools');
+      if (!form || !tools) return;
+      const count = document.getElementById('selection-count');
+      const buttons = [...tools.querySelectorAll('button[data-select]')];
+      const boxes = (name) => [...form.querySelectorAll(`input[type=checkbox][name="${name}"]`)];
+
+      function refresh() {
+        let visible = 0;
+        for (const button of buttons) {
+          const group = boxes(button.dataset.select);
+          button.hidden = group.length === 0;
+          if (!group.length) continue;
+          visible += 1;
+          const all = group.every((box) => box.checked);
+          button.textContent = all ? `Auswahl der ${button.dataset.label} aufheben`
+            : group.length === 1 ? `1 ${button.dataset.one} auswählen` : `Alle ${group.length} ${button.dataset.label} auswählen`;
+          button.setAttribute('aria-pressed', all ? 'true' : 'false');
+        }
+        tools.hidden = visible === 0;
+        const previews = boxes('discard_id').filter((box) => box.checked).length;
+        const imports = boxes('import_id').filter((box) => box.checked).length;
+        count.textContent = previews || imports ? `Ausgewählt: ${previews} Vorschau${previews === 1 ? '' : 'en'}, ${imports} übernommene${imports === 1 ? 'r' : ''} Import${imports === 1 ? '' : 'e'}` : '';
+      }
+
+      for (const button of buttons) {
+        button.addEventListener('click', () => {
+          const group = boxes(button.dataset.select);
+          const select = !group.every((box) => box.checked);
+          for (const box of group) box.checked = select;
+          refresh();
+        });
+      }
+      form.addEventListener('change', refresh);
+      // Nachgeladene Zeilen (automatisches Nachladen) in Zählung und Knopftext aufnehmen.
+      new MutationObserver(refresh).observe(document.querySelector('#import-list tbody'), { childList: true });
+      refresh();
+    })();
+  </script>
 {% endblock %}

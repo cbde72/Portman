@@ -410,6 +410,37 @@ class SQLiteStore:
         finally:
             connection.close()
 
+    def discard_import(self, import_id: str, expected_revision: int) -> ImportJob:
+        """Verwirft eine offene Vorschau atomar; Quelldokumente und Importhistorie bleiben erhalten."""
+        with self.transaction() as connection:
+            row = connection.execute(
+                "SELECT j.*, i.status AS import_status, p.revision AS preview_revision "
+                "FROM import_jobs j JOIN imports i ON i.import_id=j.import_id "
+                "LEFT JOIN import_previews p ON p.import_id=i.import_id WHERE i.import_id=?",
+                (import_id,),
+            ).fetchone()
+            if row is None:
+                raise ApplicationError(ErrorCode.NOT_FOUND, "Import nicht gefunden")
+            if row["import_status"] != "preview" or row["state"] != "needs_review" or row["preview_revision"] is None:
+                raise ApplicationError(ErrorCode.VALIDATION_ERROR, "Nur eine offene Vorschau kann verworfen werden")
+            if row["preview_revision"] != expected_revision:
+                raise ApplicationError(ErrorCode.STALE_REVISION, "Vorschau-Revision ist veraltet")
+            updated_revision = row["revision"] + 1
+            connection.execute(
+                "UPDATE imports SET status='cancelled' WHERE import_id=? AND status='preview'", (import_id,)
+            )
+            connection.execute(
+                "UPDATE import_jobs SET state='cancelled', progress=100, revision=?, cancel_requested=0, updated_at=? "
+                "WHERE import_id=? AND state='needs_review'",
+                (updated_revision, datetime.now().astimezone().isoformat(), import_id),
+            )
+            connection.execute("DELETE FROM import_review_decisions WHERE import_id=?", (import_id,))
+            connection.execute("DELETE FROM import_previews WHERE import_id=?", (import_id,))
+            return ImportJob(
+                row["job_id"], import_id, "cancelled", 100, updated_revision, None,
+                row["document_count"], row["completed_documents"], False,
+            )
+
     def save_review_decision(self, import_id: str, candidate_id: str, preview_revision: int, candidate_revision: int, decision_json: str, *, preview_json: str | None = None) -> None:
         with self.transaction() as connection:
             current = connection.execute("SELECT revision FROM import_previews WHERE import_id=?", (import_id,)).fetchone()

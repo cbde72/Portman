@@ -28,7 +28,7 @@
     <p id="job-feedback" class="error" role="alert">Vorschau für die oben angezeigte Datei fehlgeschlagen{% if job.error_code %}: {{ job.error_code.value }}{% endif %}. Bitte erneut versuchen.</p>
     <p><a class="retry-upload" href="{{ url_for('index') }}">Erneut versuchen (PDF neu auswählen)</a></p>
   {% elif job.state == 'cancelled' %}
-    <p id="job-feedback" class="error" role="alert">Import abgebrochen. Bitte erneut versuchen.</p>
+    <p id="job-feedback" class="warning" role="status">Import abgebrochen bzw. Vorschau verworfen – es wurde nichts gebucht. Die Belege bleiben abgelegt und können erneut importiert werden.</p>
     <p><a class="retry-upload" href="{{ url_for('index') }}">Erneut versuchen (PDF neu auswählen)</a></p>
   {% endif %}
   <p>Jobstatus: <strong>{{ status_labels.get(job.state, job.state) }}</strong></p>
@@ -157,6 +157,21 @@
       {% if summary.unresolved %}<p class="warning">Vor der Übernahme müssen alle unvollständigen Kandidaten, offenen Zuordnungen und Konflikte geklärt sein.</p>{% endif %}
       {% if summary.undecided %}<p id="undecided-hint" class="check-point">Noch {{ summary.undecided }} Kandidat{% if summary.undecided != 1 %}en{% endif %} ohne Entscheidung: Bei jedem rot markierten Kandidaten „Kandidat prüfen / annehmen“ oder „Ignorieren“ wählen, dann übernehmen.</p>{% endif %}
     </form>
+    </div>
+  {% endif %}
+  {% if can_discard %}
+    <div id="discard-area" class="danger-zone">
+      {% if discard_available %}
+        <form method="post" action="{{ url_for('discard_previews') }}" data-confirm="Diese Vorschau verwerfen? Es wird nichts gebucht; die Belege bleiben abgelegt und können erneut importiert werden.">
+          <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="discard_id" value="{{ job.import_id }}">
+          <input type="hidden" name="expected_revision" value="{{ preview_revision }}">
+          <button type="submit">Vorschau verwerfen</button>
+          <small>Nicht übernehmen: Die Vorschau wird als verworfen markiert, Entscheidungen entfallen, Belege bleiben erhalten.</small>
+        </form>
+      {% else %}
+        <p><small>Vorschau verwerfen: noch nicht verfügbar – der Datenkern bietet diese Funktion noch nicht an. Bis dahin bucht eine offene Vorschau nichts und kann einfach liegen bleiben.</small></p>
+      {% endif %}
     </div>
   {% endif %}
   <p><a href="{{ url_for('index') }}">Weiteres PDF prüfen</a></p>

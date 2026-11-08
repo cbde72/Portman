@@ -103,6 +103,26 @@ class WebBatchImportTests(unittest.TestCase):
         self.assertEqual(job.document_count, 2, "identische Datei zählt nur einmal")
         self.assertEqual(len(self._imports()), 1)
 
+    def test_pdfs_larger_than_64_kib_are_accepted_on_both_upload_paths(self):
+        # Regression: MAX_FORM_MEMORY_SIZE = 64 KiB ließ Werkzeug 3.1 jede PDF über ~64 KB mit 413 ablehnen.
+        filler = "\n".join(f"Umsatzzeile {index:05d} 01.07.2026 Kartenzahlung -2,50 Verwendungszweck mit etwas Text" for index in range(4000))
+        large = make_text_pdf(PURCHASE.format(date="01.07.2026") + "\n" + filler)
+        self.assertGreater(len(large), 200 * 1024)
+        staged = self._stage("finanzreport-gross.pdf", large)
+        self.assertEqual(staged.status_code, 201, staged.get_data(as_text=True)[:300])
+        direct = self.client.post("/imports", base_url=BASE_URL, headers=HEADERS, content_type="multipart/form-data",
+                                  data={"_csrf_token": self.token, "pdf": (BytesIO(large), "finanzreport-gross.pdf")})
+        self.assertEqual(direct.status_code, 303, direct.get_data(as_text=True)[:300])
+
+    def test_too_many_parts_is_not_reported_as_50_mib(self):
+        response = self.client.post("/imports", base_url=BASE_URL, headers=HEADERS, content_type="multipart/form-data", data={
+            "_csrf_token": self.token, "pdf": [(BytesIO(b"%PDF-1.4"), f"klein-{index}.pdf") for index in range(MAX_BATCH_FILES + 10)]})
+        html = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 413)
+        self.assertIn(f"zu viele Dateien auf einmal (höchstens {MAX_BATCH_FILES})", html)
+        self.assertNotIn("50 MiB", html.split('role="alert">', 1)[1].split("<", 1)[0])
+        self.assertIn(f'data-max-files="{MAX_BATCH_FILES}"', self.home)
+
     def test_staging_rejects_invalid_files_with_a_json_message(self):
         for name, content, message in (("notiz.txt", b"text", "Endung .pdf"), ("leer.pdf", b"", "Datei ist leer")):
             with self.subTest(name=name):

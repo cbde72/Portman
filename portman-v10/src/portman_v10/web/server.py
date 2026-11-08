@@ -32,6 +32,7 @@ from portman_v10.web.overview import STEPS, parse_anchor, shift
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 MAX_REQUEST_BYTES = MAX_UPLOAD_BYTES + 64 * 1024
 MAX_BATCH_FILES = 200
+MAX_FORM_FIELD_BYTES = 1024 * 1024
 PACKAGE_ROOT = Path(__file__).resolve().parents[3]
 STATUS_LABELS = {
     "queued": "Wartet",
@@ -39,7 +40,7 @@ STATUS_LABELS = {
     "needs_review": "Prüfung nötig",
     "completed": "Abgeschlossen",
     "failed": "Fehlgeschlagen",
-    "cancelled": "Abgebrochen",
+    "cancelled": "Abgebrochen/verworfen",
     "parsed": "Verarbeitet",
     "information": "Nur Information",
     "unsupported": "Nicht unterstützt",
@@ -49,7 +50,7 @@ IMPORT_STATUS_LABELS = {
     "started": "Gestartet",
     "preview": "Vorschau, nicht übernommen",
     "committed": "Übernommen",
-    "cancelled": "Abgebrochen",
+    "cancelled": "Abgebrochen/verworfen",
     "failed": "Fehlgeschlagen",
     "rolled_back": "Zurückgenommen",
 }
@@ -339,7 +340,8 @@ def create_app(
     app = Flask(__name__, template_folder="templates")
     app.config.update(
         MAX_CONTENT_LENGTH=MAX_REQUEST_BYTES,
-        MAX_FORM_MEMORY_SIZE=64 * 1024,
+        # Werkzeug prüft diese Grenze auch gegen rohe Upload-Blöcke (bis 64 KiB je Block); 64 KiB lehnte daher PDFs > ~64 KB ab.
+        MAX_FORM_MEMORY_SIZE=MAX_FORM_FIELD_BYTES,
         MAX_FORM_PARTS=MAX_BATCH_FILES + 8,
         TRUSTED_HOSTS=["127.0.0.1", "localhost"],
         SECRET_KEY=secrets.token_urlsafe(32),
@@ -424,6 +426,7 @@ def create_app(
                 "review_item": "Prüfentscheidung",
                 "commit_import": "Übernahme",
                 "accept_all_candidates": "Prüfentscheidung",
+                "discard_previews": "Importpflege",
                 "refresh_preview": "Übernahme",
                 "save_account": "Kontenpflege",
                 "save_instrument_type": "Instrumentpflege",
@@ -449,13 +452,16 @@ def create_app(
                 "Kontenpflege": "Kontenpflege abgelehnt: lokale Herkunft oder sitzungsgebundener CSRF-Token ungültig.",
                 "Instrumentpflege": "Instrumentpflege abgelehnt: lokale Herkunft oder sitzungsgebundener CSRF-Token ungültig.",
                 "Rücknahme": "Rücknahme abgelehnt: lokale Herkunft oder sitzungsgebundener CSRF-Token ungültig.",
+                "Importpflege": "Verwerfen abgelehnt: lokale Herkunft oder sitzungsgebundener CSRF-Token ungültig.",
                 "Upload": "Upload nur von der geöffneten lokalen V10-Seite erlaubt.",
             }
             abort(403, description=messages[action])
 
     @app.errorhandler(RequestEntityTooLarge)
     def upload_too_large(_error):
-        return index_error("Upload überschreitet die Grenze von 50 MiB je Anfrage.", 413)
+        if (request.content_length or 0) > MAX_REQUEST_BYTES:
+            return index_error("Upload überschreitet die Grenze von 50 MiB je Anfrage.", 413)
+        return index_error(f"Anfrage abgelehnt: zu viele Dateien auf einmal (höchstens {MAX_BATCH_FILES}) oder ein zu großes Formularfeld.", 413)
 
     @app.get("/health")
     def health():
@@ -464,7 +470,7 @@ def create_app(
     @app.get("/")
     def index():
         token = session.setdefault("v10_csrf_token", secrets.token_urlsafe(32))
-        return render_template("index.html", branch=branch, commit=commit, profile=profile, csrf_token=token)
+        return render_template("index.html", branch=branch, commit=commit, profile=profile, csrf_token=token, max_batch_files=MAX_BATCH_FILES)
 
     def index_error(message: str, status: int):
         return render_template("index.html", error=message, branch=branch, commit=commit, profile=profile,
@@ -572,6 +578,8 @@ def create_app(
             summary=_preview_summary(preview) if preview else {"events": 0, "cash": 0, "quantity": 0, "unresolved": 0, "undecided": 0},
             commit_report=commit_report,
             stale_preview=stale_preview,
+            discard_available=discard_function() is not None,
+            can_discard=bool(preview and not commit_report and job.state == "needs_review"),
             bulk=_bulk_summary(preview) if preview else {"ready": 0, "others": 0},
             bulk_accepted=request.args.get("accepted", type=int),
             action_error=action_error,
@@ -580,6 +588,15 @@ def create_app(
             commit=commit,
             profile=profile,
         ), status
+
+    def discard_function():
+        """discard_import(import_id, expected_revision) laut Anwendungsvertrag; fehlt sie (älterer Kern), nur Hinweis."""
+        return getattr(workflow, "discard_import", None)
+
+    def discard_one(import_id: str, expected_revision: int | None = None) -> None:
+        if expected_revision is None:
+            expected_revision = workflow.get_import_preview(import_id).revision
+        discard_function()(import_id, expected_revision)
 
     def current_data_revision(fallback: int) -> int:
         """Aktueller Datenstand über die Anwendungsschnittstelle; ohne Antwort keine Warnung."""
@@ -787,6 +804,7 @@ def create_app(
         context["rows"] = tuple({
             "import_id": item.import_id,
             "can_roll_back": item.import_status == "committed",
+            "can_discard": item.import_status == "preview",
             "job_id": item.job_id,
             "started_at": item.started_at.replace("T", " ")[:19],
             "filenames": item.filenames,
@@ -796,6 +814,8 @@ def create_app(
             "rolled_back": item.import_status == "rolled_back",
         } for item in page.items)
         context["next_cursor"] = page.next_cursor
+        context["discard_available"] = discard_function() is not None
+        context["discarded"] = request.args.get("discarded", type=int)
         return render_template("imports.html", **context)
 
     def render_instruments(*, error=None, saved=None, status=200, form=None):
@@ -875,6 +895,32 @@ def create_app(
         return render_template("imports.html", rows=(), next_cursor=None, error=message, is_continuation=False,
                                csrf_token=session.setdefault("v10_csrf_token", secrets.token_urlsafe(32)),
                                branch=branch, commit=commit, profile=profile), status
+
+    @app.post("/imports/discard")
+    def discard_previews():
+        """Offene, nicht übernommene Vorschauen verwerfen; Belege und Buchungen bleiben unberührt."""
+        if discard_function() is None:
+            return render_imports_error("Vorschauen verwerfen ist noch nicht verfügbar: Der Datenkern bietet discard_import noch nicht an.", 501)
+        import_ids = tuple(dict.fromkeys(value for value in request.form.getlist("discard_id") if value.strip()))
+        if not import_ids:
+            return render_imports_error("Bitte mindestens eine offene Vorschau zum Verwerfen auswählen.", 400)
+        single = len(import_ids) == 1 and request.form.get("expected_revision")
+        try:
+            expected = int(request.form["expected_revision"]) if single else None
+        except ValueError:
+            abort(400, description="Ungültige Vorschauversion")
+        done = 0
+        for import_id in import_ids:
+            try:
+                discard_one(import_id, expected)
+            except ApplicationError as error:
+                prefix = f"Nach {done} verworfenen Vorschauen abgebrochen: " if done else "Vorschau nicht verworfen: "
+                message = "Die Vorschau hat sich seit dem Laden der Seite geändert; bitte neu prüfen." if error.code == ErrorCode.STALE_REVISION else error.message
+                if single:
+                    return render_import_error(import_id, prefix + message, 409 if error.code == ErrorCode.STALE_REVISION else 400)
+                return render_imports_error(prefix + message, 409 if error.code == ErrorCode.STALE_REVISION else 400)
+            done += 1
+        return redirect(url_for("imports_page", discarded=done), code=303)
 
     @app.post("/rollbacks/preview")
     def preview_rollback_route():

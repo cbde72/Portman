@@ -7,7 +7,7 @@
   {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
   <h2>PDFs zur Prüfung auswählen</h2>
   <form id="upload-form" action="{{ url_for('upload_import') }}" method="post" enctype="multipart/form-data"
-        data-documents-url="{{ url_for('stage_document') }}" data-batch-url="{{ url_for('start_batch_import') }}">
+        data-documents-url="{{ url_for('stage_document') }}" data-batch-url="{{ url_for('start_batch_import') }}" data-max-files="{{ max_batch_files or 200 }}">
     <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
     <div class="field"><label for="pdf">PDF-Dateien (je max. 50 MiB, mehrere möglich)</label>
       <input id="pdf" name="pdf" type="file" accept="application/pdf,.pdf" multiple required></div>
@@ -72,7 +72,9 @@
         if (!files.length) {
           setStatus(skipped ? `Keine PDF-Datei in der Auswahl.${note}` : 'Keine Datei ausgewählt.', skipped > 0);
         } else {
-          setStatus(`${files.length === 1 ? files[0].name : label(files.length)} – bereit zum Hochladen.${note}`);
+          const maxFiles = Number(form.dataset.maxFiles) || 200;
+          const tooMany = files.length > maxFiles ? ` Höchstens ${maxFiles} je Import – bitte aufteilen.` : '';
+          setStatus(`${files.length === 1 ? files[0].name : label(files.length)} – bereit zum Hochladen.${note}${tooMany}`, Boolean(tooMany));
         }
       }
 
@@ -140,6 +142,11 @@
         if (uploading) return;
         if (!files.length) {
           setStatus('Bitte mindestens eine PDF-Datei auswählen.', true);
+          return;
+        }
+        const maxFiles = Number(form.dataset.maxFiles) || 200;
+        if (files.length > maxFiles) {
+          setStatus(`${files.length} PDF-Dateien ausgewählt – ein gemeinsamer Import umfasst höchstens ${maxFiles}. Bitte in mehrere Importe aufteilen.`, true);
           return;
         }
         uploading = true;
