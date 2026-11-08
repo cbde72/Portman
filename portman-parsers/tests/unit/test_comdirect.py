@@ -30,6 +30,34 @@ Neuer Saldo 31.01.2026 105,00"""
  assert len(result.accounts)==1; assert len(result.events)==2; assert not result.issues
  assert result.account_balances[-1].amount.value==105
 
+def test_finanzreport_lastschrift_verwendet_vollstaendige_referenz():
+ text="""comdirect
+Finanzreport Nr. 7
+Girokonto DE00 0000 0000 0000 0000 01
+Alter Saldo 01.01.2026 100,00
+02.01.2026
+02.01.2026
+Lastschrift /
+Belastung
+AB0123456789
+CD01/12345
+Testempfänger
+End-to-End-Ref.: 9999999999999
+CORE / Mandatsref.: TESTMANDAT
+-5,00
+02.01.2026 02.01.2026 Lastschrift/Belastung AB0123456789CD01/67890 Testempfänger -5,00
+03.01.2026 03.01.2026 Lastschrift/Belastung Testempfänger End-to-End-Ref.: 9999999999999 -5,00
+Neuer Saldo 31.01.2026 85,00"""
+ source=PdfDocument("report","b"*64,(PdfPage(1,text),)); plugin=ComdirectFinanzreportPlugin()
+ result=plugin.parse(source,plugin.detect(source)[0])
+ first, second, third=result.events
+ assert (first.bank_reference,second.bank_reference)==("AB0123456789CD01/12345","AB0123456789CD01/67890")
+ assert first.bank_reference_status==second.bank_reference_status=="RECOGNIZED"
+ assert third.bank_reference_status=="MISSING"
+ assert third.bank_reference is MissingValue.UNKNOWN
+ evidence=next(item for item in result.evidence if item.evidence_id==first.bank_reference_evidence_ids[0])
+ assert "AB0123456789\nCD01/12345" in evidence.excerpt
+
 def test_finanzreport_depot_is_snapshot_not_trade():
  text="""comdirect\nFinanzreport Nr. 8\nDepotnummer: 12345
 DE0008474511 2,000 50,00 EUR 100,00 EUR 31.01.2026

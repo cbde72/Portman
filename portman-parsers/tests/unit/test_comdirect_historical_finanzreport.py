@@ -127,6 +127,80 @@ Neuer Saldo 31.01.2007 0,00
     assert [i.severity.value for i in result.issues] == ["WARNING"]
 
 
+def test_historisches_girokonto_nach_mehrzeiligen_kartenlimits():
+    text = """comdirect
+Finanzreport Nr. 1 per 01.02.2010
+Girokonto ec Tages-/Wochenlimit
+EUR 100,-/EUR 200,-
+Visa Tageslimit
+EUR 300,-
+Dispositionskredit
+EUR 400,-
+Buchungstag
+Valuta
+Kto. / IBAN BLZ / BIC
+Alter Saldo 01.01.2010 +10,00
+15.01.2010
+15.01.2010
+Gutschrift +5,00
+Neuer Saldo 31.01.2010 +15,00
+""" + _hinweis(Girokonto=IBAN_GIRO)
+    result = _parse(text)
+    assert [event.cash_movements[0].amount for event in result.events] == [Decimal("5.00")]
+    assert len(result.account_balances) == 2
+    assert not result.issues
+
+
+def test_kompakter_dispositionskredit_beginnt_eigenen_giroabschnitt():
+    text = f"""comdirect
+Finanzreport Nr. 11 per 01.12.2017
+Kontoübersicht
+Girokonto {IBAN_GIRO} +15,00
+Verrechnungskonto {IBAN_VK} +1,00
+Girokonto DispositionskreditEUR 100 girocard Tages-/WochenlimitEUR 200
+Buchungstag
+Valuta
+Alter Saldo 01.11.2017 +10,00
+15.11.2017 15.11.2017 Gutschrift +5,00
+Neuer Saldo 01.12.2017 +15,00
+Verrechnungskonto
+Buchungstag
+Valuta
+Alter Saldo 01.11.2017 +1,00
+Neuer Saldo 01.12.2017 +1,00
+"""
+    result = _parse(text)
+    accounts = _by_name(result)
+    assert [event.cash_movements[0].account_id for event in result.events] == [accounts["Girokonto"].account_id]
+    assert len(result.account_balances) == 4
+    assert not result.issues
+
+
+def test_undatierter_endsaldo_begrenzt_nicht_zuordenbaren_kontobereich():
+    text = """comdirect
+Finanzreport Nr. 12 per 31.12.2007
+IBAN: DE00 0000 0000 0000 0000 01
+Girokonto ec Tages-/WochenlimitEUR 100,-
+Umsätze EUR
+Buchungstag Valuta Soll / Haben
+Alter Saldo +10,00
+Lastschrift Einzug 02.12.2007 02.12.2007 -5,00
+Neuer Saldo +5,00
+Tagesgeld PLUS
+Umsätze EUR
+Buchungstag Valuta Soll / Haben
+Alter Saldo +10,00
+Gutschrift 15.12.2007 15.12.2007 +1,00
+Gutschrift 17.12.2007 17.12.2007 +2,00
+Neuer Saldo +13,00
+"""
+    result = _parse(text)
+    assert not result.accounts and not result.events and not result.account_balances
+    assert [issue.code for issue in result.issues] == ["ACCOUNT_IBAN_UNRESOLVED"] * 2
+    assert "1 Buchung(en)" in result.issues[0].message
+    assert "2 Buchung(en)" in result.issues[1].message
+
+
 def test_mehrdeutige_iban_zuordnung_wird_nicht_geraten():
     text = """comdirect\nFinanzreport Nr. 1 per 01.02.2007
 Tagesgeld PLUS

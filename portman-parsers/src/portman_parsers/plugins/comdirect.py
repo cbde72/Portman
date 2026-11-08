@@ -571,13 +571,18 @@ FR_NAMES=("Girokonto","Tagesgeld PLUS-Konto","Tagesgeld PLUS","Tagesgeldkonto","
 FR_ACCOUNT_LINE=re.compile(r"^("+"|".join(FR_NAMES)+r")\s+(DE(?:\s*\d){20})(?:\s+([+-]?"+A+r"))?(?:\s+([A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?))?$")
 # Historische Layouts nennen die IBANs je Konto nur im Hinweisblock "Für Ihre Überweisungen ...".
 FR_LABELLED_IBAN=re.compile(r"^-?\s*(Girokonto|Tagesgeld PLUS(?:-Konto)?|Tagesgeldkonto|Verrechnungskonto|O&F-Konto)\s*:\s*Konto\s+\d+\s+IBAN\s+(DE(?:\s*\d){20})")
-FR_HEADING=re.compile(r"^(Girokonto|Tagesgeld(?: PLUS(?:-Konto)?)?|Tagesgeldkonto|Verrechnungskonto|O&F-Konto)(?:\s+(?:Dispositionskredit|ec|girocard)\b.*)?$")
+FR_HEADING=re.compile(r"^(Girokonto|Tagesgeld(?: PLUS(?:-Konto)?)?|Tagesgeldkonto|Verrechnungskonto|O&F-Konto)(?:\s+(?:Dispositionskredit|ec|girocard)(?=\b|EUR).*)?$")
+FR_SECTION_PREAMBLE=re.compile(r"^(?:EUR(?:\s|$)|Umsätze EUR$|(?:Visa|ec|girocard)\s+Tages|Dispositionskredit(?:\b|EUR))")
 FR_SALDO=re.compile(r"^(Alter|Neuer)\s+Saldo\s+("+D+r")(?:\s+([+-]?"+A+r"))?$",re.I)
 FR_AMOUNT=re.compile(r"^[+-]?"+A+r"$")
 FR_BOOKING_AMOUNT=re.compile(r"^[+-]"+A+r"$")
 FR_DATE_LINE=re.compile(r"^"+D+r"$")
 FR_ROW=re.compile(r"^("+D+r")(?:\s+("+D+r"))?\s+(.*?)\s+([+-]"+A+r")$")
 FR_ROW_TYPE_FIRST=re.compile(r"^(\D.*?)\s+("+D+r")\s+("+D+r")\s+([+-]"+A+r")$")
+FR_DIRECT_DEBIT_REFERENCE=re.compile(
+ r"^Lastschrift\s*/\s*Belastung\s*"
+ r"((?:[A-Z0-9]{16}|[A-Z0-9]{12}\s+[A-Z0-9]{4}|[A-Z0-9]{11}\s+[A-Z0-9]{5})/[0-9]{1,8})(?=\s|$)"
+)
 FR_HISTORICAL_AMOUNT=re.compile(r"(?<!\d)([+-]"+A+r")(?!\d)")
 FR_POSITION_HEAD=re.compile(r"^([A-Z0-9]{6})\s*/\s*(Girosammelverwahrung|Wertpapierrechnung)$")
 FR_POSITION_VALUES=re.compile(r"^("+A+r")\s+("+A+r")\s+([A-Z]{3})\s+("+A+r")$")
@@ -668,7 +673,13 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
    movement=CashMovement(stable_id("cash",event_id),event_id,block["amount"],"EUR",CashStatus.ACTUAL,account_id=current,evidence_ids=(be,),movement_type=CashMovementType.INTEREST_CREDIT if interest else CashMovementType.FEE_DEBIT if custody else CashMovementType.OTHER)
    # Eine vorhandene Kontobelastung ist die einzige Cash-Bewegung; FeeEvent ist mit ihr verknüpft.
    fees=(FeeEvent(stable_id("fee",event_id),"custody","verwahrentgelt",abs(block["amount"]),"EUR",date(block["booked"]),FeeEffect.ACTUAL_BOOKED,doc.document_id,"comdirect",account_id=current,transaction_id=event_id,cash_movement_id=movement.movement_id,evidence_ids=(be,)),) if custody else ()
-   events.append(FinancialEvent(event_id,doc.document_id,"CASH_BOOKING",date(block["booked"]),(movement,),tax_events=taxes,fee_events=fees,evidence_ids=(be,)))
+   # Die Referenzspalte folgt direkt auf die Vorgangsart. Verwendungszweck und
+   # SEPA-Referenzen folgen später. Die Nummer nach dem Schrägstrich gehört zur Referenz.
+   reference=FR_DIRECT_DEBIT_REFERENCE.match("\n".join(block["body"]))
+   events.append(FinancialEvent(event_id,doc.document_id,"CASH_BOOKING",date(block["booked"]),(movement,),tax_events=taxes,fee_events=fees,evidence_ids=(be,),
+                                bank_reference=re.sub(r"\s+","",reference.group(1)) if reference else MissingValue.UNKNOWN,
+                                bank_reference_status="RECOGNIZED" if reference else "MISSING",
+                                bank_reference_evidence_ids=(be,) if reference else ()))
 
   def flush_position():
    nonlocal pos
@@ -732,21 +743,25 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
    if heading:
     if heading.group(1)=="Tagesgeld" and index<len(lines) and lines[index][2].startswith("PLUS-Konto"):
      line="Tagesgeld "+lines[index][2]; index+=1; heading=FR_HEADING.match(line)
-    lookahead=" | ".join(entry[2] for entry in lines[index:index+4])
-    if "Buchungstag" in lookahead or "Alter Saldo" in lookahead:
+    table_start=index
+    while table_start<len(lines) and FR_SECTION_PREAMBLE.match(lines[table_start][2]):
+     table_start+=1
+    if table_start<len(lines) and lines[table_start][2].startswith(("Buchungstag","Alter Saldo")):
      name=heading.group(1)
      iban=names.get(name.lower())
-     if iban is None and name.lower().startswith("tagesgeld"): iban=names.get("tagesgeld plus-konto")
+     if iban is None and name in {"Tagesgeld PLUS","Tagesgeld PLUS-Konto"}:
+      iban=names.get("tagesgeld plus-konto" if name=="Tagesgeld PLUS" else "tagesgeld plus")
      if iban is None:
       found=labelled.get(name.lower()) or (labelled.get("tagesgeld plus-konto") if name.lower()=="tagesgeld plus" else None) or (labelled.get("tagesgeld plus") if name.lower()=="tagesgeld plus-konto" else None)
       if found is not None:
        account_dto(name,found[0],None,found[1],found[2]); iban=found[0]
      if iban is None:
       # Keine IBAN im Dokument bzw. nicht eindeutig: Bereich nicht zuordnen, Verlust sichtbar melden.
+      flush_historical(); historical_leading_dates.clear(); historical_leading_body.clear(); historical_unanchored.clear()
       flush_booking(); flush_position(); current=None; depot_mode=False; depot_done=False
       lost=0
-      for _p,_o,later in lines[index:]:
-       if FR_SALDO.match(later) and later.startswith("Neuer"): break
+      for _p,_o,later in lines[table_start:]:
+       if later.startswith("Neuer Saldo") or FR_HEADING.match(later) or FR_ACCOUNT_LINE.match(later): break
        if (FR_ROW.match(later) and not FR_DATE_LINE.fullmatch(later)) or FR_ROW_TYPE_FIRST.match(later): lost+=1
       reason="mehrdeutig" if name.lower() in labelled_conflicts else "im Dokument nicht vorhanden"
       issues.append(Issue(stable_id("issue",doc.document_id,"account-iban-missing",name.lower(),offset),"ACCOUNT_IBAN_UNRESOLVED",IssueSeverity.ERROR if lost else IssueSeverity.WARNING,"Kontobereich %s ohne eindeutige IBAN (%s); %d Buchung(en) wurden nicht übernommen."%(heading.group(1),reason,lost),nature=IssueNature.UNSECURED_ASSIGNMENT))
