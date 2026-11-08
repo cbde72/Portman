@@ -423,6 +423,60 @@ Neuer Saldo
     assert not result.issues
 
 
+def test_finanzreport_2007_kontozuordnung_aus_blz_kontonummer_und_kopf_iban():
+    text = """comdirect
+Ihre Kontonummer: 4764924
+Bankleitzahl: 200 411 33
+IBAN: DE84 2004 1133 0476 4924 00
+Finanzreport Nr. 12 per 31.12.2007
+Kontonummer 4764924 / BLZ 20041133
+Girokonto
+Umsätze EUR
+Buchungstag Valuta Soll / Haben
+Alter Saldo +100,00
+Neuer Saldo +100,00
+Tagesgeld PLUS
+Umsätze EUR
+Buchungstag Valuta Soll / Haben
+Alter Saldo +50,00
+Kontoabschluss 31.12.2007 31.12.2007 +1,00
+Abschluss Zinsen Kto 476492405EUR
+von 30.09.2007 bis 31.12.2007
+Habenzinsen
+Neuer Saldo +51,00
+Tagesgeldkonto
+Umsätze EUR
+Buchungstag Valuta Soll / Haben
+Alter Saldo 0,00
+Neuer Saldo 0,00
+"""
+    result = _parse(text)
+    accounts = _by_name(result)
+    assert accounts["Girokonto"].iban.value == "DE84200411330476492400"
+    assert accounts["Girokonto"].account_number.value == "4764924"
+    assert accounts["Tagesgeld PLUS"].iban.value == "DE46200411330476492405"
+    assert accounts["Tagesgeld PLUS"].account_number.value == "476492405"
+    assert accounts["Tagesgeldkonto"].iban.value.value == "UNKNOWN"
+
+
+def test_finanzreport_2007_widerspruechliche_kopf_iban_wird_nicht_zugeordnet():
+    text = """comdirect
+Ihre Kontonummer: 4764924
+Bankleitzahl: 20041133
+IBAN: DE00 2004 1133 0476 4924 00
+Finanzreport Nr. 12 per 31.12.2007
+Kontonummer 4764924 / BLZ 20041133
+Girokonto
+Umsätze EUR
+Buchungstag Valuta Soll / Haben
+Alter Saldo +100,00
+Neuer Saldo +100,00
+"""
+    result = _parse(text)
+    assert _by_name(result)["Girokonto"].iban.value.value == "UNKNOWN"
+    assert [issue.code for issue in result.issues] == ["ACCOUNT_IBAN_MISMATCH"]
+
+
 def test_finanzreport_mit_iban_verwendet_unveraendert_core_parser():
     text = """comdirect
 Finanzreport Nr. 7 per 01.02.2026

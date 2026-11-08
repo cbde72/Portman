@@ -593,9 +593,35 @@ FR_INTEREST_HEAD=re.compile(r"AbschlussZinsenKto(\d+)EUR.*?von("+D+r")bis("+D+r"
 FR_INTEREST_CLOSING=re.compile(r"Abschlussrechnung("+A+r")EUR",re.I)
 FR_INTEREST_RATES=re.compile(r"(\d[\d.]*,\d{2,4})%ab(\d{2}\.\d{2}\.)("+A+r")EUR",re.I)
 FR_ACCOUNT_NUMBER=re.compile(r"Ihre\s+Kontonummer:\s*(\d+)",re.I)
+FR_BANK_CODE=re.compile(r"(?:Bankleitzahl|BLZ)\s*:?\s*([\d ]{8,})",re.I)
+FR_HEADER_IBAN=re.compile(r"\bIBAN\s*:?\s*(DE(?:\s*\d){20})",re.I)
 FR_REPORT_HEADER=re.compile(r"Finanzreport\s+Nr\.?\s*(\S+)",re.I)
 FR_REPORT_DATE=re.compile(r"Finanzreport\s+Nr\.\s*\d+\s+(?:per|vom)\s+("+D+r")",re.I)
 FR_SKIP_EXACT=frozenset({"Buchungstag","Valuta","Vorgang","Referenz","Auftraggeber/Empfänger","IBAN/BIC","Buchungstext Ausgang","Eingang","Kontoübersicht","Ihre aktuellen Salden IBAN Saldo in","EUR","WKN / Verwahrart","Bezeichnung","Anzahl / Nominal letzter","Kurs","Währung Kurswert","Stückzinsen","Kaufwert Gewinn /","Verlust","Depotbestand","Depotbestand EUR EUR","Zinsübersicht","Steuerübersicht","Wichtige Hinweise","Ihre Kontodaten IBAN BIC"})
+
+
+def _comdirect_iban(bank_code, account_number):
+ """Build a German IBAN from an evidenced comdirect bank/account number."""
+ bank_code=re.sub(r"\s", "", bank_code or "")
+ account_number=re.sub(r"\s", "", account_number or "")
+ if not re.fullmatch(r"\d{8}", bank_code) or not re.fullmatch(r"\d{1,10}", account_number): return None
+ # Beim siebenstelligen comdirect-Hauptkonto bilden achtstellige Stammnummer
+ # und zweistellige Unterkontonummer (Giro = 00) die zehnstellige Kontonummer.
+ if len(account_number)==7: account_number=account_number.zfill(8)+"00"
+ else: account_number=account_number.zfill(10)
+ bban=bank_code+account_number
+ remainder=int(bban+"131400")%97  # DE00 -> D=13, E=14
+ check_digits=98-remainder
+ iban=f"DE{check_digits:02d}{bban}"
+ return iban if int(bban+f"1314{check_digits:02d}")%97==1 else None
+
+
+def _valid_german_iban(value):
+ compact=re.sub(r"\s", "", value or "").upper()
+ if not re.fullmatch(r"DE\d{20}", compact): return False
+ rearranged=compact[4:]+compact[:4]
+ digits="".join(str(ord(char)-55) if char.isalpha() else char for char in rearranged)
+ return int(digits)%97==1
 
 
 def _finanzreport_lines(document):
@@ -621,6 +647,11 @@ def _parse_legacy_finanzreport(plugin, document, detection, lines, report_date, 
  text = document.text
  account_number_match = FR_ACCOUNT_NUMBER.search(text) or re.search(r"Kontonummer\s*:?\s*(\d+)\s*/\s*BLZ", text, re.I)
  account_number = account_number_match.group(1) if account_number_match else None
+ bank_code_match=FR_BANK_CODE.search(text)
+ bank_code=re.sub(r"\s", "", bank_code_match.group(1)) if bank_code_match else None
+ header_iban_match=FR_HEADER_IBAN.search(text)
+ header_iban=re.sub(r"\s", "", header_iban_match.group(1)).upper() if header_iban_match else None
+ primary_iban=_comdirect_iban(bank_code,account_number) if bank_code and account_number else None
  if not account_number:
   return None
  heading_positions = []
@@ -645,9 +676,19 @@ def _parse_legacy_finanzreport(plugin, document, detection, lines, report_date, 
   aid=stable_id("account","comdirect-legacy",account_number,name)
   if name in account_ids: continue
   account_ids[name]=aid
-  account_ev=ev("account", f"{name} – Kontonummer {account_number}", offset=offset)
+  section_end=next((heading[0] for heading in heading_positions if heading[0]>_index),len(lines))
+  section_text="\n".join(item[2] for item in lines[_index:section_end])
+  subaccount_match=FR_INTEREST_HEAD.search(re.sub(r"\s+", "", section_text))
+  subaccount_number=subaccount_match.group(1) if subaccount_match else None
+  account_iban=primary_iban if name=="Girokonto" else (_comdirect_iban(bank_code,subaccount_number) if bank_code and subaccount_number else None)
+  if name=="Girokonto" and header_iban:
+   if _valid_german_iban(header_iban) and account_iban==header_iban: account_iban=header_iban
+   else:
+    account_iban=None
+    issues.append(Issue(stable_id("issue",aid,"iban-mismatch"),"ACCOUNT_IBAN_MISMATCH",IssueSeverity.ERROR,"Die IBAN im Reportkopf stimmt nicht mit der IBAN aus Kontonummer und BLZ überein.",nature=IssueNature.UNSECURED_ASSIGNMENT))
+  account_ev=ev("account", f"{name} – Kontonummer {account_number}"+(f" / IBAN {account_iban}" if account_iban else ""), offset=offset)
   account_type,function=_account_kind(name)
-  accounts.append(Account(aid,bank_name=fv("comdirect",account_ev),account_name=fv(name,account_ev),account_type=fv(account_type,account_ev),account_number=fv(account_number,account_ev),currency=fv("EUR",account_ev),functions=(FieldValue.manual(function),)))
+  accounts.append(Account(aid,bank_name=fv("comdirect",account_ev),account_name=fv(name,account_ev),account_type=fv(account_type,account_ev),account_number=fv(subaccount_number or account_number,account_ev),iban=fv(account_iban,account_ev) if account_iban else FieldValue.unknown(),currency=fv("EUR",account_ev),functions=(FieldValue.manual(function),)))
  for section_index,(start_index,_page,_offset,name) in enumerate(heading_positions):
   if name not in account_ids: continue
   stop_index=heading_positions[section_index+1][0] if section_index+1<len(heading_positions) else len(lines)
