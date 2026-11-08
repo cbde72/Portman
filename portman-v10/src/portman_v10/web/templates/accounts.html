@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% set active = "accounts_page" %}
+{% block title %}Konten &amp; Depots{% endblock %}
+{% block content %}
+  <h1>Konten &amp; Depots</h1>
+  {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+  {% if saved %}<p class="notice" role="status">Gespeichert: {{ saved }}</p>{% endif %}
+
+  <h2>Vorhandene Konten</h2>
+  {% if rows %}
+    <table id="account-list">
+      <thead><tr><th>Name</th><th>Typ</th><th>Bank</th><th>Währung</th><th>Kennungen</th><th>Referenzkonto</th><th>Status</th><th>Revision</th><th></th></tr></thead>
+      <tbody>
+        {% for row in rows %}
+          <tr{% if not row.active %} class="inactive"{% endif %}>
+            <td><a href="{{ url_for('account_detail', account_id=row.account_id) }}">{{ row.name }}</a></td>
+            <td>{{ row.type }}</td>
+            <td>{{ row.institution }}</td>
+            <td>{{ row.currency }}</td>
+            <td>{% for value in row.identifiers %}{{ value }}{% if not loop.last %}<br>{% endif %}{% else %}keine{% endfor %}</td>
+            <td>{{ row.reference }}</td>
+            <td>{{ "aktiv" if row.active else "deaktiviert" }}</td>
+            <td>{{ row.revision }}</td>
+            <td>{% if row.editable %}<a href="{{ url_for('edit_account', account_id=row.account_id) }}">Bearbeiten</a>{% else %}nicht in dieser Maske{% endif %}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p>Noch keine Konten im Testprofil.</p>
+  {% endif %}
+
+  {% macro account_form(form, title) %}
+    <form method="post" action="{{ url_for('save_account') }}">
+      <fieldset>
+        <legend>{{ title }}</legend>
+        <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="account_id" value="{{ form.account_id }}">
+        <input type="hidden" name="expected_revision" value="{{ form.expected_revision }}">
+        <div class="field"><label for="type-{{ form.form_type }}">Typ</label>
+          <select id="type-{{ form.form_type }}" name="account_type">
+            {% for value, label in (cash_types if form.is_cash else position_types) %}<option value="{{ value }}"{% if form.form_type == value %} selected{% endif %}>{{ label }}</option>{% endfor %}
+          </select></div>
+        <div class="field"><label for="name-{{ form.form_type }}">Name</label><input id="name-{{ form.form_type }}" name="name" value="{{ form.name }}" required maxlength="200"></div>
+        <div class="field"><label for="bank-{{ form.form_type }}">Bank</label><input id="bank-{{ form.form_type }}" name="institution" value="{{ form.institution }}" list="known-banks" maxlength="200"></div>
+        {% if form.is_cash %}
+          <div class="field"><label for="currency-{{ form.form_type }}">Währung</label><input id="currency-{{ form.form_type }}" name="currency" value="{{ form.currency }}" required maxlength="3" pattern="[A-Za-z]{3}"></div>
+          <div class="field"><label for="iban-{{ form.form_type }}">IBAN</label><input id="iban-{{ form.form_type }}" name="iban" value="{{ form.iban }}" maxlength="42" autocomplete="off"></div>
+        {% else %}
+          <div class="field"><label for="depot-number">Depot-/Kontonummer</label><input id="depot-number" name="depot_number" value="{{ form.depot_number }}" maxlength="64" autocomplete="off"></div>
+          <div class="field"><label for="reference-account">Referenzkonto</label>
+            <select id="reference-account" name="reference_account_id">
+              <option value="">kein Referenzkonto</option>
+              {% for option_id, option_label in references %}<option value="{{ option_id }}"{% if option_id == form.reference_account_id %} selected{% endif %}>{{ option_label }}</option>{% endfor %}
+            </select></div>
+        {% endif %}
+        {% if form.kept %}
+          <p>Weitere Kennungen beibehalten:</p>
+          {% for index, label, checked in form.kept %}
+            <label><input type="checkbox" name="keep_identifier" value="{{ index }}"{% if checked %} checked{% endif %}> {{ label }}</label><br>
+          {% endfor %}
+        {% endif %}
+        <button type="submit">{{ "Änderung speichern" if form.account_id else "Anlegen" }}</button>
+      </fieldset>
+    </form>
+  {% endmacro %}
+
+  <datalist id="known-banks">{% for bank in banks %}<option value="{{ bank }}">{% endfor %}</datalist>
+  {% if edit_form %}
+    <h2>Konto bearbeiten</h2>
+    <p>Revision {{ edit_form.expected_revision }} · Kennungen ohne Haken werden beim Speichern entfernt.</p>
+    {{ account_form(edit_form, "Bestandskonto" if not edit_form.is_cash else "Geldkonto") }}
+    <p><a href="{{ url_for('accounts_page') }}">Abbrechen</a></p>
+  {% else %}
+    <h2>Neues Konto anlegen</h2>
+    <p>IBAN und Depotnummer werden mit der Bank als Kontext gespeichert. Bei einem späteren Import werden sie nur bei exakt eindeutiger Kennung zugeordnet.</p>
+    {{ account_form(cash_form, "Geldkonto (Giro, Tagesgeld, Festgeld, Verrechnung)") }}
+    {{ account_form(depot_form, "Bestandskonto (Depot oder Krypto)") }}
+  {% endif %}
+{% endblock %}

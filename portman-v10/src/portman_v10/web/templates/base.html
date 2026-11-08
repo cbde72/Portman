@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  {% block head %}{% endblock %}
+  <title>{% block title %}{% endblock %} · Portman V10</title>
+  <style>
+    :root {
+      --bg: #f4f6f9; --surface: #ffffff; --surface-2: #f8f9fb; --text: #1b2430; --muted: #5b6672; --border: #dde2e8;
+      --accent: #2357c6; --accent-strong: #1a449d; --accent-soft: #e8eefc; --on-accent: #ffffff;
+      --danger: #b42318; --danger-soft: #fdecea; --warn: #9a5200; --warn-soft: #fff4e5; --ok: #1d7a3a; --ok-soft: #e9f6ee;
+      --radius: .6rem; --shadow: 0 1px 2px rgba(16, 24, 40, .06), 0 1px 3px rgba(16, 24, 40, .08);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f141a; --surface: #171e26; --surface-2: #1d252f; --text: #e6ebf0; --muted: #9aa6b2; --border: #2c3744;
+        --accent: #7ea6ff; --accent-strong: #a8c2ff; --accent-soft: #1d2a47; --on-accent: #0f141a;
+        --danger: #ff8f85; --danger-soft: #3a1e1e; --warn: #ffb866; --warn-soft: #3a2a15; --ok: #74d394; --ok-soft: #17321f;
+        --shadow: none;
+      }
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    a { color: var(--accent); text-underline-offset: .15em; }
+    a:hover { color: var(--accent-strong); }
+    h1 { font-size: 1.6rem; line-height: 1.25; margin: 0 0 1rem; letter-spacing: -.01em; }
+    h2 { font-size: 1.15rem; margin: 2rem 0 .75rem; }
+    h3 { font-size: 1rem; margin: 0 0 .5rem; }
+    h4 { font-size: .9rem; margin: 1rem 0 .3rem; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+    small { color: var(--muted); font-weight: 400; font-size: .85rem; }
+    pre { white-space: pre-wrap; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); padding: .75rem; font-size: .85rem; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+    /* Kopfleiste */
+    .app-header { position: sticky; top: 0; z-index: 10; background: var(--surface); border-bottom: 1px solid var(--border); }
+    .app-header-inner { max-width: 82rem; margin: 0 auto; padding: .6rem 1rem; display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 1.25rem; }
+    .brand { font-weight: 700; color: var(--text); text-decoration: none; letter-spacing: -.01em; }
+    .brand span { color: var(--muted); font-weight: 500; }
+    .app-nav { display: flex; flex-wrap: wrap; gap: .25rem; }
+    .app-nav a { padding: .35rem .7rem; border-radius: 999px; color: var(--muted); text-decoration: none; font-weight: 500; }
+    .app-nav a:hover { background: var(--surface-2); color: var(--text); }
+    .app-nav a[aria-current="page"] { background: var(--accent-soft); color: var(--accent-strong); }
+    .profile-chip { margin-left: auto; font-size: .8rem; padding: .2rem .6rem; border-radius: 999px; background: var(--warn-soft); color: var(--warn); font-weight: 600; white-space: nowrap; }
+
+    /* Inhalt */
+    main { max-width: 82rem; margin: 0 auto; padding: 1.75rem 1rem 2rem; }
+    section, fieldset, dl, .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 1rem 1.25rem; margin: 0 0 1rem; }
+    section h3 { margin-top: 0; }
+    fieldset { min-width: 0; }
+    legend { font-weight: 600; padding: 0 .4rem; }
+    details { margin: .75rem 0 0; }
+    summary { cursor: pointer; color: var(--accent); font-weight: 500; }
+
+    /* Hinweise */
+    .banner, .error, .warning, .notice { border-radius: var(--radius); padding: .75rem 1rem; margin: 0 0 1rem; border: 1px solid transparent; border-left-width: .3rem; }
+    .banner { background: var(--warn-soft); border-color: var(--warn); color: var(--warn); font-weight: 600; }
+    .banner.danger, .error { background: var(--danger-soft); border-color: var(--danger); }
+    .banner.danger { color: var(--danger); }
+    .warning { background: var(--warn-soft); border-color: var(--warn); }
+    .notice { background: var(--ok-soft); border-color: var(--ok); }
+    .check-point { color: var(--danger); font-weight: 600; }
+    .inactive, .rolled-back { color: var(--muted); }
+    .danger-zone { margin-top: 1.5rem; padding: .75rem 1rem; border: 1px dashed var(--danger); border-radius: var(--radius); background: var(--surface); }
+
+    /* Tabellen */
+    .table-wrap, table { width: 100%; }
+    table { border-collapse: separate; border-spacing: 0; margin: .5rem 0 1.25rem; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow); }
+    th, td { text-align: left; vertical-align: top; padding: .55rem .75rem; border-bottom: 1px solid var(--border); }
+    th { background: var(--surface-2); font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 600; }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover td { background: var(--surface-2); }
+    section table { box-shadow: none; }
+    .amount, td.number, th.amount { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    td form { display: flex; gap: .4rem; flex-wrap: wrap; align-items: center; margin: 0; }
+    @media (max-width: 48rem) { table { display: block; overflow-x: auto; } }
+
+    /* Formulare */
+    input, select, textarea { font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: .45rem; padding: .4rem .6rem; max-width: 100%; }
+    input[type="checkbox"] { width: 1rem; height: 1rem; padding: 0; vertical-align: -.15rem; accent-color: var(--accent); }
+    input:focus, select:focus { border-color: var(--accent); outline: 2px solid var(--accent-soft); outline-offset: 0; }
+    .field { display: grid; grid-template-columns: 14rem minmax(0, 24rem); gap: .5rem 1rem; margin: .6rem 0; align-items: center; }
+    .field label { color: var(--muted); font-weight: 500; }
+    button { font: inherit; font-weight: 600; cursor: pointer; padding: .45rem 1rem; margin: .5rem .5rem .25rem 0; border-radius: .45rem; border: 1px solid var(--accent); background: var(--accent); color: var(--on-accent); }
+    button:hover { background: var(--accent-strong); border-color: var(--accent-strong); }
+    button:disabled { cursor: not-allowed; opacity: .45; }
+    button[value="ignore"], td form button { background: var(--surface); color: var(--accent); }
+    button[value="ignore"]:hover, td form button:hover { background: var(--accent-soft); }
+    .danger-zone button, #deactivate-form button { background: var(--danger); border-color: var(--danger); color: var(--on-accent); }
+    progress { width: 100%; max-width: 24rem; height: .6rem; accent-color: var(--accent); }
+    dl { display: grid; grid-template-columns: 10rem 1fr; gap: .35rem 1rem; }
+    dt { color: var(--muted); font-weight: 500; }
+    dd { margin: 0; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin: 0 0 1.25rem; }
+    .toolbar > a { padding: .3rem .7rem; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); text-decoration: none; }
+    .toolbar > a[aria-current] { background: var(--accent-soft); border-color: var(--accent); font-weight: 600; }
+    .toolbar form { display: flex; gap: .4rem; align-items: center; margin-left: auto; }
+    .toolbar form button { margin: 0; }
+    .upload-status { min-height: 1.5em; font-weight: 600; }
+    .load-status { color: var(--muted); font-size: .9rem; }
+    /* Nach einer Aktion an derselben Stelle weiterarbeiten: Ziel unter der festen Kopfleiste, kurz markiert. */
+    [id^="candidate-"], [id^="instrument-"], #commit-area { scroll-margin-top: 9rem; }
+    #accept-all-form small { display: block; color: var(--muted); }
+    section:target { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+    tr:target td { background: var(--accent-soft); }
+    .upload-list { padding-left: 1.5rem; font-size: .9rem; }
+    .upload-list li[data-state="waiting"] { color: var(--muted); }
+    .upload-list li[data-state="stored"] { color: var(--ok); }
+    .upload-list li[data-state="failed"] { color: var(--danger); font-weight: 600; }
+    .load-status.error { color: var(--text); }
+    form[aria-busy="true"] button { opacity: .6; cursor: progress; }
+    .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+    @media (max-width: 40rem) { .field, dl { grid-template-columns: 1fr; } .profile-chip { margin-left: 0; } .toolbar form { margin-left: 0; } }
+
+    footer { max-width: 82rem; margin: 0 auto; padding: 1rem 1rem 2rem; color: var(--muted); font-size: .8rem; border-top: 1px solid var(--border); }
+  </style>
+</head>
+<body>
+  {% set nav_items = [("index", "Import"), ("imports_page", "Importe"), ("overview_page", "Übersicht"), ("accounts_page", "Konten & Depots"), ("instruments_page", "Instrumente")] %}
+  <header class="app-header">
+    <div class="app-header-inner">
+      <a class="brand" href="{{ url_for('index') }}">Portman <span>V10</span></a>
+      <nav class="app-nav" aria-label="Hauptnavigation">
+        {% for endpoint, label in nav_items %}<a href="{{ url_for(endpoint) }}"{% if endpoint == active %} aria-current="page"{% endif %}>{{ label }}</a>{% endfor %}
+      </nav>
+      <span class="profile-chip" title="{{ profile }}">Testprofil</span>
+    </div>
+  </header>
+  <main>
+{% block content %}{% endblock %}
+  </main>
+  <footer>Branch: {{ branch }} · Commit: {{ commit }} · Datenbankprofil: {{ profile }}</footer>
+  <script nonce="{{ csp_nonce() }}">
+    // Komfort-Erweiterungen; jede Seite funktioniert auch ohne JavaScript über normale Links und Formulare.
+    (() => {
+      // Rückfrage vor folgenreichen Aktionen und Schutz vor doppeltem Absenden.
+      document.addEventListener('submit', (event) => {
+        const form = event.target;
+        if (event.defaultPrevented || form.method.toLowerCase() !== 'post') return;
+        if (form.dataset.submitted) { event.preventDefault(); return; }
+        const question = (event.submitter && event.submitter.dataset.confirmButton) || form.dataset.confirm;
+        if (question && !window.confirm(question)) { event.preventDefault(); return; }
+        form.dataset.submitted = '1';
+        form.setAttribute('aria-busy', 'true');
+      });
+      window.addEventListener('pageshow', (event) => {
+        if (!event.persisted) return;
+        for (const form of document.querySelectorAll('form[data-submitted]')) {
+          delete form.dataset.submitted;
+          form.removeAttribute('aria-busy');
+        }
+      });
+
+      // Listen seitenweise automatisch nachladen; der Link bleibt als Rückfallweg erhalten.
+      for (const link of document.querySelectorAll('a[data-more-for]')) {
+        const table = document.getElementById(link.dataset.moreFor);
+        if (!table || !table.tBodies[0] || !('IntersectionObserver' in window)) continue;
+        const holder = link.closest('p') || link;
+        const status = document.createElement('p');
+        status.className = 'load-status';
+        status.setAttribute('role', 'status');
+        status.setAttribute('aria-live', 'polite');
+        holder.after(status);
+        let loading = false;
+        let failed = false;
+        const observer = new IntersectionObserver((entries) => {
+          if (entries.some((entry) => entry.isIntersecting)) load();
+        }, { rootMargin: '400px 0px' });
+
+        async function load() {
+          if (loading || failed) return;
+          loading = true;
+          status.textContent = 'Weitere Einträge werden geladen …';
+          try {
+            const response = await fetch(link.getAttribute('href'), { credentials: 'same-origin', headers: { Accept: 'text/html' } });
+            const page = new DOMParser().parseFromString(await response.text(), 'text/html');
+            const alert = page.querySelector('[role="alert"]');
+            if (!response.ok || alert) throw new Error(alert ? alert.textContent.trim() : `HTTP ${response.status}`);
+            const rows = page.querySelectorAll(`#${CSS.escape(table.id)} > tbody > tr`);
+            for (const row of rows) table.tBodies[0].append(document.importNode(row, true));
+            const next = page.getElementById('next-page');
+            if (next) {
+              link.setAttribute('href', next.getAttribute('href'));
+              status.textContent = `${rows.length} weitere geladen.`;
+              observer.unobserve(link);
+              observer.observe(link);
+            } else {
+              observer.disconnect();
+              holder.remove();
+              status.textContent = `Alle ${table.tBodies[0].rows.length} Einträge geladen.`;
+            }
+          } catch (error) {
+            failed = true;
+            observer.disconnect();
+            status.className = 'load-status error';
+            status.textContent = `Nachladen fehlgeschlagen: ${error.message} Über den Link unten weiterblättern oder die Seite neu laden.`;
+          } finally {
+            loading = false;
+          }
+        }
+
+        link.addEventListener('click', (event) => {
+          if (failed) return;
+          event.preventDefault();
+          load();
+        });
+        observer.observe(link);
+      }
+
+      // Stichtagsübersicht: Pfeiltasten blättern zurück und vor.
+      const previous = document.getElementById('previous');
+      const following = document.getElementById('next');
+      if (previous && following && document.getElementById('as-of')) {
+        previous.title = 'Pfeiltaste links';
+        following.title = 'Pfeiltaste rechts';
+        document.addEventListener('keydown', (event) => {
+          if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+          if (event.target.closest('input, select, textarea, [contenteditable]')) return;
+          if (event.key === 'ArrowLeft') window.location.assign(previous.href);
+          if (event.key === 'ArrowRight') window.location.assign(following.href);
+        });
+      }
+    })();
+  </script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>
