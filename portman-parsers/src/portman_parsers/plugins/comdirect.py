@@ -6,7 +6,7 @@ from itertools import product
 import re
 from portman_parsers.api import (
     Account, AccountBalance, AccountFunction, AccountType, AdvanceTaxCalculation, AdvanceTaxCarryforward,
-    CashMovement, CashMovementType, CashStatus, CostEvent, CostInformationType, Depot, DepotAccountLink,
+    CashMovement, CashMovementType, CashStatus, CostEvent, CostInformationType, Depot, DepotAccountLink, ExchangeRate,
     DepotPosition, DepotSnapshot, DepotType, Detection, Evidence, FeeEffect, FeeEvent, FieldValue,
     FinancialEvent, Issue, IssueNature, IssueSeverity, MissingValue, ParsedDocument, ReviewStatus,
     ReversalDetails, SecurityMovement, SecurityTrade, TaxApprovalStatus, TaxComponent, TaxEvent,
@@ -52,6 +52,7 @@ PRICE=re.compile(r"(?:Ausführungskurs|Kurs)\s*:?[ \t]*(?:(?P<cur1>[A-Z]{3})\s*)
 MARKET_VALUE=re.compile(r"(?:Kurswert|Gegenwert)\s*:?[ \t]*(?P<cur>[A-Z]{3})\s*(?P<a>"+A+r")",re.I)
 GROSS=re.compile(r"(?:Bruttobetrag|Bruttoertrag|Bruttodividende)\s*:?[ \t]*(?P<cur>[A-Z]{3})\s*(?P<a>"+A+r")",re.I)
 FX=re.compile(r"(?:Devisenkurs|Umrechnungskurs)\s*:?[ \t]*("+A+r")",re.I)
+EXPLICIT_FX_PAIR=re.compile(r"(?:Devisen|Umrechnungs)?kurs(?:\s+am\s+(?P<date>"+D+r"))?\s*:?\s*1\s+(?P<base>[A-Z]{3})\s*=\s*(?P<rate>\d[\d.]*,\d+)\s+(?P<quote>[A-Z]{3})\b",re.I)
 NAME=re.compile(r"(?:Wertpapierbezeichnung|Bezeichnung)\s*:?[ \t]*(.+)",re.I)
 SETTLE=re.compile(r"(?:Zu\s*Ihren\s*(?P<dir>Lasten|Gunsten)|(?:^|\n)Gutschrift|(?:^|\n)Zahlungsbetrag).{0,80}?(?P<cur>[A-Z]{3})\s*-?\s*(?P<a>"+A+r")",re.I|re.S)
 TAX=(("CAPITAL_GAINS_TAX",r"Kapitalertragsteuer\s*(?:EUR)?\s*-?("+A+r")"),("SOLIDARITY_SURCHARGE",r"Solidarit.tszuschlag\s*(?:EUR)?\s*-?("+A+r")"),("CHURCH_TAX",r"Kirchensteuer\s*(?:EUR)?\s*-?("+A+r")"),("WITHHOLDING_TAX",r"Quellensteuer\s*(?:[A-Z]{3})?\s*-?("+A+r")"))
@@ -681,9 +682,29 @@ class ComdirectPlugin:
                        "COMDIRECT_BANK_REFERENCE_" + reference_status, IssueSeverity.WARNING,
                        "Bankreferenz ist nicht eindeutig bzw. formal ungültig.", event_id=event_id,
                        nature=IssueNature.UNSECURED_ASSIGNMENT))
+  exchange_rates=()
+  explicit_rates=tuple(EXPLICIT_FX_PAIR.finditer(text)) if kind in {"BUY","SELL","REDEMPTION"} else ()
+  if len(explicit_rates)==1:
+   rate_match=explicit_rates[0]
+   base=rate_match.group("base").upper(); quote=rate_match.group("quote").upper()
+   rate_evidence=ev("exchange_rate",rate_match)
+   if base!=quote:
+    exchange_rates=(ExchangeRate(stable_id("exchange-rate",event_id,base,quote,rate_match.group("rate")),event_id,
+                                  dec(rate_match.group("rate")),base,quote,
+                                  date(rate_match.group("date")) if rate_match.group("date") else MissingValue.UNKNOWN,
+                                  MissingValue.UNKNOWN,(rate_evidence,)),)
+   else:
+    issues.append(Issue(stable_id("issue",event_id,"exchange-rate"),"COMDIRECT_EXCHANGE_RATE_INVALID",IssueSeverity.WARNING,
+                        "Wechselkurs muss zwei verschiedene, ausdrücklich genannte Währungen enthalten.",rate_evidence,event_id,
+                        IssueNature.MISSING_INFORMATION))
+  elif len(explicit_rates)>1:
+   rate_evidence=ev("exchange_rate_ambiguous","\n".join(match.group(0) for match in explicit_rates))
+   issues.append(Issue(stable_id("issue",event_id,"exchange-rate-ambiguous"),"COMDIRECT_EXCHANGE_RATE_AMBIGUOUS",IssueSeverity.WARNING,
+                       "Mehrere Wechselkurse im Beleg lassen sich diesem Vorgang nicht eindeutig zuordnen.",rate_evidence,event_id,
+                       IssueNature.UNSECURED_ASSIGNMENT))
   event=FinancialEvent(event_id,doc.document_id,kind,event_date,cash,security,tax_events=taxes,fee_events=fees,evidence_ids=event_evidence,trades=trades,security_name=security_name or MissingValue.UNKNOWN,security_wkn=resolved_wkn or MissingValue.UNKNOWN,security_isin=isin or MissingValue.UNKNOWN,security_identity_evidence_ids=identity_evidence,bank_reference=reference,bank_reference_status=reference_status,bank_reference_evidence_ids=reference_evidence,
                        event_date_type=event_date_type,event_date_evidence_ids=(event_date_evidence,) if event_date_evidence else (),
-                       reversal_details=_reversal_details(text,ev) if reversal else None); return self.result(doc,d,evidence,(event,),depots,accounts,tuple(issues),links)
+                       exchange_rates=exchange_rates,reversal_details=_reversal_details(text,ev) if reversal else None); return self.result(doc,d,evidence,(event,),depots,accounts,tuple(issues),links)
  def result(self,doc,d,evidence,events,depots=(),accounts=(),issues=(),links=(),tax_calculations=(),tax_carryforwards=()): return ParsedDocument(stable_id("result",doc.document_id,self.metadata.version),doc.document_id,self.metadata.plugin_id,self.metadata.version,d.handler_id,events=events,evidence=tuple(evidence),issues=issues,depots=depots,accounts=accounts,depot_account_links=links,tax_calculations=tax_calculations,tax_carryforwards=tax_carryforwards)
 
 FR_NAMES=("Girokonto","Tagesgeld PLUS-Konto","Tagesgeld PLUS","Tagesgeldkonto","Verrechnungskonto","O&F-Konto")
@@ -695,6 +716,9 @@ FR_SECTION_PREAMBLE=re.compile(r"^(?:EUR(?:\s|$)|Umsätze EUR$|(?:Visa|ec|giroca
 FR_SALDO=re.compile(r"^(Alter|Neuer)\s+Saldo\s+("+D+r")(?:\s+([+-]?"+A+r"))?$",re.I)
 FR_AMOUNT=re.compile(r"^[+-]?"+A+r"$")
 FR_BOOKING_AMOUNT=re.compile(r"^[+-]"+A+r"$")
+FR_BOOKING_AMOUNT_TAIL=re.compile(r"^(?P<purpose>.+?)\s+(?P<amount>[+-]"+A+r")$")
+FR_BANK_BOOKING_REFERENCE=re.compile(r"^[A-Z0-9]{8,}/\d{1,8}$",re.I)
+FR_SECURITY_LABEL=re.compile(r"^WPKNR:\s*(?P<wkn>[A-Z0-9]{6})(?:\s+ISIN:\s*(?P<isin>.*))?$",re.I)
 FR_DATE_LINE=re.compile(r"^"+D+r"$")
 FR_ROW=re.compile(r"^("+D+r")(?:\s+("+D+r"))?\s+(.*?)\s+([+-]"+A+r")$")
 FR_ROW_TYPE_FIRST=re.compile(r"^(\D.*?)\s+("+D+r")\s+("+D+r")\s+([+-]"+A+r")$")
@@ -761,6 +785,15 @@ def _account_kind(name):
  return AccountType.OTHER, AccountFunction.SETTLEMENT
 
 
+def _account_balance_evidence_id(account_balances, account_id):
+ """Return one real balance source that locates an account-level reconciliation issue."""
+ identifiers=[]
+ for balance in account_balances:
+  if balance.account_id==account_id:
+   identifiers.extend(balance.amount.evidence_ids)
+ return next(iter(dict.fromkeys(identifiers)),None)
+
+
 def _parse_legacy_finanzreport(plugin, document, detection, lines, report_date, evidence, ev, fv):
  """Parse Finanzreports ohne IBAN im getrennten Tabellenlayout älterer PDFs."""
  text = document.text
@@ -818,6 +851,10 @@ def _parse_legacy_finanzreport(plugin, document, detection, lines, report_date, 
    nonlocal pending_amount,dates,description,pending_offset,pending_page
    if pending_amount is not None and len(dates)==2:
     add_booking(str(pending_amount),pending_amount,dates,description,pending_offset,pending_page)
+   elif len(dates)==2 and description:
+    incomplete_excerpt="\n".join([*dates,*description])
+    incomplete_ev=ev("incomplete_booking",incomplete_excerpt,offset=pending_offset)
+    issues.append(Issue(stable_id("issue",aid,"legacy-incomplete",pending_offset),"INCOMPLETE_BOOKING",IssueSeverity.WARNING,"Historischer Buchungsblock ohne Betrag; Buchung wurde nicht übernommen.",incomplete_ev,nature=IssueNature.MISSING_INFORMATION))
    pending_amount=None; dates=[]; description=[]; pending_offset=None; pending_page=None
   def add_booking(amount_line, amount, booking_dates, body_lines, row_offset, row_page):
    if len(booking_dates)!=2:
@@ -872,7 +909,8 @@ def _parse_legacy_finanzreport(plugin, document, detection, lines, report_date, 
      pending_amount=amount; pending_offset=offset; pending_page=page
      if purpose: description.append(purpose)
     elif pending_amount is None:
-     issues.append(Issue(stable_id("issue",aid,"legacy-booking",offset),"HISTORICAL_BOOKING_LAYOUT_UNSUPPORTED",IssueSeverity.ERROR,"Historischer Buchungsblock hat keine zwei eindeutigen Datumszeilen.",nature=IssueNature.MISSING_INFORMATION))
+     row_evidence=ev("historical_booking_layout",line,offset=offset)
+     issues.append(Issue(stable_id("issue",aid,"legacy-booking",offset),"HISTORICAL_BOOKING_LAYOUT_UNSUPPORTED",IssueSeverity.ERROR,"Historischer Buchungsblock hat keine zwei eindeutigen Datumszeilen.",evidence_id=row_evidence,nature=IssueNature.MISSING_INFORMATION))
     continue
    if line in {"Kontoabschluss","Saldo nach Abschluss","Habenzinsen"} or line.startswith(("Abschluss Zinsen Kto","von ","Abschlussrechnung","0,250%","3,800%")):
     if pending_amount is not None and line.startswith("Abschluss Zinsen Kto"):
@@ -883,7 +921,8 @@ def _parse_legacy_finanzreport(plugin, document, detection, lines, report_date, 
   if opening is not None and closing is not None:
    total=sum((event.cash_movements[0].amount for event in events if event.cash_movements and event.cash_movements[0].account_id==aid and event.event_date is not None and report_date and event.event_date<=date(report_date)),Decimal())
    if opening+total!=closing:
-    issues.append(Issue(stable_id("issue",aid,"balance"),"BALANCE_MISMATCH",IssueSeverity.ERROR,"Anfangssaldo plus Buchungen entspricht nicht dem Endsaldo.",nature=IssueNature.MATHEMATICAL_INCONSISTENCY))
+    mismatch_evidence=_account_balance_evidence_id(balances,aid)
+    issues.append(Issue(stable_id("issue",aid,"balance"),"BALANCE_MISMATCH",IssueSeverity.ERROR,"Anfangssaldo plus Buchungen entspricht nicht dem Endsaldo.",evidence_id=mismatch_evidence,nature=IssueNature.MATHEMATICAL_INCONSISTENCY))
  return ParsedDocument(stable_id("result",document.document_id,plugin.metadata.version),document.document_id,plugin.metadata.plugin_id,plugin.metadata.version,detection.handler_id,events=tuple(events),evidence=tuple(evidence),issues=tuple(issues),attributes={"document_number":FR_REPORT_HEADER.search(text).group(1) if FR_REPORT_HEADER.search(text) else MissingValue.NOT_FOUND,"report_date":report_date or MissingValue.NOT_FOUND,"layout_path":"legacy"},accounts=tuple(accounts),account_balances=tuple(balances))
 
 
@@ -920,11 +959,13 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
    if pending is None: return
    block,pending=pending,None
    if block["amount"] is None:
-    issues.append(Issue(stable_id("issue",doc.document_id,"incomplete",block["offset"]),"INCOMPLETE_BOOKING",IssueSeverity.WARNING,"Buchungsblock ohne Betrag; Buchung wurde nicht übernommen.",nature=IssueNature.MISSING_INFORMATION)); return
+    incomplete_evidence=ev("incomplete_booking","\n".join(block["raw"]),offset=block["offset"])
+    issues.append(Issue(stable_id("issue",doc.document_id,"incomplete",block["offset"]),"INCOMPLETE_BOOKING",IssueSeverity.WARNING,"Buchungsblock ohne Betrag; Buchung wurde nicht übernommen.",incomplete_evidence,nature=IssueNature.MISSING_INFORMATION)); return
    purpose=" ".join(block["body"]); key=(current,block["booked"],block["valuta"] or "",purpose,block["amount"])
    event_id=stable_id("event",*key)
    if key in seen:
-    issues.append(Issue(stable_id("issue",event_id,"duplicate"),"DUPLICATE_BOOKING",IssueSeverity.WARNING,"Duplicate booking in Finanzreport.",event_id=event_id,nature=IssueNature.CONFIRMED_DEVIATION)); return
+    duplicate_ev=ev("duplicate_booking","\n".join(block["raw"]),offset=block["offset"])
+    issues.append(Issue(stable_id("issue",event_id,"duplicate"),"DUPLICATE_BOOKING",IssueSeverity.WARNING,"Duplicate booking in Finanzreport.",evidence_id=duplicate_ev,event_id=event_id,nature=IssueNature.CONFIRMED_DEVIATION)); return
    seen.add(key)
    excerpt="\n".join(block["raw"])
    if block.get("historical"):
@@ -948,14 +989,74 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
    movement=CashMovement(stable_id("cash",event_id),event_id,block["amount"],"EUR",CashStatus.ACTUAL,account_id=current,evidence_ids=(be,),movement_type=CashMovementType.INTEREST_CREDIT if interest else CashMovementType.FEE_DEBIT if custody else CashMovementType.OTHER)
    # Eine vorhandene Kontobelastung ist die einzige Cash-Bewegung; FeeEvent ist mit ihr verknüpft.
    fees=(FeeEvent(stable_id("fee",event_id),"custody","verwahrentgelt",abs(block["amount"]),"EUR",date(block["booked"]),FeeEffect.ACTUAL_BOOKED,doc.document_id,"comdirect",account_id=current,transaction_id=event_id,cash_movement_id=movement.movement_id,evidence_ids=(be,)),) if custody else ()
-   # Die Referenzspalte folgt direkt auf die Vorgangsart. Verwendungszweck und
-   # SEPA-Referenzen folgen später. Die Nummer nach dem Schrägstrich gehört zur Referenz.
-   reference=FR_DIRECT_DEBIT_REFERENCE.match("\n".join(block["body"]))
+   # Die Reportreferenz steht nach der Vorgangsart; nur das belegte enge
+   # Kennungsmuster wird übernommen. SEPA-Referenzen bleiben davon getrennt.
+   body_lines=block["body"]
+   reference=FR_DIRECT_DEBIT_REFERENCE.match("\n".join(body_lines))
+   reference_value=re.sub(r"\s+","",reference.group(1)) if reference else None
+   reference_lines=[line for line in body_lines if FR_BANK_BOOKING_REFERENCE.fullmatch(re.sub(r"\s+","",line))]
+   reference_line=reference_lines[0] if len(reference_lines)==1 else None
+   if reference is None and reference_line is not None:
+    reference_value=re.sub(r"\s+","",reference_line)
+   body_rows=block.get("body_rows",())
+   def body_offset(line):
+    return next((row_offset for row_line,row_offset in body_rows if row_line==line),block["offset"])
+   reference_evidence=ev("bank_reference",reference_line,offset=body_offset(reference_line)) if reference_line else be if reference else None
+   security_name=MissingValue.UNKNOWN; security_wkn=MissingValue.UNKNOWN; security_isin=MissingValue.UNKNOWN
+   identity_evidence=[]
+   invalid_reference_evidence=None
+   marker_index=next((i for i,line in enumerate(body_lines) if line.casefold()=="wertpapiere"),None)
+   label_index=next((i for i,line in enumerate(body_lines) if FR_SECURITY_LABEL.match(line)),None)
+   if marker_index is not None and marker_index+1<len(body_lines):
+    likely_reference=body_lines[marker_index+1].strip()
+    if ("/" in likely_reference and not FR_BANK_BOOKING_REFERENCE.fullmatch(re.sub(r"\s+","",likely_reference))
+        and not likely_reference.casefold().startswith(("wkn", "wpknr", "isin"))):
+     invalid_reference_evidence=ev("bank_reference_invalid",likely_reference,offset=body_offset(body_lines[marker_index+1]))
+     issues.append(Issue(stable_id("issue",event_id,"reference-invalid"),"COMDIRECT_BANK_REFERENCE_INVALID",IssueSeverity.WARNING,"Mögliche Buchungsreferenz im Finanzreport hat ein nicht eindeutiges Format.",invalid_reference_evidence,event_id,IssueNature.UNSECURED_ASSIGNMENT))
+   if marker_index is not None and label_index is not None and label_index>marker_index:
+    label=FR_SECURITY_LABEL.match(body_lines[label_index]); wkn=label.group("wkn").upper()
+    name_lines=[line.strip() for line in body_lines[marker_index+1:label_index]
+                if line.strip() and not FR_BANK_BOOKING_REFERENCE.fullmatch(re.sub(r"\s+","",line))
+                and not ("/" in line and line.strip()==(body_lines[marker_index+1].strip() if marker_index+1<len(body_lines) else ""))]
+    if name_lines:
+     security_name=" ".join(name_lines)
+     identity_evidence.append(ev("security_identity_name","\n".join(name_lines),offset=body_offset(name_lines[0])))
+    identity_evidence.append(ev("security_wkn",body_lines[label_index],offset=body_offset(body_lines[label_index])))
+    security_wkn=wkn
+    isin_text=label.group("isin") or ""
+    isin_line_index=label_index
+    if not isin_text.strip() and label_index+1<len(body_lines):
+     isin_text=body_lines[label_index+1]
+     isin_line_index=label_index+1
+    isin_match=ISIN_CANDIDATE.search(isin_text.upper())
+    if isin_match and _valid_isin(isin_match.group(0)):
+     security_isin=isin_match.group(0).upper()
+     identity_evidence.append(ev("security_isin",body_lines[isin_line_index],offset=body_offset(body_lines[isin_line_index])))
+    elif isin_text.strip():
+     invalid_ev=ev("security_isin_invalid",body_lines[isin_line_index],offset=body_offset(body_lines[isin_line_index]))
+     issues.append(Issue(stable_id("issue",event_id,"security-isin"),"COMDIRECT_SECURITY_ISIN_INVALID",IssueSeverity.WARNING,"ISIN im Finanzreport ist ungültig und wurde nicht übernommen.",invalid_ev,event_id,IssueNature.MISSING_INFORMATION))
+   status="MISSING"
+   if len(reference_lines)>1:
+    status="AMBIGUOUS"; reference_value=None
+    ref_ev=ev("bank_reference_ambiguous","\n".join(reference_lines),offset=body_offset(reference_lines[0]))
+    issues.append(Issue(stable_id("issue",event_id,"reference"),"COMDIRECT_BANK_REFERENCE_AMBIGUOUS",IssueSeverity.WARNING,"Mehrere mögliche Buchungsreferenzen im Finanzreport.",ref_ev,event_id,IssueNature.UNSECURED_ASSIGNMENT))
+    reference_evidence=ref_ev
+   elif reference_value:
+    status="RECOGNIZED"
+   else:
+    labelled_ref=re.search(r"(?:Referenz|Buchungsreferenz)\s*:\s*([^\n]+)","\n".join(body_lines),re.I)
+    if invalid_reference_evidence:
+     status="INVALID"; reference_value=None; reference_evidence=invalid_reference_evidence
+    elif labelled_ref:
+     status="INVALID"
+     ref_ev=ev("bank_reference_invalid",labelled_ref.group(0),offset=body_offset(labelled_ref.group(0)))
+     issues.append(Issue(stable_id("issue",event_id,"reference"),"COMDIRECT_BANK_REFERENCE_INVALID",IssueSeverity.WARNING,"Buchungsreferenz im Finanzreport hat ein nicht unterstütztes Format.",ref_ev,event_id,IssueNature.UNSECURED_ASSIGNMENT))
+     reference_evidence=ref_ev
    events.append(FinancialEvent(event_id,doc.document_id,"CASH_BOOKING",date(block["booked"]),(movement,),tax_events=taxes,fee_events=fees,evidence_ids=(be,),
-                                bank_reference=re.sub(r"\s+","",reference.group(1)) if reference else MissingValue.UNKNOWN,
-                                bank_reference_status="RECOGNIZED" if reference else "MISSING",
-                                bank_reference_evidence_ids=(be,) if reference else ()))
-
+                                security_name=security_name,security_wkn=security_wkn,security_isin=security_isin,
+                                security_identity_evidence_ids=tuple(identity_evidence),
+                                bank_reference=reference_value or MissingValue.UNKNOWN,bank_reference_status=status,
+                                bank_reference_evidence_ids=(reference_evidence,) if reference_evidence else ()))
   def flush_position():
    nonlocal pos
    if pos is None: return
@@ -975,7 +1076,7 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
    positions.append(block)
 
   # Namensbezogene IBANs aus dem historischen Hinweisblock; widersprüchliche Angaben gelten als nicht eindeutig.
-  labelled={}; labelled_conflicts=set(); historical_sections=set(); historical_incomplete=set(); historical_unassigned=set(); historical_modes={}; historical_pending=None; historical_leading_dates=[]; historical_leading_body=[]; historical_unanchored=[]
+  labelled={}; labelled_conflicts=set(); historical_sections=set(); historical_incomplete=set(); historical_incomplete_evidence={}; historical_unassigned=set(); historical_modes={}; historical_pending=None; historical_leading_dates=[]; historical_leading_body=[]; historical_unanchored=[]
   for _page,label_offset,label_line in lines:
    label=FR_LABELLED_IBAN.match(label_line)
    if not label: continue
@@ -1039,7 +1140,8 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
        if later.startswith("Neuer Saldo") or FR_HEADING.match(later) or FR_ACCOUNT_LINE.match(later): break
        if (FR_ROW.match(later) and not FR_DATE_LINE.fullmatch(later)) or FR_ROW_TYPE_FIRST.match(later): lost+=1
       reason="mehrdeutig" if name.lower() in labelled_conflicts else "im Dokument nicht vorhanden"
-      issues.append(Issue(stable_id("issue",doc.document_id,"account-iban-missing",name.lower(),offset),"ACCOUNT_IBAN_UNRESOLVED",IssueSeverity.ERROR if lost else IssueSeverity.WARNING,"Kontobereich %s ohne eindeutige IBAN (%s); %d Buchung(en) wurden nicht übernommen."%(heading.group(1),reason,lost),nature=IssueNature.UNSECURED_ASSIGNMENT))
+      account_issue_evidence=ev("account_iban_unresolved",line,offset=offset)
+      issues.append(Issue(stable_id("issue",doc.document_id,"account-iban-missing",name.lower(),offset),"ACCOUNT_IBAN_UNRESOLVED",IssueSeverity.ERROR if lost else IssueSeverity.WARNING,"Kontobereich %s ohne eindeutige IBAN (%s); %d Buchung(en) wurden nicht übernommen."%(heading.group(1),reason,lost),evidence_id=account_issue_evidence,nature=IssueNature.UNSECURED_ASSIGNMENT))
       continue
      flush_historical(); historical_leading_dates.clear(); historical_leading_body.clear(); historical_unanchored.clear(); flush_booking(); flush_position(); current=by_iban[iban]; section_accounts.add(current); depot_mode=False; depot_done=False
      continue
@@ -1057,29 +1159,29 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
     if " über " in line and "AKV" in line: continue
     head=FR_POSITION_HEAD.match(line)
     if head:
-     flush_position(); pos={"wkn":head.group(1),"page":page,"offset":offset,"raw":[line],"name":"","quantity":None,"price":None,"price_currency":None,"value":None,"cost":None,"profit":None,"rest":[],"require_name":True}; continue
+     flush_position(); pos={"wkn":head.group(1),"custody_type":head.group(2),"page":page,"offset":offset,"raw":[line],"rows":[(line,offset)],"name":"","quantity":None,"price":None,"price_currency":None,"value":None,"cost":None,"profit":None,"rest":[],"require_name":True}; continue
     if pos is not None:
      values=FR_POSITION_VALUES.match(line)
      if values and pos["value"] is None:
-      pos.update(quantity=dec(values.group(1)),price=dec(values.group(2)),price_currency=values.group(3),value=dec(values.group(4))); pos["raw"].append(line); continue
+      pos.update(quantity=dec(values.group(1)),price=dec(values.group(2)),price_currency=values.group(3),value=dec(values.group(4))); pos["raw"].append(line); pos["rows"].append((line,offset)); continue
      rest=FR_POSITION_REST.match(line)
      if rest and pos["value"] is not None:
-      pos["rest"].extend(value for value in rest.groups() if value); pos["raw"].append(line); continue
+      pos["rest"].extend(value for value in rest.groups() if value); pos["raw"].append(line); pos["rows"].append((line,offset)); continue
      if pos["value"] is None:
       if re.match(r"^[A-Z0-9]{6}(?: /| \d[\d.]*,)",line):
        raise ValueError("Finanzreport: nicht unterstützte Depotposition: "+line)
-      pos["name"]=(pos["name"]+" "+line).strip(); pos["raw"].append(line); continue
+      pos["name"]=(pos["name"]+" "+line).strip(); pos["raw"].append(line); pos["rows"].append((line,offset)); continue
      continue
     row=FR_POSITION_ROW.match(line)
     if row:
      flush_position()
-     pos={"wkn":row.group(1),"page":page,"offset":offset,"raw":[line],"name":None,"quantity":dec(row.group(2)),"price":dec(row.group(3)),"price_currency":"EUR","value":dec(row.group(4)),"cost":None,"profit":None,"rest":[],"require_name":False,"price_date":row.group(5)}
+     pos={"wkn":row.group(1),"custody_type":None,"page":page,"offset":offset,"raw":[line],"rows":[(line,offset)],"name":None,"quantity":dec(row.group(2)),"price":dec(row.group(3)),"price_currency":"EUR","value":dec(row.group(4)),"cost":None,"profit":None,"rest":[],"require_name":False,"price_date":row.group(5)}
      flush_position(); continue
     continue
    row=FR_POSITION_ROW.match(line)
    if row and not depot_mode and current is None:
     flush_booking(); flush_position()
-    pos={"wkn":row.group(1),"page":page,"offset":offset,"raw":[line],"name":None,"quantity":dec(row.group(2)),"price":dec(row.group(3)),"price_currency":"EUR","value":dec(row.group(4)),"cost":None,"profit":None,"rest":[],"require_name":False,"price_date":row.group(5)}
+    pos={"wkn":row.group(1),"custody_type":None,"page":page,"offset":offset,"raw":[line],"rows":[(line,offset)],"name":None,"quantity":dec(row.group(2)),"price":dec(row.group(3)),"price_currency":"EUR","value":dec(row.group(4)),"cost":None,"profit":None,"rest":[],"require_name":False,"price_date":row.group(5)}
     flush_position(); continue
    if current is None: continue
    if line.startswith("Kto. / IBAN"):
@@ -1094,7 +1196,8 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
     if amount is None and index<len(lines) and FR_AMOUNT.fullmatch(lines[index][2]):
      amount=lines[index][2]; excerpt=line+" "+amount; index+=1
     if amount is None:
-     issues.append(Issue(stable_id("issue",current,"saldo",saldo.group(2)),"SALDO_AMOUNT_MISSING",IssueSeverity.WARNING,"Saldo ohne Betrag; Saldenprüfung entfällt.",nature=IssueNature.MISSING_INFORMATION)); continue
+     saldo_evidence=ev("saldo_amount_missing",line,offset=offset)
+     issues.append(Issue(stable_id("issue",current,"saldo",saldo.group(2)),"SALDO_AMOUNT_MISSING",IssueSeverity.WARNING,"Saldo ohne Betrag; Saldenprüfung entfällt.",evidence_id=saldo_evidence,nature=IssueNature.MISSING_INFORMATION)); continue
     se=ev(("opening_balance" if saldo.group(1)=="Alter" else "closing_balance"),excerpt,offset=offset)
     balances.append(AccountBalance(stable_id("balance",current,saldo.group(1).lower(),saldo.group(2)),current,fv(date(saldo.group(2)),se),fv(dec(amount),se),fv("EUR",se),FieldValue.manual("opening" if saldo.group(1)=="Alter" else "closing")))
     (opened if saldo.group(1)=="Alter" else closed)[current]=dec(amount)
@@ -1122,6 +1225,14 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
     if FR_DATE_LINE.fullmatch(line):
      if historical_unanchored: historical_unassigned.add(current); historical_unanchored.clear()
      mode=historical_modes.get(current)
+     if (len(historical_leading_dates)==2 and historical_leading_body and
+         index<len(lines) and FR_DATE_LINE.fullmatch(lines[index][2])):
+      incomplete_excerpt="\n".join([*historical_leading_dates,*historical_leading_body])
+      incomplete_ev=ev("incomplete_booking",incomplete_excerpt)
+      issues.append(Issue(stable_id("issue",current,"historical-incomplete",incomplete_ev),"INCOMPLETE_BOOKING",IssueSeverity.WARNING,"Historischer Buchungsblock ohne Betrag; Buchung wurde nicht übernommen.",incomplete_ev,nature=IssueNature.MISSING_INFORMATION))
+      historical_incomplete_evidence[current]=incomplete_ev
+      historical_incomplete.add(current)
+      historical_leading_dates.clear(); historical_leading_body.clear()
      if mode=="dates-first":
       if historical_pending is not None: flush_historical()
       historical_leading_dates.append(line)
@@ -1139,26 +1250,37 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
    row=FR_ROW.match(line)
    if row and not FR_DATE_LINE.fullmatch(line):
     flush_booking()
-    pending={"booked":row.group(1),"valuta":row.group(2),"body":[row.group(3)],"raw":[line],"amount":dec(row.group(4)),"offset":offset,"page":page}
+    pending={"booked":row.group(1),"valuta":row.group(2),"body":[row.group(3)],"body_rows":[(row.group(3),offset)],"raw":[line],"amount":dec(row.group(4)),"offset":offset,"page":page}
     flush_booking(); continue
    row=FR_ROW_TYPE_FIRST.match(line)
    if row:
     # Historisches Layout: Vorgangsart zuerst, danach Buchungstag, Valuta und Betrag.
     flush_booking()
-    pending={"booked":row.group(2),"valuta":row.group(3),"body":[row.group(1)],"raw":[line],"amount":dec(row.group(4)),"offset":offset,"page":page}
+    pending={"booked":row.group(2),"valuta":row.group(3),"body":[row.group(1)],"body_rows":[(row.group(1),offset)],"raw":[line],"amount":dec(row.group(4)),"offset":offset,"page":page}
     flush_booking(); continue
    if FR_DATE_LINE.fullmatch(line):
     if pending is None or pending["amount"] is not None:
-     flush_booking(); pending={"booked":line,"valuta":None,"body":[],"raw":[line],"amount":None,"offset":offset,"page":page}
+     flush_booking(); pending={"booked":line,"valuta":None,"body":[],"body_rows":[],"raw":[line],"amount":None,"offset":offset,"page":page}
     elif pending["valuta"] is None and not pending["body"]:
      pending["valuta"]=line; pending["raw"].append(line)
+    elif pending["valuta"] is not None and pending["body"] and index<len(lines) and FR_DATE_LINE.fullmatch(lines[index][2]):
+     # Zwei Datumszeilen nach einem bereits begonnenen Zwecktext sind der
+     # nächste Buchungsblock. Den alten unvollständigen Block nicht vermischen.
+     flush_booking()
+     pending={"booked":line,"valuta":None,"body":[],"body_rows":[],"raw":[line],"amount":None,"offset":offset,"page":page}
     else:
-     pending["body"].append(line); pending["raw"].append(line)
+     pending["body"].append(line); pending["body_rows"].append((line,offset)); pending["raw"].append(line)
     continue
    if FR_BOOKING_AMOUNT.fullmatch(line) and pending is not None and pending["amount"] is None:
     pending["amount"]=dec(line); pending["raw"].append(line); flush_booking(); continue
+   tail_amount=FR_BOOKING_AMOUNT_TAIL.fullmatch(line)
+   if tail_amount and pending is not None and pending["amount"] is None and pending["valuta"] is not None:
+    purpose_text=tail_amount.group("purpose").strip()
+    if purpose_text:
+     pending["body"].append(purpose_text); pending["body_rows"].append((line,offset))
+    pending["amount"]=dec(tail_amount.group("amount")); pending["raw"].append(line); flush_booking(); continue
    if pending is not None:
-    pending["body"].append(line); pending["raw"].append(line)
+    pending["body"].append(line); pending["body_rows"].append((line,offset)); pending["raw"].append(line)
   flush_historical(); flush_booking(); flush_position()
 
   unsupported_historical=set()
@@ -1173,18 +1295,26 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
    if aid in historical_unassigned: reasons.append("nicht zuordenbare Tabellenzeile")
    if aid not in opened or aid not in closed: reasons.append("Anfangs- oder Endsaldo fehlt")
    elif opened[aid]+total!=closed[aid]: reasons.append("Saldenabweichung")
-   issues.append(Issue(stable_id("issue",doc.document_id,"historical-bookings",aid),"HISTORICAL_BOOKING_LAYOUT_UNSUPPORTED",IssueSeverity.ERROR,"Historisches Buchungslayout nicht vollständig erkannt (%s); %d erkannte Buchungskandidaten wurden wegen des fehlenden Saldenabgleichs nicht als Kontobewegungen ausgegeben."%(", ".join(reasons),len(account_events)),nature=IssueNature.MISSING_INFORMATION))
+   report_ev=_account_balance_evidence_id(balances,aid)
+   if not report_ev:
+    report_ev=historical_incomplete_evidence.get(aid)
+   issues.append(Issue(stable_id("issue",doc.document_id,"historical-bookings",aid),"HISTORICAL_BOOKING_LAYOUT_UNSUPPORTED",IssueSeverity.ERROR,"Historisches Buchungslayout nicht vollständig erkannt (%s); %d erkannte Buchungskandidaten wurden wegen des fehlenden Saldenabgleichs nicht als Kontobewegungen ausgegeben."%(", ".join(reasons),len(account_events)),evidence_id=report_ev,nature=IssueNature.MISSING_INFORMATION))
   if unsupported_historical:
    events=[event for event in events if not event.cash_movements or event.cash_movements[0].account_id not in unsupported_historical]
   for aid in (section_accounts|{event.cash_movements[0].account_id for event in events if event.cash_movements and event.cash_movements[0].account_id})-unsupported_historical:
    total=sum((event.cash_movements[0].amount for event in events if event.cash_movements and event.cash_movements[0].account_id==aid),Decimal())
    if aid not in opened or aid not in closed:
-    issues.append(Issue(stable_id("issue",aid,"saldo-missing"),"SALDO_MISSING",IssueSeverity.WARNING,"Anfangs- oder Endsaldo fehlt; Saldenprüfung entfällt.",nature=IssueNature.MISSING_INFORMATION)); continue
+    account=next((item for item in accounts if item.account_id==aid),None)
+    saldo_evidence=(account.iban.evidence_ids[0] if account and account.iban.evidence_ids else None)
+    issues.append(Issue(stable_id("issue",aid,"saldo-missing"),"SALDO_MISSING",IssueSeverity.WARNING,"Anfangs- oder Endsaldo fehlt; Saldenprüfung entfällt.",evidence_id=saldo_evidence,nature=IssueNature.MISSING_INFORMATION)); continue
    if opened[aid]+total!=closed[aid]:
-    issues.append(Issue(stable_id("issue",aid,"balance"),"BALANCE_MISMATCH",IssueSeverity.ERROR,"Finanzreport balance is inconsistent.",nature=IssueNature.MATHEMATICAL_INCONSISTENCY))
+    mismatch_evidence=_account_balance_evidence_id(balances,aid)
+    issues.append(Issue(stable_id("issue",aid,"balance"),"BALANCE_MISMATCH",IssueSeverity.ERROR,"Finanzreport balance is inconsistent.",evidence_id=mismatch_evidence,nature=IssueNature.MATHEMATICAL_INCONSISTENCY))
    iban=next((key for key,value in by_iban.items() if value==aid),None)
    if iban is not None and iban in overview and overview[iban]!=closed[aid]:
-    issues.append(Issue(stable_id("issue",aid,"overview"),"OVERVIEW_BALANCE_MISMATCH",IssueSeverity.ERROR,"Kontoübersicht und Endsaldo widersprechen sich.",nature=IssueNature.MATHEMATICAL_INCONSISTENCY))
+    account=next((item for item in accounts if item.account_id==aid),None)
+    overview_evidence=(account.iban.evidence_ids[0] if account and account.iban.evidence_ids else None)
+    issues.append(Issue(stable_id("issue",aid,"overview"),"OVERVIEW_BALANCE_MISMATCH",IssueSeverity.ERROR,"Kontoübersicht und Endsaldo widersprechen sich.",evidence_id=overview_evidence,nature=IssueNature.MATHEMATICAL_INCONSISTENCY))
 
   depots=[]; snapshots=[]
   if positions or depot_expected is not None:
@@ -1200,6 +1330,11 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
      raise ValueError("Finanzreport: eindeutiger Stichtag fehlt.")
     asof=date(report_date) if report_date is not None else date(max(position_dates))
     report_ev=ev("report_date",FR_REPORT_DATE.search(text)) if report_date is not None else None
+    snapshot_date_ev=report_ev
+    if snapshot_date_ev is None and position_dates:
+     latest_row=next((row_text,row_offset) for block in positions for row_text,row_offset in block.get("rows",())
+                     if (match:=FR_POSITION_ROW.match(row_text)) and match.group(5)==max(position_dates))
+     snapshot_date_ev=ev("snapshot_as_of",latest_row[0],offset=latest_row[1])
     te=None; total_value=FieldValue.unknown()
     if depot_values:
      te=ev("depot_total","\n".join(depot_total_excerpt or ["Gesamtkurswert"]),offset=depot_total_offset)
@@ -1208,14 +1343,26 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
      te=ev("depot_total",total); total_value=fv(dec(total.group(1)),te)
     dto_positions=[]
     for block in positions:
-     pe=ev("depot_position","\n".join(block["raw"]),offset=block["offset"])
+     position_rows=block.get("rows",((block["raw"][0],block["offset"]),))
+     row_for=lambda predicate: next(((row_text,row_offset) for row_text,row_offset in position_rows if predicate(row_text)),position_rows[0])
+     security_row=position_rows[0]
+     values_row=row_for(lambda value: bool(FR_POSITION_VALUES.match(value)) or bool(FR_POSITION_ROW.match(value)))
+     name_rows=[(row_text,row_offset) for row_text,row_offset in position_rows[1:] if block["name"] and row_text in block["name"]]
+     security_ev=ev("depot_position_security_id",security_row[0],offset=security_row[1])
+     custody_ev=ev("depot_position_custody_type",security_row[0],offset=security_row[1]) if block.get("custody_type") else None
+     quantity_ev=ev("depot_position_quantity",values_row[0],offset=values_row[1])
+     market_value_ev=ev("depot_position_market_value",values_row[0],offset=values_row[1])
+     currency_ev=ev("depot_position_currency",values_row[0],offset=values_row[1])
+     price_ev=ev("depot_position_price",values_row[0],offset=values_row[1])
+     name_ev=ev("depot_position_name","\n".join(row_text for row_text,_ in name_rows),offset=name_rows[0][1]) if name_rows else None
      price_date=date(block.get("price_date") or (report_date if report_date is not None else max(position_dates)))
      # Der Kurswert ist laut Spaltenkopf in EUR. Ohne Kurswährung ist nur ein
      # expliziter Nullkurs in der gemeinsamen Währungseinheit darstellbar.
      price,price_currency=block["price"],block["price_currency"]
-     price_field=fv(price,pe) if price_currency=="EUR" or (price_currency is None and price==0) else FieldValue.unknown()
-     dto_positions.append(DepotPosition(stable_id("position",did,block["wkn"]),fv(block["wkn"],pe),fv(block["quantity"],pe),security_name=fv(block["name"],pe) if block["name"] else FieldValue.unknown(),market_value=fv(block["value"],pe),currency=fv("EUR",pe),price=price_field,price_date=fv(price_date,pe)))
-    snapshots.append(DepotSnapshot(stable_id("snapshot",did,asof,doc.document_id),did,fv(asof,report_ev) if report_ev else fv(asof,dto_positions[0].price_date.evidence_ids[0]),tuple(dto_positions),total_value,fv("EUR",te) if te else FieldValue.unknown()))
+     price_field=fv(price,price_ev) if price_currency=="EUR" or (price_currency is None and price==0) else FieldValue.unknown()
+     price_date_ev=ev("depot_position_price_date",next((row_text for row_text,_ in position_rows if FR_POSITION_ROW.match(row_text)),position_rows[0][0]),offset=next((row_offset for row_text,row_offset in position_rows if FR_POSITION_ROW.match(row_text)),position_rows[0][1])) if block.get("price_date") else snapshot_date_ev
+     dto_positions.append(DepotPosition(stable_id("position",did,block["wkn"]),fv(block["wkn"],security_ev),fv(block["quantity"],quantity_ev),security_name=fv(block["name"],name_ev) if block["name"] and name_ev else FieldValue.unknown(),market_value=fv(block["value"],market_value_ev),currency=fv("EUR",currency_ev),price=price_field,price_date=fv(price_date,price_date_ev) if price_date_ev else FieldValue.unknown(),custody_type=fv(block["custody_type"],custody_ev) if custody_ev else FieldValue.unknown()))
+    snapshots.append(DepotSnapshot(stable_id("snapshot",did,asof,doc.document_id),did,fv(asof,snapshot_date_ev) if snapshot_date_ev else FieldValue.unknown(),tuple(dto_positions),total_value,fv("EUR",te) if te else FieldValue.unknown()))
     reported=depot_values[0] if depot_values else (dec(total.group(1)) if (total:=re.search(r"Depotgesamtwert\s+("+A+r")\s+EUR",text,re.I)) else None)
     if reported is not None:
      calculated=sum((block["value"] for block in positions),Decimal())

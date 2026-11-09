@@ -1,8 +1,8 @@
 # Parserauftrag – Bearbeitungsstand
 
 Abgleich mit `PortmanV10/portman-v10/docs/Parserauftrag.md` vom 9. November 2026.
-Alle Änderungen dieser Bearbeitung liegen im Repository `PortmanParserLab`;
-das V10-Repository wurde nicht geändert.
+Die Parserimplementierung liegt in `PortmanParserLab`; V10-Pin, Allowlist,
+Importregeln und Weboberfläche sind nicht geändert.
 
 ## Abhakliste
 
@@ -15,8 +15,10 @@ das V10-Repository wurde nicht geändert.
   synthetische Kauf-/Verkaufsfälle sind vorhanden. Das erweitert weder V10s
   Allowlist noch die Buchungswirkung.
 - [x] **V10-40-Vertrag:** Gerichteter `ExchangeRate`-Wert mit exakter Decimal-
-  Präzision, getrennten Währungen, fester Richtung und Evidence. Ausführung
-  bleibt auf ausdrücklich belegte Bank-of-Scotland-Zeilen begrenzt.
+  Präzision, getrennten Währungen, fester Richtung und Evidence. Bank of
+  Scotland liest ausdrücklich gelabelte Zeilen; der comdirect-Wertpapierhandler
+  liefert zusätzlich genau einen klar gerichteten `1 Währung = Kurs Währung`
+  Wert. Der bisherige ungerichtete Trade-Kurs bleibt davon getrennt.
 - [x] **V10-52-Vertrag:** Gegenpartei und Zweck sind getrennte Rohtextfelder mit
   eigenen Evidence-IDs. Die bestehende Extraktion bleibt auf explizite Labels in
   derselben Bank-of-Scotland-Buchungszeile beschränkt.
@@ -43,9 +45,25 @@ das V10-Repository wurde nicht geändert.
   fällen einzeln dokumentiert. Zusätzliche Layouts bleiben ohne konkrete
   Einzelauswahl offen; fehlende negative Layout-Erkennung ist ausdrücklich
   benannt.
-- [x] **API-/Schema-Versionierung:** Paket `0.8.6`, API `0.8`, Ergebnis-
-  schema `1.8.0`; ältere Ergebnis-Schemata `1.5.0`, `1.6.0` und `1.7.0`
-  werden rückwärts normalisiert.
+- [x] **V10-81 Finanzreport:** Betrag am Ende einer Zweckzeile schließt die
+  richtige Buchung; ein neues Datumspaar trennt einen unvollständigen Block mit
+  `INCOMPLETE_BOOKING` und eigener Fundstelle. Historische Parserpfade trennen
+  ebenfalls; `BALANCE_MISMATCH` wird nicht korrigiert.
+- [x] **V10-83 Finanzreport:** Name/WKN/gültige ISIN und eng formatierte
+  Buchungsreferenzen werden mit Feldfundstellen ausgegeben. Fehlende/ungültige
+  ISIN, ungültige/mehrdeutige Referenzen, Gehaltszeilen und JSON-Roundtrip sind
+  synthetisch geprüft. Die Zeile bleibt eine Geldbuchung ohne Stückbewegung.
+- [x] **V10-82 Parseranteil:** Unvollständige Buchungs- und Saldenmeldungen
+  behalten eine Quellfundstelle; Buchungswarnungen bleiben ereignisbezogen,
+  Kontosaldenmeldungen außerhalb einzelner Events. `Issue` hat kein eigenes
+  `account_id`; eine solche Zuordnung wird nicht erfunden.
+- [x] **V10-85 Parseranteil:** Depot-Snapshots liefern feldbezogene Fundstellen
+  für Wertpapierkennung, Name, Stückzahl, Kurswert, Währung und erkannte
+  Verwahrart. Ein USD-Stückkurs macht den Kurs UNKNOWN, verhindert aber nicht
+  den belegten Bestand. Verwahrart ist ein neues optionales DTO-Feld.
+- [x] **API-/Schema-Versionierung:** Paket/API `0.8.7` / `0.9`, Ergebnis-
+  schema `1.9.0`; ältere Ergebnis-Schemata `1.5.0` bis `1.8.0` werden
+  rückwärts normalisiert.
 - [ ] **V10-Integration:** Parserpin, V10-Allowlist, Importregeln und Web-UI
   sind nicht geändert und bleiben separate V10-Arbeiten.
 
@@ -53,18 +71,18 @@ das V10-Repository wurde nicht geändert.
 
 Prüfstand am 9. November 2026:
 
-- Parsersuite: `321 passed`.
+- Parsersuite: `337 passed`.
 - Ruff: `python -m ruff check src tests` – sauber.
 - `git diff --check` – sauber.
-- Wheel gebaut: `portman_parsers-0.8.6-py3-none-any.whl`.
-- Frische Installation in ein separates Zielverzeichnis erfolgreich; Import
-  bestätigt Paket `0.8.6`, API `0.8`, Schema `1.8.0` und neues TaxEvent-Feld.
-- SHA-256: `887359F34388207439548C108DFDE307852E39C1B9CA16D94E64EBD827B93596`.
+- Wheel gebaut: `portman_parsers-0.8.7-py3-none-any.whl`.
+- Wheel in getrenntes Zielverzeichnis installiert; Import dort bestätigt
+  Paket `0.8.7`, API `0.9`, Schema `1.9.0` und `DepotPosition.custody_type`.
+- SHA-256: `19b62297cbee5678cc803c945b69a232d1e90553566248b0ffe5cc43c7fe5698`.
 
 ## Übergabegrenze
 
 Keine echten Belege wurden hinzugefügt. Die synthetischen Ergebnisse belegen nur
 die ausdrücklich genannten Textmuster, nicht alle comdirect-Layoutvarianten.
 V10s dokumentierter Parserpin `0.7.0` / API `0.6` / Schema `1.6.0` muss separat
-mit Paket `0.8.6` / API `0.8` / Schema `1.8.0` abgeglichen werden.
+mit Paket `0.8.7` / API `0.9` / Schema `1.9.0` abgeglichen werden.
 Die V10-Integration ist daher ausdrücklich kein abgeschlossener ParserLab-Schritt.

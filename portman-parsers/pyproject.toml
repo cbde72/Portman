@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "portman-parsers"
 
-version = "0.8.6"
+version = "0.8.7"
 description = "Independent, evidence-aware bank PDF parser contracts for Portman"
 readme = "README.md"
 requires-python = ">=3.11"

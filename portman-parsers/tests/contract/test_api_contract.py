@@ -25,10 +25,10 @@ from portman_parsers.api import (
 
 
 def test_api_and_schema_are_versioned():
-    assert __version__ == "0.8.6"
+    assert __version__ == "0.8.7"
     assert version("portman-parsers") == __version__
-    assert API_VERSION == "0.8"
-    assert SCHEMA_VERSION == "1.8.0"
+    assert API_VERSION == "0.9"
+    assert SCHEMA_VERSION == "1.9.0"
 
 
 def test_pdf_document_orders_pages_without_binary_payload():
@@ -95,10 +95,24 @@ def test_tax_field_evidence_ids_are_serialized_and_legacy_schema_gets_defaults()
     }
     from portman_parsers.api import normalize_result_payload
     normalized = normalize_result_payload(legacy)
-    assert normalized["schema_version"] == "1.8.0"
+    assert normalized["schema_version"] == "1.9.0"
     assert normalized["events"][0]["tax_events"][0]["tax_year_evidence_ids"] == []
     assert normalized["events"][0]["tax_events"][0]["accrual_date_evidence_ids"] == []
     assert normalized["events"][0]["tax_events"][0]["exemption_order_used_evidence_ids"] == []
+
+
+def test_previous_schema_gets_unknown_custody_type_default():
+    legacy = {
+        "schema_version": "1.8.0",
+        "depot_snapshots": [{"positions": [{"security_id": {"value": "A1JX52"}}]}],
+    }
+    normalized = normalize_result_payload(legacy)
+
+    assert normalized["schema_version"] == "1.9.0"
+    assert normalized["depot_snapshots"][0]["positions"][0]["custody_type"] == {
+        "value": "UNKNOWN", "source": "NOT_PROVIDED", "review_status": "UNREVIEWED",
+        "page_number": None, "evidence_ids": [],
+    }
 
 
 def test_event_date_and_dividend_reversal_details_preserve_meaning_and_evidence():

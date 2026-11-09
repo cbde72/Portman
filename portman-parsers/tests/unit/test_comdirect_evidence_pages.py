@@ -194,7 +194,9 @@ def test_finanzreport_depotposition_ohne_kurswaehrung(price, expected):
     assert evidence.page_number == 3
     assert row in evidence.excerpt
     if expected is not MissingValue.UNKNOWN:
-        assert position.price.evidence_ids == (evidence.evidence_id,)
+            price_evidence = next(item for item in result.evidence if item.evidence_id in position.price.evidence_ids)
+            assert price_evidence.excerpt == row
+            assert position.price.evidence_ids != position.market_value.evidence_ids
     assert not result.issues
 
 

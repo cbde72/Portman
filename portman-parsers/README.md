@@ -5,18 +5,23 @@ contains immutable DTOs, deterministic plugin selection, evidence tracking and
 bank-independent financial validation. It has no dependency on Portman V09,
 PDF Lab, GUI frameworks or persistence code.
 
-## Version 0.8.6
+## Version 0.8.7
 
-Version `0.8.6` extends the tax-event result contract for V10-24 with separate
-evidence references for tax year, accrual date, and explicitly consumed
-exemption-order amounts. Comdirect extraction accepts a tax year only from an
-explicit tax-year label or an explicitly labeled tax accrual date. A generic
-`Freistellungsauftrag` amount is not treated as consumption; the amount must be
-labeled as consumed/used. It also preserves explicit date meaning and evidence
-for comdirect payment rows, and reports dividend-reversal matching facts in a
-separate `ReversalDetails` value. Reversal cash and tax corrections stay
-separate. The result schema is `1.8.0`, API `0.8`; schema `1.7.0` remains
-readable with empty evidence-reference defaults.
+Version `0.8.7` completes the selected V10 parser work for Finanzreport booking
+boundaries, structured security identity and bank references, and source-linked
+document diagnostics. Explicitly directed comdirect FX rates are exposed through
+the existing `ExchangeRate` DTO; unlabelled scalar rates remain unchanged.
+Depot snapshots now expose a source-linked custody type when the report labels
+it. The API is `0.9` and result schema `1.9.0`; schemas `1.5.0` through `1.8.0`
+remain readable with unknown defaults for new fields.
+
+Earlier `0.8.6` work added separate evidence references for tax year, accrual
+date, and explicitly consumed exemption-order amounts. Comdirect accepts a tax
+year only from an explicit tax-year label or explicitly labeled tax accrual
+date. A generic `Freistellungsauftrag` amount is not treated as consumption. It
+also preserves explicit date meaning and evidence for payment rows and reports
+dividend-reversal matching facts in `ReversalDetails`; reversal cash and tax
+corrections stay separate.
 
 ## Version 0.8.0
 

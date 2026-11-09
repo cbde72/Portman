@@ -353,6 +353,31 @@ Neuer Saldo 31.01.2013 +90,00
     assert not result.issues
 
 
+def test_historisches_unvollstaendiges_buchungssegment_wird_vor_neuem_datumspaar_getrennt():
+    text = """comdirect\nFinanzreport Nr. 1 per 01.02.2013
+Girokonto
+Buchungstag
+Kto. / IBAN BLZ / BIC
+Alter Saldo 01.01.2013 +100,00
+01.01.2013
+01.01.2013
+Lastschrift ohne Betrag
+02.01.2013
+02.01.2013
+Gutschrift -5,00
+Neuer Saldo 31.01.2013 +95,00
+""" + _hinweis(Girokonto=IBAN_GIRO)
+
+    result = _parse(text)
+
+    incomplete = next(issue for issue in result.issues if issue.code == "INCOMPLETE_BOOKING")
+    evidence = next(item for item in result.evidence if item.evidence_id == incomplete.evidence_id)
+    assert "Lastschrift ohne Betrag" in evidence.excerpt
+    assert "02.01.2013" not in evidence.excerpt
+    assert not result.events  # Der Saldenabgleich kann den unvollständigen Block nicht sicher retten.
+    assert any(issue.code == "HISTORICAL_BOOKING_LAYOUT_UNSUPPORTED" for issue in result.issues)
+
+
 def test_finanzreport_2007_getrennte_spalten_ohne_iban_erhaelt_buchungen_und_salden():
     text = """comdirect
 Ihre Kontonummer:

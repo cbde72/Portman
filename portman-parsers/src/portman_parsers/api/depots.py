@@ -41,6 +41,7 @@ class DepotPosition:
     currency: FieldValue[str] = field(default_factory=FieldValue.unknown)
     price: FieldValue[Decimal] = field(default_factory=FieldValue.unknown)
     price_date: FieldValue[date] = field(default_factory=FieldValue.unknown)
+    custody_type: FieldValue[str] = field(default_factory=FieldValue.unknown)
 
     def __post_init__(self) -> None:
         if not self.position_id:
