@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 
-from portman_parsers.api import PdfDocument, PdfPage
+from portman_parsers.api import MissingValue, PdfDocument, PdfPage
 from portman_parsers.plugins import ComdirectPlugin
 from portman_parsers.plugins.comdirect import (
     _extract_comdirect_security_identity,
@@ -121,10 +121,19 @@ def test_liquidationsnachzahlung_mit_zweiter_kennung_bleibt_mehrdeutig():
     ("Abrechnung Dividendengutschrift", "Lasten", "DIVIDEND", Decimal("-4.25"), {"DIVIDEND_CASH_SIGN"}),
 ])
 def test_dividendenstorno_verlangt_expliziten_belegtitel_und_belastung(title, direction, kind, amount, issues):
+    original_details = (
+        "Referenz der ursprünglichen Gutschrift: ORIGINAL-12345\n"
+        "Ex-Tag der ursprünglichen Gutschrift: 01.06.2022\n"
+        "Zahltag der ursprünglichen Gutschrift: 08.06.2022\n"
+        "Geschäftstag der ursprünglichen Gutschrift: 07.06.2022\n"
+        "Valuta der ursprünglichen Gutschrift: 08.06.2022\n"
+        "Buchungstag der ursprünglichen Gutschrift: 09.06.2022\n"
+        "Stückzahl der ursprünglichen Gutschrift: 3,000 STK\n"
+    ) if title.startswith("Storno") else ""
     document = _document(
         "comdirect\nDepotbestand Wertpapier-Bezeichnung WKN/ISIN\n"
         "per 08.06.2022 716460 SAP SE\n"
-        "STK 3,000 DE0007164600 Inhaber-Aktien o.N.\n"
+        "STK 3,000 DE0007164600 Inhaber-Aktien o.N.\n" + original_details +
         f"{title}\nKapitalertragsteuer EUR 1,00\n"
         f"Verrechnung über Konto (IBAN) Valuta Zu Ihren {direction} vor Steuern\n"
         "DE00 0000 0000 0000 0000 01 EUR 13.06.2022 EUR 4,25\n"
@@ -139,14 +148,33 @@ def test_dividendenstorno_verlangt_expliziten_belegtitel_und_belastung(title, di
     assert {issue.code for issue in validate_parsed_document(result)} == issues
     if amount is None:
         assert not event.cash_movements
+        cash = None
     else:
         cash, = event.cash_movements
         assert cash.amount == amount
-        if kind == "REVERSAL":
+    if kind == "REVERSAL":
+        details = event.reversal_details
+        assert details is not None
+        assert details.original_reference == "ORIGINAL-12345"
+        assert details.original_ex_date == date(2022, 6, 1)
+        assert details.original_payment_date == date(2022, 6, 8)
+        assert details.original_business_date == date(2022, 6, 7)
+        assert details.original_value_date == date(2022, 6, 8)
+        assert details.original_booking_date == date(2022, 6, 9)
+        assert details.quantity == Decimal("3.000")
+        assert details.original_reference_evidence_ids and details.original_ex_date_evidence_ids
+        assert details.original_payment_date_evidence_ids and details.original_booking_date_evidence_ids
+        assert details.original_business_date_evidence_ids and details.original_value_date_evidence_ids
+        assert details.quantity_evidence_ids
+        assert event.bank_reference != details.original_reference
+        assert event.tax_events[0].kind == "REVERSAL_CORRECTION"
+        assert event.tax_events[0].components[0].amount == Decimal("1.00")
+        if cash is not None:
             assert event.event_date == date(2022, 6, 13)
             assert cash.status.value == "EXPECTED" and cash.movement_type.value == "REVERSAL"
-            assert not event.tax_events
-            assert any(item.field == "dividend_reversal" and item.excerpt == title for item in result.evidence)
+        assert any(item.field == "dividend_reversal" and item.excerpt == title for item in result.evidence)
+    else:
+        assert event.reversal_details is None
 
 
 def test_multi_line_name_continuation_between_identifier_rows_is_used():
@@ -158,6 +186,22 @@ def test_multi_line_name_continuation_between_identifier_rows_is_used():
     )
     assert identity.name == "First Second Name Third Part"
     assert identity.status == "RECOGNIZED"
+
+
+def test_dividendenstorno_without_original_reference_does_not_reuse_own_reference():
+    document = _document(
+        "comdirect\nStorno-Abrechnung Dividendengutschrift\n"
+        "Verrechnung über Konto (IBAN) Valuta Zu Ihren Lasten vor Steuern\n"
+        "DE00 0000 0000 0000 0000 01 EUR 13.06.2022 EUR 4,25\n"
+        "Referenz-Nr. STORNO123456"
+    )
+    plugin = ComdirectPlugin()
+    result = plugin.parse(document, plugin.detect(document)[0])
+    event, = result.events
+    assert event.bank_reference == "STORNO123456"
+    assert event.reversal_details is not None
+    assert event.reversal_details.original_reference is MissingValue.UNKNOWN
+    assert not event.reversal_details.original_reference_evidence_ids
 
 
 def test_wkn_only_block_is_partial_and_does_not_invent_an_isin():

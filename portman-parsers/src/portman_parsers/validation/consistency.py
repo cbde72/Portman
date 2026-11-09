@@ -32,6 +32,19 @@ def validate_parsed_document(result: ParsedDocument) -> tuple[Issue, ...]:
     for event in result.events:
         issues.extend(validate_event(event))
         evidence_issues(f"Event {event.event_id}", event.event_id, event.evidence_ids)
+        evidence_issues(f"Event {event.event_id} date", event.event_id, event.event_date_evidence_ids)
+        if event.reversal_details is not None:
+            details = event.reversal_details
+            for label, evidence_ids in (
+                ("original reference", details.original_reference_evidence_ids),
+                ("original ex date", details.original_ex_date_evidence_ids),
+                ("original payment date", details.original_payment_date_evidence_ids),
+                ("original business date", details.original_business_date_evidence_ids),
+                ("original value date", details.original_value_date_evidence_ids),
+                ("original booking date", details.original_booking_date_evidence_ids),
+                ("original quantity", details.quantity_evidence_ids),
+            ):
+                evidence_issues(f"Event {event.event_id} reversal {label}", event.event_id, evidence_ids)
         evidence_issues(f"Event {event.event_id} security identity", event.event_id,
                         event.security_identity_evidence_ids)
         evidence_issues(f"Event {event.event_id} bank reference", event.event_id,
@@ -45,10 +58,15 @@ def validate_parsed_document(result: ParsedDocument) -> tuple[Issue, ...]:
                             exchange_rate.evidence_ids)
         for trade in event.trades:
             evidence_issues(f"Trade {trade.trade_id}", event.event_id, trade.evidence_ids)
+            evidence_issues(f"Trade {trade.trade_id} booking date", event.event_id, trade.booking_date_evidence_ids)
         for movement in (*event.cash_movements, *event.security_movements):
             evidence_issues(f"Movement {movement.movement_id}", event.event_id, movement.evidence_ids)
         for tax in event.tax_events:
             evidence_issues(f"Tax event {tax.tax_event_id}", event.event_id, tax.evidence_ids)
+            evidence_issues(f"Tax event {tax.tax_event_id} tax year", event.event_id, tax.tax_year_evidence_ids)
+            evidence_issues(f"Tax event {tax.tax_event_id} accrual date", event.event_id, tax.accrual_date_evidence_ids)
+            evidence_issues(f"Tax event {tax.tax_event_id} exemption consumption", event.event_id,
+                            tax.exemption_order_used_evidence_ids)
         for fee in event.fee_events:
             evidence_issues(f"Fee {fee.fee_id}", event.event_id, fee.evidence_ids)
             for allocation in fee.allocations:

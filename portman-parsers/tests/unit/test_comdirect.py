@@ -1,5 +1,8 @@
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
+
+import pytest
 from portman_parsers.api import MissingValue, PdfDocument, PdfPage
 from portman_parsers.plugins import ComdirectFinanzreportPlugin, ComdirectPlugin
 
@@ -254,7 +257,7 @@ ISIN DE0008474511
 Vorabpauschale EUR 100,00
 Steuerbemessungsgrundlage EUR 70,00
 Teilfreistellung 30,00 %
-Freistellungsauftrag EUR 20,00
+Verbrauch des Freistellungsauftrags EUR 20,00
 Verlustverrechnung EUR 10,00
 steuerlicher Zufluss 02.01.2026
 Kapitalertragsteuer EUR 10,00
@@ -263,7 +266,82 @@ Solidaritätszuschlag EUR 0,55"""
  tax=result.events[0].tax_events[0]
  assert not result.events[0].cash_movements and tax.tax_year==2026
  assert tax.partial_exemption_rate==Decimal("0.30") and tax.actually_withheld_tax==Decimal("10.55")
+ assert tax.tax_year_evidence_ids and tax.accrual_date_evidence_ids and tax.exemption_order_used_evidence_ids
+ evidence={item.evidence_id:item for item in result.evidence}
+ assert evidence[tax.tax_year_evidence_ids[0]].field=="tax_year"
+ assert evidence[tax.accrual_date_evidence_ids[0]].field=="tax_accrual_date"
+ assert evidence[tax.exemption_order_used_evidence_ids[0]].field=="exemption_order_consumed"
  assert len(result.tax_calculations)==1 and len(result.tax_carryforwards)==1
+
+def test_tax_year_can_come_only_from_explicit_tax_year_field():
+ text="""comdirect
+Steuerliche Behandlung: Dividende
+Steuerjahr: 2025
+Freistellungsauftrag EUR 20,00
+Steuerbemessungsgrundlage EUR 100,00"""
+ source=PdfDocument("tax-year-only","3"*64,(PdfPage(1,text),)); plugin=ComdirectPlugin(); result=plugin.parse(source,plugin.detect(source)[0])
+ tax=result.events[0].tax_events[0]
+ assert tax.tax_year==2025 and tax.tax_year_evidence_ids
+ assert tax.accrual_date is None and not tax.accrual_date_evidence_ids
+ assert tax.exemption_order_used is MissingValue.UNKNOWN
+ assert not tax.exemption_order_used_evidence_ids
+
+def test_document_date_or_generic_freistellungsauftrag_is_not_tax_consumption():
+ text="""comdirect
+Finanzreport Nr. 201 per 01.01.2026
+Steuerliche Behandlung: Dividende
+Freistellungsauftrag EUR 75,00
+Steuerbemessungsgrundlage EUR 100,00"""
+ source=PdfDocument("tax-unknowns","4"*64,(PdfPage(1,text),)); plugin=ComdirectPlugin(); result=plugin.parse(source,plugin.detect(source)[0])
+ tax=result.events[0].tax_events[0]
+ assert tax.tax_year is None and not tax.tax_year_evidence_ids
+ assert tax.accrual_date is None and not tax.accrual_date_evidence_ids
+ assert tax.exemption_order_used is MissingValue.UNKNOWN
+ assert not tax.exemption_order_used_evidence_ids
+
+@pytest.mark.parametrize(("title", "kind"), [
+    ("Abrechnung Einlösung", "REDEMPTION"),
+    ("Wertpapierkauf", "BUY"),
+    ("Wertpapierverkauf", "SELL"),
+    ("Abrechnung Dividendengutschrift", "DIVIDEND"),
+])
+def test_settlement_row_date_uses_only_explicit_column_heading(title, kind):
+ text=f"""comdirect
+{title}
+Stk. 1,000 Fonds DE0008474511
+Verrechnung über Konto (IBAN) Valuta Zu Ihren Gunsten vor Steuern
+DE00 0000 0000 0000 0000 01 EUR 03.04.2023 EUR 10,00"""
+ source=PdfDocument("payment-date-"+kind,"5"*64,(PdfPage(1,text),)); plugin=ComdirectPlugin(); result=plugin.parse(source,plugin.detect(source)[0])
+ event=result.events[0]
+ assert event.kind==kind and event.event_date==date(2023,4,3)
+ assert event.event_date_type=="value_date" and event.event_date_evidence_ids
+ assert any(item.evidence_id==event.event_date_evidence_ids[0] and item.field=="value_date" and item.excerpt=="03.04.2023" for item in result.evidence)
+ assert event.event_date_evidence_ids[0] in event.evidence_ids
+ if event.trades:
+  assert event.trades[0].value_date==date(2023,4,3)
+
+def test_settlement_row_date_without_date_heading_stays_unknown():
+ text="""comdirect
+Abrechnung Einlösung
+Stk. 1,000 Fonds DE0008474511
+Verrechnung über Konto (IBAN) Zu Ihren Gunsten vor Steuern
+DE00 0000 0000 0000 0000 01 EUR 03.04.2023 EUR 10,00"""
+ source=PdfDocument("payment-date-unlabeled","6"*64,(PdfPage(1,text),)); plugin=ComdirectPlugin(); result=plugin.parse(source,plugin.detect(source)[0])
+ event=result.events[0]
+ assert event.event_date is None and event.event_date_type is MissingValue.UNKNOWN
+ assert not event.event_date_evidence_ids
+
+def test_settlement_row_booking_date_keeps_booking_semantics_for_trade():
+ text="""comdirect
+Wertpapierkauf
+Stk. 1,000 Fonds DE0008474511
+Verrechnung über Konto (IBAN) Buchungstag Zu Ihren Lasten vor Steuern
+DE00 0000 0000 0000 0000 01 EUR 03.04.2023 EUR 10,00"""
+ source=PdfDocument("booking-date-grid","7"*64,(PdfPage(1,text),)); plugin=ComdirectPlugin(); result=plugin.parse(source,plugin.detect(source)[0])
+ event=result.events[0]
+ assert event.event_date==date(2023,4,3) and event.event_date_type=="booking_date"
+ assert event.trades[0].booking_date==date(2023,4,3)
+ assert event.trades[0].booking_date_evidence_ids==event.event_date_evidence_ids
 
 def test_finanzreport_duplicate_booking_is_not_double_counted():
  text="""comdirect

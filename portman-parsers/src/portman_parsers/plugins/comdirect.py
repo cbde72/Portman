@@ -9,7 +9,7 @@ from portman_parsers.api import (
     CashMovement, CashMovementType, CashStatus, CostEvent, CostInformationType, Depot, DepotAccountLink,
     DepotPosition, DepotSnapshot, DepotType, Detection, Evidence, FeeEffect, FeeEvent, FieldValue,
     FinancialEvent, Issue, IssueNature, IssueSeverity, MissingValue, ParsedDocument, ReviewStatus,
-    SecurityMovement, SecurityTrade, TaxApprovalStatus, TaxComponent, TaxEvent,
+    ReversalDetails, SecurityMovement, SecurityTrade, TaxApprovalStatus, TaxComponent, TaxEvent,
 )
 from portman_parsers.registry.allowlist import APPROVED_PLUGINS
 from portman_parsers.utilities import stable_id
@@ -28,10 +28,21 @@ IDENTITY_ROW_PREFIX=re.compile(r"^\s*(?:p\s*e\s*r\s+\d{2}\.\d{2}\.\d{4}|(?:S\s*T
 IDENTITY_REASON={"PARTIAL":"nur WKN oder Name erkannt","AMBIGUOUS":"mehrere Kennungen im selben Wertpapierblock","INVALID":"ISIN-Prüfziffer oder ISIN-Format ungültig"}
 QTY=re.compile(r"(?:Stk\.?|STK)\s*("+A+r")",re.I); NENNWERT_QTY=re.compile(r"Nennwert\s*Zum\s*(?:Misch)?Kurs\s*von\s*(?:St\.?|Stk\.?)\s*("+A+r")",re.I); VALUTA=re.compile(r"(?:Valuta|zahlbar\s+ab)\s*("+D+r")",re.I)
 DIVIDEND_REVERSAL=re.compile(r"\bStorno\s*[-–]?\s*Abrechnung\s+(?:Dividenden|Ertrags)gutschrift\b",re.I)
+ORIGINAL_REFERENCE=re.compile(r"\bReferenz\s+(?:der|zur)\s+ursprünglichen\s+(?:Abrechnung|Gutschrift)\s*:?\s*([A-Z0-9][A-Z0-9-]{5,39})",re.I)
+ORIGINAL_EX_DATE=re.compile(r"\bEx[- ]Tag(?:\s+der\s+ursprünglichen\s+(?:Dividenden-)?Gutschrift)?\s*:?\s*("+D+r")",re.I)
+ORIGINAL_PAYMENT_DATE=re.compile(r"\b(?:Zahlungs|Zahlungs-)tag(?:\s+der\s+ursprünglichen\s+(?:Dividenden-)?Gutschrift)?\s*:?\s*("+D+r")|\bZahltag(?:\s+der\s+ursprünglichen\s+(?:Dividenden-)?Gutschrift)?\s*:?\s*("+D+r")",re.I)
+ORIGINAL_BUSINESS_DATE=re.compile(r"\bGeschäftstag\s+der\s+ursprünglichen\s+(?:Abrechnung|Gutschrift)\s*:?\s*("+D+r")",re.I)
+ORIGINAL_VALUE_DATE=re.compile(r"\bValuta\s+der\s+ursprünglichen\s+(?:Abrechnung|Gutschrift)\s*:?\s*("+D+r")",re.I)
+ORIGINAL_BOOKING_DATE=re.compile(r"\bBuchungstag\s+der\s+ursprünglichen\s+(?:Abrechnung|Gutschrift)\s*:?\s*("+D+r")",re.I)
+ORIGINAL_QUANTITY=re.compile(r"\b(?:Stückzahl|Stück|Nominale)\s+der\s+ursprünglichen\s+Gutschrift\s*:?\s*(?:STK\s*)?("+A+r")",re.I)
+TAX_YEAR=re.compile(r"(?:Steuerjahr|Veranlagungsjahr)\s*:?\s*((?:19|20)\d{2})\b",re.I)
+FSA_CONSUMPTION=re.compile(r"(?:Verbrauch(?:ter)?\s+(?:des\s+)?Freistellungsauftrags|Freistellungsauftrag\s+(?:verbraucht|genutzt))\s*:?\s*(?:EUR\s*)?("+A+r")",re.I)
 WKN=re.compile(r"\bWKN\s*:?[ \t]*([A-Z0-9]{6})\b",re.I)
-BANK_REFERENCE=re.compile(r"\bReferenz(?:\s*[- ]?\s*(?:Nr\.?|nummer))?\s*:?\s*([A-Z0-9][A-Z0-9\s]*?)(?=\s*(?:Referenz|Depotnummer|Depotnr|Kundennummer|comdirect)|[^A-Z0-9\s]|\n\s*\n|$)",re.I)
+BANK_REFERENCE=re.compile(r"\bReferenz(?!\s+(?:der|zur)\s+ursprünglichen)(?:\s*[- ]?\s*(?:Nr\.?|nummer))?\s*:?\s*([A-Z0-9][A-Z0-9\s]*?)(?=\s*(?:Referenz|Depotnummer|Depotnr|Kundennummer|comdirect)|[^A-Z0-9\s]|\n\s*\n|$)",re.I)
 LIQUIDATION_ADJUSTMENT=re.compile(r"\bNachbesserung[ \t]+(?:Liquizlg\b\.?|Liquidationszahlung\b)(?:[ \t]+(ETF[0-9]{3})\b)?",re.I)
 SETTLEMENT_DATE=re.compile(r"\b("+D+r")\b")
+SETTLEMENT_COLUMNS=re.compile(r"Verrechnung\s+über\s+Konto\s*\(IBAN\)(?P<columns>[^\n]{0,180})",re.I)
+SETTLEMENT_ROW_DATE=re.compile(r"DE(?:\s*\d){20}\s+[A-Z]{3}\s+(?P<date>"+D+r")\s+[A-Z]{3}\s+[+-]?"+A,re.I)
 TRADE_LINE=re.compile(r"Stk\.?\s*(?P<qty>\d[\d.]*(?:,\d+)?)\s+(?P<name>.+?)\s*,?\s*WKN\s*/\s*ISIN\s*:\s*(?P<wkn>[A-Z0-9]{6})\s*/\s*(?P<isin>[A-Z]{2}[A-Z0-9]{9}\d)",re.I)
 TRADE_EXECUTION=re.compile(r"Nennwert\s*Zum\s*(?:Misch)?Kurs\s*von\s*(?:St\.\s*(?P<qty>\d[\d.]*(?:,\d+)?)\s*)?EUR\s*(?P<price>\d[\d.]*(?:,\d+)?)\s*Kurswert\s*:?\s*EUR\s*(?P<market>"+A+r")",re.I)
 TRADE_DAY=re.compile(r"(?:Wertpapierkauf|Wertpapierverkauf|Gesch\.ftsvorgang)\s*Nr\.?\s*\d+\s*vom\s*("+D+r")",re.I)
@@ -401,6 +412,48 @@ def evidence_recorder(document,plugin_id,handler_id,plugin_version):
 def dec(v): return Decimal(v.replace(".","").replace(",","."))
 def date(v): return datetime.strptime(v,"%d.%m.%Y").date()
 
+def _settlement_column_date(text):
+ """Return a payment-row date only when the same table explicitly labels its meaning."""
+ headers=tuple(SETTLEMENT_COLUMNS.finditer(text))
+ if len(headers)!=1: return None
+ header=headers[0]
+ label=re.search(r"\b(Valuta|Buchungstag)\b",header.group("columns"),re.I)
+ if not label: return None
+ row=SETTLEMENT_ROW_DATE.search(text,header.end(),min(len(text),header.end()+500))
+ if not row: return None
+ date_match=re.compile(D).search(text,row.start("date"),row.end("date"))
+ return (date(row.group("date")),"value_date" if label.group(1).casefold()=="valuta" else "booking_date",date_match)
+
+def _reversal_details(text,ev):
+ """Extract only facts explicitly attributed to the original credit."""
+ reference=ORIGINAL_REFERENCE.search(text); ex_date=ORIGINAL_EX_DATE.search(text)
+ payment_date=ORIGINAL_PAYMENT_DATE.search(text); booking_date=ORIGINAL_BOOKING_DATE.search(text)
+ business_date=ORIGINAL_BUSINESS_DATE.search(text); value_date=ORIGINAL_VALUE_DATE.search(text)
+ quantity=ORIGINAL_QUANTITY.search(text)
+ reference_id=ev("reversal_original_reference",reference) if reference else None
+ ex_date_id=ev("reversal_original_ex_date",ex_date) if ex_date else None
+ payment_date_id=ev("reversal_original_payment_date",payment_date) if payment_date else None
+ business_date_id=ev("reversal_original_business_date",business_date) if business_date else None
+ value_date_id=ev("reversal_original_value_date",value_date) if value_date else None
+ booking_date_id=ev("reversal_original_booking_date",booking_date) if booking_date else None
+ quantity_id=ev("reversal_original_quantity",quantity) if quantity else None
+ return ReversalDetails(
+     original_reference=reference.group(1) if reference else MissingValue.UNKNOWN,
+     original_reference_evidence_ids=(reference_id,) if reference_id else (),
+     original_ex_date=date(ex_date.group(1)) if ex_date else MissingValue.UNKNOWN,
+     original_ex_date_evidence_ids=(ex_date_id,) if ex_date_id else (),
+     original_payment_date=date(next(value for value in payment_date.groups() if value)) if payment_date else MissingValue.UNKNOWN,
+     original_payment_date_evidence_ids=(payment_date_id,) if payment_date_id else (),
+     original_business_date=date(business_date.group(1)) if business_date else MissingValue.UNKNOWN,
+     original_business_date_evidence_ids=(business_date_id,) if business_date_id else (),
+     original_value_date=date(value_date.group(1)) if value_date else MissingValue.UNKNOWN,
+     original_value_date_evidence_ids=(value_date_id,) if value_date_id else (),
+     original_booking_date=date(booking_date.group(1)) if booking_date else MissingValue.UNKNOWN,
+     original_booking_date_evidence_ids=(booking_date_id,) if booking_date_id else (),
+     quantity=dec(quantity.group(1)) if quantity else MissingValue.UNKNOWN,
+     quantity_evidence_ids=(quantity_id,) if quantity_id else (),
+ )
+
 class ComdirectPlugin:
  metadata=next(x for x in APPROVED_PLUGINS if x.plugin_id=="user.comdirect-ertraege")
  def detect(self,doc):
@@ -457,7 +510,7 @@ class ComdirectPlugin:
    return self.result(doc,d,evidence,(FinancialEvent(event_id,doc.document_id,"MIFID_COST_INFORMATION",cost_events=tuple(costs),evidence_ids=(eid,)),),depots)
   if d.handler_id in {"vorabpauschale","investment_ausschuettung","dividende_steuer_inland"}:
    event_id=stable_id("event",doc.document_id,d.handler_id,isin); comps=tuple(TaxComponent(k,dec(m.group(1)),"EUR") for k,p in TAX for m in [re.search(p,text,re.I)] if m)
-   advance=re.search(r"Vorabpauschale\s+EUR\s+("+A+r")",text,re.I); taxable=re.search(r"Steuerbemessungsgrundlage.*?EUR\s+("+A+r")",text,re.I|re.S); fsa=re.search(r"Freistellungsauftrag\s+EUR\s+("+A+r")",text,re.I)
+   advance=re.search(r"Vorabpauschale\s+EUR\s+("+A+r")",text,re.I); taxable=re.search(r"Steuerbemessungsgrundlage.*?EUR\s+("+A+r")",text,re.I|re.S); fsa=FSA_CONSUMPTION.search(text); stated_tax_year=TAX_YEAR.search(text)
    loss=re.search(r"Verlustverrechnung[^\n]*?EUR\s+("+A+r")",text,re.I); partial=re.search(r"Teilfreistellung\s+("+A+r")\s*%",text,re.I); accrual=re.search(r"(?:steuerlicher Zufluss|Zuflussdatum)\s*("+D+r")",text,re.I); booking=re.search(r"Buchungstag\s*("+D+r")",text,re.I)
    withheld=sum((x.amount for x in comps),Decimal())
    identity_name_excerpt=_original_excerpt(doc,(identity.name_source,*identity.name_rows,security_name)) if security_name else None
@@ -470,7 +523,24 @@ class ComdirectPlugin:
    if identity.status in {"AMBIGUOUS","INVALID"}:
     identity_issues.append(Issue(stable_id("issue",event_id,"security-identity",identity.status),"COMDIRECT_SECURITY_"+identity.status,IssueSeverity.WARNING,
                                  identity.reason or "Wertpapieridentität muss manuell geprüft werden.",event_id=event_id,nature=IssueNature.UNSECURED_ASSIGNMENT))
-   tax=TaxEvent(stable_id("tax",event_id),event_id,"ADVANCE_TAX" if d.handler_id=="vorabpauschale" else d.handler_id,comps,evidence_ids=(eid,),depot_id=depot_id,isin=isin,bank_id="comdirect",tax_year=date(accrual.group(1)).year if accrual else None,accrual_date=date(accrual.group(1)) if accrual else None,booking_date=date(booking.group(1)) if booking else MissingValue.NOT_FOUND,advance_before_partial_exemption=dec(advance.group(1)) if advance else MissingValue.NOT_FOUND,taxable_amount=dec(taxable.group(1)) if taxable else MissingValue.NOT_FOUND,exemption_order_used=dec(fsa.group(1)) if fsa else MissingValue.UNKNOWN,loss_offset_used=dec(loss.group(1)) if loss else MissingValue.UNKNOWN,partial_exemption_rate=dec(partial.group(1))/Decimal("100") if partial else MissingValue.UNKNOWN,actually_withheld_tax=withheld)
+   accrual_evidence=ev("tax_accrual_date",accrual) if accrual else None
+   tax_year_evidence=ev("tax_year",stated_tax_year) if stated_tax_year else ev("tax_year",accrual) if accrual else None
+   consumption_evidence=ev("exemption_order_consumed",fsa) if fsa else None
+   tax_year=int(stated_tax_year.group(1)) if stated_tax_year else date(accrual.group(1)).year if accrual else None
+   tax=TaxEvent(
+       stable_id("tax",event_id),event_id,"ADVANCE_TAX" if d.handler_id=="vorabpauschale" else d.handler_id,
+       comps,evidence_ids=(eid,),depot_id=depot_id,isin=isin,bank_id="comdirect",tax_year=tax_year,
+       tax_year_evidence_ids=(tax_year_evidence,) if tax_year_evidence else (),
+       accrual_date=date(accrual.group(1)) if accrual else None,
+       accrual_date_evidence_ids=(accrual_evidence,) if accrual_evidence else (),
+       booking_date=date(booking.group(1)) if booking else MissingValue.NOT_FOUND,
+       advance_before_partial_exemption=dec(advance.group(1)) if advance else MissingValue.NOT_FOUND,
+       taxable_amount=dec(taxable.group(1)) if taxable else MissingValue.NOT_FOUND,
+       exemption_order_used=dec(fsa.group(1)) if fsa else MissingValue.UNKNOWN,
+       exemption_order_used_evidence_ids=(consumption_evidence,) if consumption_evidence else (),
+       loss_offset_used=dec(loss.group(1)) if loss else MissingValue.UNKNOWN,
+       partial_exemption_rate=dec(partial.group(1))/Decimal("100") if partial else MissingValue.UNKNOWN,
+       actually_withheld_tax=withheld)
    identity_evidence=tuple(ev(field,excerpt)
                            for field,value,excerpt in (("security_name",security_name,identity_name_excerpt),
                                                        ("security_wkn",column_wkn,identity_wkn_excerpt),
@@ -507,12 +577,11 @@ class ComdirectPlugin:
    candidate=dec(exec_match.group("qty"))
    if candidate>0: qty=candidate
   settlement=SETTLE.search(text,reversal.end() if reversal else 0); valuta=VALUTA.search(text)
+  column_date=_settlement_column_date(text) if valuta is None else None
   if reversal and settlement and (settlement.group("dir") or "").lower()!="lasten":
    settlement=None
   event_id=stable_id("event",doc.document_id,h,isin,settlement.group("a") if settlement else "")
   adjustment=LIQUIDATION_ADJUSTMENT.search(head) if kind=="REDEMPTION" else None
-  if (adjustment or reversal) and settlement:
-   valuta=SETTLEMENT_DATE.search(text,settlement.start(),settlement.end()) or valuta
   issues=[]
   identity = identity or _SecurityIdentity()
   labelled_wkn = next((match.group(1).upper() for match in WKN.finditer(text)), None)
@@ -538,7 +607,10 @@ class ComdirectPlugin:
                        "Kurs und Kurswert stehen in einer defekten eingebetteten Schrift und sind nicht eindeutig entschlüsselbar; sie bleiben leer.",
                        event_id=event_id,nature=IssueNature.MISSING_INFORMATION))
   event_ev=ev("economic_event",settlement if settlement else re.search(next(p for x,p in TITLES if x==h),text,re.I|re.S)); iban=IBAN.search(text); account_id=None; accounts=()
-  event_evidence=(event_ev,)
+  event_date=date(valuta.group(1)) if valuta else column_date[0] if column_date else None
+  event_date_type="value_date" if valuta or column_date and column_date[1]=="value_date" else "booking_date" if column_date else MissingValue.UNKNOWN
+  event_date_evidence=ev(event_date_type,valuta if valuta else column_date[2]) if valuta or column_date else None
+  event_evidence=(event_ev,)+( (event_date_evidence,) if event_date_evidence else () )
   if reversal:
    reversal_ev=ev("dividend_reversal",reversal)
    event_evidence+=(reversal_ev,)
@@ -566,7 +638,7 @@ class ComdirectPlugin:
     movement_type=(CashMovementType.REVERSAL if reversal else CashMovementType.OTHER if adjustment else CashMovementType.SECURITY_BUY if kind=="BUY" else
                    CashMovementType.SECURITY_SELL if kind in {"SELL","REDEMPTION"} else CashMovementType.DIVIDEND_CREDIT)
     cash=(CashMovement(stable_id("cash",event_id),event_id,dec(settlement.group("a"))*sign,settlement.group("cur"),cash_status,
-                       account_id=account_id,evidence_ids=(event_ev,),movement_type=movement_type),)
+                       account_id=account_id,evidence_ids=event_evidence,movement_type=movement_type),)
   # A dividend credit carries identity but is not a purchase, sale or depot
   # position change.  Never synthesize a SecurityMovement for it.
   security=() if adjustment or kind not in {"BUY", "SELL", "REDEMPTION"} or not(qty and isin) else (SecurityMovement(stable_id("security",event_id),event_id,isin,qty if kind=="BUY" else -qty,(event_ev,),depot_id),)
@@ -575,8 +647,8 @@ class ComdirectPlugin:
   if kind=="BUY" and cipher and not fees:
    fees=tuple(FeeEvent(stable_id("fee",event_id,k),"trading",k,amount,"EUR",date(valuta.group(1)) if valuta else date("01.01.1970"),FeeEffect.INCLUDED_IN_SETTLEMENT,doc.document_id,"comdirect",depot_id=depot_id,account_id=account_id,security_id=isin,transaction_id=event_id,evidence_ids=(event_ev,)) for k,amount in _cipher_fees(head,text[len(head):],cipher))
   # Die "Steuerliche Behandlung" eines Kaufs wirkt nur auf den Verrechnungstopf; ihre 0,00-Zeilen sind keine einbehaltene Steuer.
-  comps=tuple(TaxComponent(k,dec(m.group(1)),"EUR") for k,p in TAX for m in [re.search(p,text,re.I)] if m and (kind!="BUY" or dec(m.group(1))>0)) if not reversal else ()
-  taxes=(TaxEvent(stable_id("tax",event_id),event_id,"WITHHOLDING",comps,evidence_ids=(event_ev,),depot_id=depot_id,isin=isin,bank_id="comdirect",account_id=account_id),) if comps else ()
+  comps=tuple(TaxComponent(k,dec(m.group(1)),"EUR") for k,p in TAX for m in [re.search(p,text,re.I)] if m and (kind!="BUY" or dec(m.group(1))>0))
+  taxes=(TaxEvent(stable_id("tax",event_id),event_id,"REVERSAL_CORRECTION" if reversal else "WITHHOLDING",comps,evidence_ids=(event_ev,),depot_id=depot_id,isin=isin,bank_id="comdirect",account_id=account_id),) if comps else ()
   trades=()
   if not adjustment and kind in {"BUY","SELL","REDEMPTION"}:
    pm=PRICE.search(head); mm=MARKET_VALUE.search(head); gm=GROSS.search(head); fx=FX.search(head); nm=NAME.search(text); tm=TRADE_DATE.search(text); xm=EXECUTION_DATE.search(text); dm=TRADE_DAY.search(text)
@@ -585,7 +657,9 @@ class ComdirectPlugin:
    if not name_value: name_value=security_name
    price=dec(pm.group("a")) if pm else (dec(exec_match.group("price")) if exec_match else cipher[1] if cipher else None)
    market=dec(mm.group("a")) if mm else (dec(exec_match.group("market")) if exec_match else cipher[2] if cipher else None)
-   trades=(SecurityTrade(stable_id("trade",event_id),event_id,kind,name_value or MissingValue.NOT_FOUND,isin or MissingValue.NOT_FOUND,resolved_wkn or MissingValue.NOT_FOUND,qty if qty is not None else MissingValue.NOT_FOUND,date(tm.group(1)) if tm else (date(dm.group(1)) if dm else MissingValue.NOT_FOUND),date(xm.group(1)) if xm else MissingValue.NOT_FOUND,date(valuta.group(1)) if valuta else MissingValue.NOT_FOUND,price if price is not None else MissingValue.NOT_FOUND,(pm.group("cur1") or pm.group("cur2")) if pm and (pm.group("cur1") or pm.group("cur2")) else ("EUR" if price is not None and not pm else MissingValue.NOT_FOUND),market if market is not None else MissingValue.NOT_FOUND,dec(gm.group("a")) if gm else MissingValue.NOT_FOUND,dec(fx.group(1)) if fx else MissingValue.NOT_FOUND,dec(settlement.group("a")) if settlement else MissingValue.NOT_FOUND,settlement.group("cur") if settlement else MissingValue.NOT_FOUND,depot_id,account_id,(event_ev,)),)
+   trades=(SecurityTrade(stable_id("trade",event_id),event_id,kind,name_value or MissingValue.NOT_FOUND,isin or MissingValue.NOT_FOUND,resolved_wkn or MissingValue.NOT_FOUND,qty if qty is not None else MissingValue.NOT_FOUND,date(tm.group(1)) if tm else (date(dm.group(1)) if dm else MissingValue.NOT_FOUND),date(xm.group(1)) if xm else MissingValue.NOT_FOUND,date(valuta.group(1)) if valuta else column_date[0] if column_date and column_date[1]=="value_date" else MissingValue.NOT_FOUND,price if price is not None else MissingValue.NOT_FOUND,(pm.group("cur1") or pm.group("cur2")) if pm and (pm.group("cur1") or pm.group("cur2")) else ("EUR" if price is not None and not pm else MissingValue.NOT_FOUND),market if market is not None else MissingValue.NOT_FOUND,dec(gm.group("a")) if gm else MissingValue.NOT_FOUND,dec(fx.group(1)) if fx else MissingValue.NOT_FOUND,dec(settlement.group("a")) if settlement else MissingValue.NOT_FOUND,settlement.group("cur") if settlement else MissingValue.NOT_FOUND,depot_id,account_id,event_evidence,
+                      booking_date=column_date[0] if column_date and column_date[1]=="booking_date" else MissingValue.UNKNOWN,
+                      booking_date_evidence_ids=(event_date_evidence,) if column_date and column_date[1]=="booking_date" else ()),)
   identity_evidence=tuple(ev(label,name_excerpt if label=="security_name" else value)
                           for label,value in (("security_wkn",resolved_wkn),("security_isin",isin),("security_name",security_name)) if value)
   reference_matches=tuple(BANK_REFERENCE.finditer(text))
@@ -607,7 +681,9 @@ class ComdirectPlugin:
                        "COMDIRECT_BANK_REFERENCE_" + reference_status, IssueSeverity.WARNING,
                        "Bankreferenz ist nicht eindeutig bzw. formal ungültig.", event_id=event_id,
                        nature=IssueNature.UNSECURED_ASSIGNMENT))
-  event=FinancialEvent(event_id,doc.document_id,kind,date(valuta.group(1)) if valuta else None,cash,security,tax_events=taxes,fee_events=fees,evidence_ids=event_evidence,trades=trades,security_name=security_name or MissingValue.UNKNOWN,security_wkn=resolved_wkn or MissingValue.UNKNOWN,security_isin=isin or MissingValue.UNKNOWN,security_identity_evidence_ids=identity_evidence,bank_reference=reference,bank_reference_status=reference_status,bank_reference_evidence_ids=reference_evidence); return self.result(doc,d,evidence,(event,),depots,accounts,tuple(issues),links)
+  event=FinancialEvent(event_id,doc.document_id,kind,event_date,cash,security,tax_events=taxes,fee_events=fees,evidence_ids=event_evidence,trades=trades,security_name=security_name or MissingValue.UNKNOWN,security_wkn=resolved_wkn or MissingValue.UNKNOWN,security_isin=isin or MissingValue.UNKNOWN,security_identity_evidence_ids=identity_evidence,bank_reference=reference,bank_reference_status=reference_status,bank_reference_evidence_ids=reference_evidence,
+                       event_date_type=event_date_type,event_date_evidence_ids=(event_date_evidence,) if event_date_evidence else (),
+                       reversal_details=_reversal_details(text,ev) if reversal else None); return self.result(doc,d,evidence,(event,),depots,accounts,tuple(issues),links)
  def result(self,doc,d,evidence,events,depots=(),accounts=(),issues=(),links=(),tax_calculations=(),tax_carryforwards=()): return ParsedDocument(stable_id("result",doc.document_id,self.metadata.version),doc.document_id,self.metadata.plugin_id,self.metadata.version,d.handler_id,events=events,evidence=tuple(evidence),issues=issues,depots=depots,accounts=accounts,depot_account_links=links,tax_calculations=tax_calculations,tax_carryforwards=tax_carryforwards)
 
 FR_NAMES=("Girokonto","Tagesgeld PLUS-Konto","Tagesgeld PLUS","Tagesgeldkonto","Verrechnungskonto","O&F-Konto")

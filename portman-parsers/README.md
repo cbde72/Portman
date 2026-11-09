@@ -5,6 +5,19 @@ contains immutable DTOs, deterministic plugin selection, evidence tracking and
 bank-independent financial validation. It has no dependency on Portman V09,
 PDF Lab, GUI frameworks or persistence code.
 
+## Version 0.8.6
+
+Version `0.8.6` extends the tax-event result contract for V10-24 with separate
+evidence references for tax year, accrual date, and explicitly consumed
+exemption-order amounts. Comdirect extraction accepts a tax year only from an
+explicit tax-year label or an explicitly labeled tax accrual date. A generic
+`Freistellungsauftrag` amount is not treated as consumption; the amount must be
+labeled as consumed/used. It also preserves explicit date meaning and evidence
+for comdirect payment rows, and reports dividend-reversal matching facts in a
+separate `ReversalDetails` value. Reversal cash and tax corrections stay
+separate. The result schema is `1.8.0`, API `0.8`; schema `1.7.0` remains
+readable with empty evidence-reference defaults.
+
 ## Version 0.8.0
 
 Version `0.8.0` changes the public DTO/API contract to `0.7` and the serialized

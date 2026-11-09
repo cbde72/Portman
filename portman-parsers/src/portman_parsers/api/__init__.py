@@ -20,6 +20,7 @@ from .events import (
     FinancialEvent,
     Position,
     PositionSnapshot,
+    ReversalDetails,
     SecurityMovement,
     SecurityTrade,
     TaxComponent,
@@ -33,7 +34,7 @@ from .issues import Issue, IssueNature, IssueSeverity
 from .results import MissingValue, ParsedDocument, SCHEMA_VERSION as RESULT_SCHEMA_VERSION, normalize_result_payload, to_json_compatible
 from .values import FieldValue, ReviewStatus, ValueSource
 
-API_VERSION = "0.7"
+API_VERSION = "0.8"
 SCHEMA_VERSION = RESULT_SCHEMA_VERSION
 
 __all__ = [
@@ -44,6 +45,6 @@ __all__ = [
     "Issue", "IssueNature", "IssueSeverity",
     "FieldValue", "MissingValue", "ParsedDocument", "PdfDocument", "PdfPage", "Position",
     "ReviewStatus", "ValueSource",
-    "PositionSnapshot", "SecurityMovement", "SecurityTrade", "StatutoryBaseRate", "TaxApprovalStatus", "TaxComponent", "TaxEvent", "TaxRuleSet",
+    "PositionSnapshot", "ReversalDetails", "SecurityMovement", "SecurityTrade", "StatutoryBaseRate", "TaxApprovalStatus", "TaxComponent", "TaxEvent", "TaxRuleSet",
     "normalize_result_payload", "to_json_compatible",
 ]

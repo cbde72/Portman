@@ -57,7 +57,7 @@ def test_foreign_document_evidence_is_rejected_by_the_result_contract():
 def test_legacy_result_payload_gets_phase0_defaults_without_losing_values():
     legacy = {"schema_version": "1.5.0", "events": [{"event_id": "e", "amount": "1.25"}]}
     normalized = normalize_result_payload(legacy)
-    assert normalized["schema_version"] == "1.7.0"
+    assert normalized["schema_version"] == "1.8.0"
     assert normalized["events"][0]["amount"] == "1.25"
     assert normalized["events"][0]["bank_reference_status"] == "MISSING"
     assert normalized["events"][0]["bank_reference"] == "UNKNOWN"
@@ -69,7 +69,7 @@ def test_legacy_result_payload_gets_phase0_defaults_without_losing_values():
 def test_previous_current_schema_gets_additive_event_field_defaults():
     legacy = {"schema_version": "1.6.0", "events": [{"event_id": "e", "bank_reference": "R1"}]}
     normalized = normalize_result_payload(legacy)
-    assert normalized["schema_version"] == "1.7.0"
+    assert normalized["schema_version"] == "1.8.0"
     assert normalized["events"][0]["bank_reference"] == "R1"
     assert normalized["events"][0]["counterparty_evidence_ids"] == []
 

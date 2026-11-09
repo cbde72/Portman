@@ -187,6 +187,8 @@ class SecurityTrade:
     depot_id: str | None = None
     account_id: str | None = None
     evidence_ids: tuple[str, ...] = ()
+    booking_date: date | MissingValue = MissingValue.UNKNOWN
+    booking_date_evidence_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.trade_id or not self.event_id or self.side not in {"BUY", "SELL", "REDEMPTION"}:
@@ -200,6 +202,7 @@ class SecurityTrade:
             if isinstance(value, str) and not isinstance(value, MissingValue):
                 object.__setattr__(self, name, _currency(value))
         object.__setattr__(self, "evidence_ids", tuple(self.evidence_ids))
+        object.__setattr__(self, "booking_date_evidence_ids", tuple(self.booking_date_evidence_ids))
 
 
 @dataclass(frozen=True, slots=True)
@@ -374,6 +377,9 @@ class TaxEvent:
     loss_offset_used: Decimal | MissingValue = MissingValue.UNKNOWN
     acquisition_date: date | MissingValue = MissingValue.UNKNOWN
     approval_status: TaxApprovalStatus = TaxApprovalStatus.NOT_APPROVED
+    tax_year_evidence_ids: tuple[str, ...] = ()
+    accrual_date_evidence_ids: tuple[str, ...] = ()
+    exemption_order_used_evidence_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.tax_event_id or not self.event_id or not self.kind:
@@ -382,6 +388,8 @@ class TaxEvent:
             object.__setattr__(self, "taxable_basis", _decimal(self.taxable_basis))
         object.__setattr__(self, "components", tuple(self.components))
         object.__setattr__(self, "evidence_ids", tuple(self.evidence_ids))
+        for name in ("tax_year_evidence_ids", "accrual_date_evidence_ids", "exemption_order_used_evidence_ids"):
+            object.__setattr__(self, name, tuple(getattr(self, name)))
         object.__setattr__(self, "currency", _currency(self.currency))
         for name in ("assessment_basis", "advance_before_partial_exemption", "taxable_amount",
                      "stated_tax_liability", "actually_withheld_tax", "distributions", "start_value",
@@ -389,6 +397,50 @@ class TaxEvent:
             value = getattr(self, name)
             if isinstance(value, Decimal):
                 object.__setattr__(self, name, _decimal(value))
+
+
+@dataclass(frozen=True, slots=True)
+class ReversalDetails:
+    """Belegangaben zur stornierten Buchung, getrennt von der Stornoreferenz."""
+
+    original_reference: str | MissingValue = MissingValue.UNKNOWN
+    original_reference_evidence_ids: tuple[str, ...] = ()
+    original_ex_date: date | MissingValue = MissingValue.UNKNOWN
+    original_ex_date_evidence_ids: tuple[str, ...] = ()
+    original_payment_date: date | MissingValue = MissingValue.UNKNOWN
+    original_payment_date_evidence_ids: tuple[str, ...] = ()
+    original_business_date: date | MissingValue = MissingValue.UNKNOWN
+    original_business_date_evidence_ids: tuple[str, ...] = ()
+    original_value_date: date | MissingValue = MissingValue.UNKNOWN
+    original_value_date_evidence_ids: tuple[str, ...] = ()
+    original_booking_date: date | MissingValue = MissingValue.UNKNOWN
+    original_booking_date_evidence_ids: tuple[str, ...] = ()
+    quantity: Decimal | MissingValue = MissingValue.UNKNOWN
+    quantity_evidence_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in ("original_reference_evidence_ids", "original_ex_date_evidence_ids",
+                     "original_payment_date_evidence_ids", "original_business_date_evidence_ids",
+                     "original_value_date_evidence_ids", "original_booking_date_evidence_ids",
+                     "quantity_evidence_ids"):
+            object.__setattr__(self, name, tuple(getattr(self, name)))
+        if isinstance(self.quantity, Decimal):
+            object.__setattr__(self, "quantity", _decimal(self.quantity))
+        for value_name, evidence_name in (
+            ("original_reference", "original_reference_evidence_ids"),
+            ("original_ex_date", "original_ex_date_evidence_ids"),
+            ("original_payment_date", "original_payment_date_evidence_ids"),
+            ("original_business_date", "original_business_date_evidence_ids"),
+            ("original_value_date", "original_value_date_evidence_ids"),
+            ("original_booking_date", "original_booking_date_evidence_ids"),
+            ("quantity", "quantity_evidence_ids"),
+        ):
+            value = getattr(self, value_name)
+            evidence = getattr(self, evidence_name)
+            if value is MissingValue.UNKNOWN and evidence:
+                raise ValueError(f"unknown {value_name} cannot reference evidence")
+            if value is not MissingValue.UNKNOWN and not evidence:
+                raise ValueError(f"{value_name} requires evidence")
 
 
 @dataclass(frozen=True, slots=True)
@@ -449,6 +501,9 @@ class FinancialEvent:
     counterparty_evidence_ids: tuple[str, ...] = ()
     purpose: str | MissingValue = MissingValue.UNKNOWN
     purpose_evidence_ids: tuple[str, ...] = ()
+    event_date_type: str | MissingValue = MissingValue.UNKNOWN
+    event_date_evidence_ids: tuple[str, ...] = ()
+    reversal_details: ReversalDetails | None = None
 
     def __post_init__(self) -> None:
         if not self.event_id or not self.document_id or not self.kind:
@@ -459,6 +514,11 @@ class FinancialEvent:
         if self.bank_reference_status not in {"RECOGNIZED", "MISSING", "INVALID", "AMBIGUOUS"}:
             raise ValueError("invalid bank reference status")
         object.__setattr__(self, "bank_reference_evidence_ids", tuple(self.bank_reference_evidence_ids))
+        object.__setattr__(self, "event_date_evidence_ids", tuple(self.event_date_evidence_ids))
+        if self.event_date_type is not MissingValue.UNKNOWN and self.event_date_type not in {"booking_date", "value_date"}:
+            raise ValueError("event date type must be booking_date, value_date or UNKNOWN")
+        if self.event_date is None and (self.event_date_type is not MissingValue.UNKNOWN or self.event_date_evidence_ids):
+            raise ValueError("unknown event date cannot carry type or evidence")
         for name in ("counterparty", "purpose"):
             value = getattr(self, name)
             evidence_name = f"{name}_evidence_ids"

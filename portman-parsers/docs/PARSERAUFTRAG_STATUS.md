@@ -1,59 +1,70 @@
 # Parserauftrag – Bearbeitungsstand
 
 Abgleich mit `PortmanV10/portman-v10/docs/Parserauftrag.md` vom 9. November 2026.
-Die Statuspflege liegt im ParserLab; das V10-Repository wurde nicht geändert.
+Alle Änderungen dieser Bearbeitung liegen im Repository `PortmanParserLab`;
+das V10-Repository wurde nicht geändert.
 
 ## Abhakliste
 
-- [x] **Arbeitsphase A – Bestandsmatrix:** 42 Handler mit Status, Varianten,
-  DTO-/Feldbefund, Evidenz, Testabdeckung, Lücken und Confidence-Grenzen erfasst.
-  Ausführbarkeit wird ausdrücklich nicht als Formatfreigabe behandelt.
-- [x] **V10-31-Auswahl:** Baader `wertpapierabrechnung` ist als Zweitbeleg für
-  einen bestehenden Kauf/Verkauf festgehalten. Der Parserhandler existiert
-  bereits; diese Arbeit hat keinen weiteren V10-31-Dokumenttyp implementiert
-  oder freigeschaltet.
-- [x] **V10-40-Vertrag:** `ExchangeRate` verwendet positive exakte `Decimal`-Werte,
-  getrennte Basis-/Kurswährungen, Richtung „1 Basiswährung = Rate Kurswährung“,
-  optionale Belegwerte für Datum/Art sowie verpflichtende Evidence. Der JSON-
-  kompatible Decoder erhält Dezimalpräzision und weist Floats zurück.
+- [x] **Arbeitsphase A – Bestandsmatrix:** 42 Registry-Handler mit Status,
+  synthetisch belegten Varianten, DTO-/Feldbefund, Evidenz, Testabdeckung,
+  Lücken und Confidence-Grenzen. Ausführbarkeit wird nicht als Formatfreigabe
+  behandelt.
+- [x] **V10-31-Auswahl:** Baader `wertpapierabrechnung` bleibt die ausgewählte
+  Variante als Zweitbeleg zu einem existierenden Kauf/Verkauf. Parserhandler und
+  synthetische Kauf-/Verkaufsfälle sind vorhanden. Das erweitert weder V10s
+  Allowlist noch die Buchungswirkung.
+- [x] **V10-40-Vertrag:** Gerichteter `ExchangeRate`-Wert mit exakter Decimal-
+  Präzision, getrennten Währungen, fester Richtung und Evidence. Ausführung
+  bleibt auf ausdrücklich belegte Bank-of-Scotland-Zeilen begrenzt.
 - [x] **V10-52-Vertrag:** Gegenpartei und Zweck sind getrennte Rohtextfelder mit
-  je eigener Evidence-Liste und können unabhängig fehlen.
-- [x] **Begrenzte Parserextraktion:** Bank of Scotland übernimmt diese Felder
-  nur aus ausdrücklich gelabelten Werten derselben Buchungszeile. Unvollständige
-  und mehrdeutige Wechselkurse werden nicht ergänzt; Mehrdeutigkeit erzeugt
-  einen Hinweis. Nachbarzeilen werden nicht übertragen.
-- [x] **Versionen und Rückwärtslesbarkeit:** Paket `0.8.0`, API `0.7`, Ergebnis-
-  schema `1.7.0`; Schemata `1.5.0` und `1.6.0` werden additiv normalisiert.
-- [x] **Dokumentation und synthetische Prüfungen:** README, Handlermatrix und
-  diese Statusliste aktualisiert. Tests decken exakte Dezimalwerte, Richtung,
-  Evidenz, Sonderzeichen, lange/repetitive Rohwerte, unabhängiges Fehlen,
-  Mehrdeutigkeit und Zeilenisolation ab. Es wurden keine echten Belege
-  hinzugefügt.
-- [x] **Automatische Prüfung und Wheel:** vollständige Parsersuite bestanden;
-  `ruff check src tests` besteht ohne Findings. Das Paket-Wheel wurde gebaut,
-  in ein frisches Ziel installiert und importiert; API, Schema und der
-  Dezimal-Decoder wurden aus dem installierten Wheel geprüft.
-- [x] **Vertragsprüfung:** JSON-Serialisierung/Deserialisierung der neuen
-  Wechselkursdaten sowie Evidence, Präzision, Zeilenisolation, Mehrdeutigkeit
-  und Rückwärtsnormalisierung sind getestet. Das Parserpaket konfiguriert keinen
-  separaten Typprüfer.
+  eigenen Evidence-IDs. Die bestehende Extraktion bleibt auf explizite Labels in
+  derselben Bank-of-Scotland-Buchungszeile beschränkt.
+- [x] **V10-24 / Abschnitt 4.4:** `TaxEvent` führt getrennte Evidence-IDs für
+  Steuerjahr, steuerliches Zuflussdatum und ausdrücklich verbrauchten
+  Freistellungsauftrag. Das Jahr stammt nur aus einem expliziten Steuerjahr oder
+  dem belegten Zuflussdatum. Ein generischer Freistellungsauftragbetrag wird
+  nicht als Verbrauch ausgegeben. Schema `1.7.0` wird mit leeren Zusatzfeldern
+  auf `1.8.0` normalisiert.
+- [x] **V10-74 / Abschnitt 4.5:** Ein ausdrücklich betiteltes
+  Dividenden-/Ertragsstorno wird als `REVERSAL` ausgegeben. `ReversalDetails`
+  trennt Originalreferenz, Ex-Tag, Zahltag, Geschäftstag, Valuta, Buchungstag
+  und Stückzahl mit eigener Evidence vom Stornobeleg und dessen Referenz.
+  Stornobetrag und Steuerkorrekturen bleiben getrennt; fehlende Originalangaben
+  bleiben unbekannt. Normale Dividendengutschriften bleiben unverändert.
+- [x] **V10-76 / Abschnitt 4.6:** Ein Datum in der comdirect-Verrechnungszeile
+  wird nur bei eindeutiger Spaltenüberschrift `Valuta` oder `Buchungstag`
+  übernommen. `FinancialEvent` behält Datumsart und Evidence; bei Wertpapier-
+  geschäften wird ein Buchungstag separat vom Valutadatum ausgegeben. Unbeschriftete
+  Datumswerte bleiben unbekannt. Synthetische Regressionen decken Einlösung,
+  Kauf, Verkauf, Dividende und fehlende Datumsbedeutung ab.
+- [x] **§5.1-Variantenbefund:** ING, Baader, Deka und FNZ sind anhand der
+  vorhandenen positiven synthetischen Fälle sowie fachlichen Negativ-/Unbekannt-
+  fällen einzeln dokumentiert. Zusätzliche Layouts bleiben ohne konkrete
+  Einzelauswahl offen; fehlende negative Layout-Erkennung ist ausdrücklich
+  benannt.
+- [x] **API-/Schema-Versionierung:** Paket `0.8.6`, API `0.8`, Ergebnis-
+  schema `1.8.0`; ältere Ergebnis-Schemata `1.5.0`, `1.6.0` und `1.7.0`
+  werden rückwärts normalisiert.
+- [ ] **V10-Integration:** Parserpin, V10-Allowlist, Importregeln und Web-UI
+  sind nicht geändert und bleiben separate V10-Arbeiten.
 
-## Ausgeführte Prüfkommandos
+## Prüfung und Wheel
 
-```powershell
-python -m pytest -p no:cacheprovider --basetemp="C:\Users\chris\AppData\Local\Temp\opencode\pt"
-python -m ruff check src tests
-python -m pip wheel --no-deps --wheel-dir dist .
-python -m pip install --no-deps --target <temporärer Zielordner> dist\portman_parsers-0.8.0-py3-none-any.whl
-```
+Prüfstand am 9. November 2026:
 
-Ergebnis: **298 Tests bestanden**, Ruff ohne Findings; das installierte Wheel
-importiert als Paket `0.8.0` mit API `0.7` und Schema `1.7.0`.
+- Parsersuite: `321 passed`.
+- Ruff: `python -m ruff check src tests` – sauber.
+- `git diff --check` – sauber.
+- Wheel gebaut: `portman_parsers-0.8.6-py3-none-any.whl`.
+- Frische Installation in ein separates Zielverzeichnis erfolgreich; Import
+  bestätigt Paket `0.8.6`, API `0.8`, Schema `1.8.0` und neues TaxEvent-Feld.
+- SHA-256: `887359F34388207439548C108DFDE307852E39C1B9CA16D94E64EBD827B93596`.
 
-## Übergabe und Grenze
+## Übergabegrenze
 
-Der V10-Prüfstand dokumentiert weiterhin den Pin auf Parser `0.7.0` / API `0.6` /
-Schema `1.6.0`. Dieser ParserLab-Stand ist `0.8.0` / API `0.7` / Schema `1.7.0`.
-Die Integration und Pin-Änderung in V10 bleibt separat und wurde hier nicht
-vorgenommen. Die V10-Allowlist, Buchungswirkung und Weboberfläche sind nicht
-Bestandteil des Parserauftrags.
+Keine echten Belege wurden hinzugefügt. Die synthetischen Ergebnisse belegen nur
+die ausdrücklich genannten Textmuster, nicht alle comdirect-Layoutvarianten.
+V10s dokumentierter Parserpin `0.7.0` / API `0.6` / Schema `1.6.0` muss separat
+mit Paket `0.8.6` / API `0.8` / Schema `1.8.0` abgeglichen werden.
+Die V10-Integration ist daher ausdrücklich kein abgeschlossener ParserLab-Schritt.

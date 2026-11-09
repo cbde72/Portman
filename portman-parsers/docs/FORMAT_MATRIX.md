@@ -1,8 +1,8 @@
 # Parser- und Formatmatrix
 
 Stand: 9. November 2026
-Repository/Arbeitszweig/Ausgangscommit: `portman-parsers`, `codex/parser-pdf-lab`, `e32e272`
-Paket/API/Ergebnisschema: `0.8.0` / `0.7` / `1.7.0`
+Repository/Arbeitszweig/Ausgangscommit: `portman-parsers`, `codex/parser-pdf-lab`, `e9dcc47`
+Paket/API/Ergebnisschema: `0.8.6` / `0.8` / `1.8.0`
 
 ## Versionsabgleich und Aussagegrenze
 
@@ -10,11 +10,28 @@ V10s dokumentierter Pin zeigt auf Paket `0.7.0`, API `0.6`, Schema `1.6.0`, Comm
 
 Die aktuelle Registry hat 42 Handler: 35 mit `IMPLEMENTED`, sieben `METADATA_ONLY`. „Ausführbar“ bedeutet hier Registry-Implementierung und synthetische Tests, nicht geprüfte Abdeckung aller Originalbelege oder Layoutversionen einer Bank. Die im Folgenden genannten positiven und negativen Fälle sind synthetisch, soweit nicht ausdrücklich anders vermerkt. In dieser Bestandsaufnahme wurden keine realen Belege ausgewertet.
 
-`FinancialEvent` liefert je nach Handler Geld-/Wertpapierbewegungen, Steuer-/Kostenereignisse, Wertpapiergeschäfte, Referenzen und Belegfundstellen. Mit API `0.7` gibt es zusätzlich strukturierte gerichtete `ExchangeRate`-Werte sowie getrennte Gegenpartei-/Zweckfelder. In dieser Bestandsaufnahme belegt das nur der synthetisch geprüfte Bank-of-Scotland-Handler und nur für ausdrücklich gelabelte Werte in derselben Buchungszeile. Alte `SecurityTrade.exchange_rate`-Decimalwerte bleiben ungerichtet und werden nicht umgedeutet.
+`FinancialEvent` liefert je nach Handler Geld-/Wertpapierbewegungen, Steuer-/Kostenereignisse, Wertpapiergeschäfte, Referenzen und Belegfundstellen. Mit API `0.8` sind außerdem gerichtete `ExchangeRate`-Werte, getrennte Gegenpartei-/Zweckfelder, belegte Datumsarten und ein strukturierter Datensatz zur stornierten Dividendengutschrift verfügbar. FX und Gegenpartei/Zweck sind weiterhin nur für den synthetisch geprüften Bank-of-Scotland-Handler belegt. Comdirect-Datums- und Steuer-/Stornofelder verwenden getrennte Evidence-IDs und werden nur aus ausdrücklich gelabelten Angaben befüllt. Alte `SecurityTrade.exchange_rate`-Decimalwerte bleiben ungerichtet und werden nicht umgedeutet.
 
 **Confidence-Lesart:** `IMPLEMENTED` bedeutet, dass ein Handler ausführbar und mit mindestens synthetischen Fällen getestet ist; das ist mittlere Sicherheit nur für die genannten Fälle, keine Layoutfreigabe. Eine konkret dokumentierte Varianten-/Regressionstestfamilie erhöht die Sicherheit für genau diese Variante, nicht für andere Bankbelege. `METADATA_ONLY` hat keine Extraktionssicherheit. Für keine Variante liegt in dieser Bestandsaufnahme ein echter Belegnachweis vor; daher wird keine allgemeine hohe Formatqualität behauptet. Die Registry liefert Erkennung mit `Detection.confidence`; das ist keine Confidence der extrahierten Buchungswerte.
 
 ## Handlerübersicht
+
+## §5.1 – Variantenbefund ING, Baader, Deka und FNZ
+
+Der folgende Befund trennt vorhandene synthetische Nachweise von offenen
+Layoutentscheidungen. Er ist keine pauschale Freigabe für beliebige Bank-PDFs.
+
+| Quelle / Handler | Positiv nachgewiesene synthetische Fälle | Negative bzw. Unsicherheitsfälle | Nächster offener Auswahlpunkt |
+|---|---|---|---|
+| ING | Verkauf, Vorabpauschale, Steuererstattung, Dividendengutschrift mit Wiederanlage, Kauf sowie Depotauszug mit Summen-/Stückzahlabgleich (`tests/unit/test_ing.py`) | Nicht abstimmende Steuerkomponenten und Positionssumme werden abgewiesen; abweichende FX-Zwischensumme bleibt als Issue sichtbar | Für zusätzliche reale Layouts konkretes Dokument und Variante auswählen; aktuelle Nachweise stammen aus synthetischen Fixtures |
+| Baader | Wertpapierabrechnung Kauf/Verkauf, Dividendenstorno, Vorabpauschale, Übertrag und Quartalsaufstellung (`tests/unit/test_baader.py`) | Kryptoabrechnung wird nicht erkannt; unbestätigtes Storno und nicht abstimmbare Steuerkomponenten werden abgewiesen | V10-31 ist auf Wertpapierabrechnung als Zweitbeleg beschränkt; kein weiteres Layout ohne Einzelauswahl |
+| Deka | Quartalsbericht mit Positionen/Umsätzen, Ausschüttung und Wiederanlage, mehrseitiger Umsatzblock (`tests/unit/test_deka.py`) | Abweichender Übersichts-/Positionswert wird abgewiesen; fehlende Stückzahl bleibt UNKNOWN mit Hinweis, erzeugt keine erfundene Bewegung | Konkrete zusätzliche Berichtsversion/Layout auswählen; keine weiteren Varianten aus den Synthetikfällen ableiten |
+| FNZ/finvesto | Umsatzabrechnung mit Ausschüttung, Wiederanlage und Kauf; Depotauszug; dokumentierter Fremdwährungs-Steuerfall (`tests/unit/test_fnz_finvesto.py`) | Unbekanntes Verrechnungskonto wird nicht erfunden; Transaktionsfundstellen und Buchungsdatum werden getrennt; unterschiedliche Wertpapiere werden nicht als mögliche Dublette gewertet | Die vorhandenen Tests belegen keine explizite Ablehnung eines abweichenden PDF-Layouts; dafür zuerst konkrete Variante/Belegklasse auswählen |
+
+Die vorhandenen negativen Tests prüfen überwiegend fachliche Widersprüche und
+Unsicherheit, nicht die Erkennung jeder nicht unterstützten PDF-Layoutversion.
+Vor einer Ausweitung sind je gewählter Variante positive und negative
+Layoutproben als bereinigte oder synthetische Regression festzulegen.
 
 | Handler-ID | Plugin / Dokumenttyp | Implementierung und synthetisch geprüfte Variante | DTO-/Feldumfang und Fundstellen | Gegenpartei / Verwendungszweck | Status und bekannte Lücke |
 |---|---|---|---|---|---|
@@ -75,4 +92,4 @@ Die aktuelle Registry hat 42 Handler: 35 mit `IMPLEMENTED`, sieben `METADATA_ONL
 
 Für den ersten begrenzten V10-31-Kandidaten wurde bereits **Baader `wertpapierabrechnung` als Zweitbeleg für einen existierenden Kauf/Verkauf** ausgewählt. Der Parserhandler ist vorhanden und hat synthetische Kauf-/Verkaufs-, Gebühren-/Steuer-, Valuta-, Referenz-, Wiederholung- und Storno-Prüfungen. Die Auswahl ist eine Parserformat-Empfehlung für diese konkrete Handler-ID; sie erlaubt weder eigenständigen Baader-Cashimport noch pauschale Freigabe anderer Baader-Untertypen. Echte Baaderbelege und historische Layoutvarianten wurden nicht geprüft.
 
-Vor einer V10-Integration müssen beide Repositories den Parserstand und die Paket-/API-/Schema-Version explizit abgleichen. V10s dokumentierter 0.7.0-Pin liegt hinter diesem aktuellen 0.8.0-Checkout (API 0.7, Schema 1.7.0). Der Parserauftrag nimmt keine Änderung an V10s Allowlist, Speicherung, Buchungswirkung oder Oberfläche vor.
+Vor einer V10-Integration müssen beide Repositories den Parserstand und die Paket-/API-/Schema-Version explizit abgleichen. V10s dokumentierter 0.7.0-Pin liegt hinter diesem aktuellen 0.8.6-Checkout (API 0.8, Schema 1.8.0). Der Parserauftrag nimmt keine Änderung an V10s Allowlist, Speicherung, Buchungswirkung oder Oberfläche vor.

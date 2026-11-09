@@ -16,16 +16,19 @@ from portman_parsers.api import (
     FinancialEvent,
     MissingValue,
     ParsedDocument,
+    ReversalDetails,
+    normalize_result_payload,
+    TaxEvent,
     PdfDocument,
     PdfPage,
 )
 
 
 def test_api_and_schema_are_versioned():
-    assert __version__ == "0.8.5"
+    assert __version__ == "0.8.6"
     assert version("portman-parsers") == __version__
-    assert API_VERSION == "0.7"
-    assert SCHEMA_VERSION == "1.7.0"
+    assert API_VERSION == "0.8"
+    assert SCHEMA_VERSION == "1.8.0"
 
 
 def test_pdf_document_orders_pages_without_binary_payload():
@@ -69,6 +72,68 @@ def test_evidence_references_document_and_serialization_is_deterministic():
     first = result.to_json()
     assert first == result.to_json()
     assert json.loads(first)["evidence"][0]["document_id"] == "doc-1"
+
+
+def test_tax_field_evidence_ids_are_serialized_and_legacy_schema_gets_defaults():
+    tax = TaxEvent(
+        "tax-1", "event-1", "ADVANCE_TAX", tax_year=2025,
+        tax_year_evidence_ids=("ev-year",), accrual_date=date(2025, 12, 31),
+        accrual_date_evidence_ids=("ev-date",), exemption_order_used=Decimal("12.34"),
+        exemption_order_used_evidence_ids=("ev-consumption",),
+    )
+    event = FinancialEvent("event-1", "doc-1", "TAX_NOTICE", tax_events=(tax,))
+    result = ParsedDocument("result-1", "doc-1", "demo", "1", "handler", events=(event,))
+    serialized = json.loads(result.to_json())
+    tax_payload = serialized["events"][0]["tax_events"][0]
+    assert tax_payload["tax_year_evidence_ids"] == ["ev-year"]
+    assert tax_payload["accrual_date_evidence_ids"] == ["ev-date"]
+    assert tax_payload["exemption_order_used_evidence_ids"] == ["ev-consumption"]
+
+    legacy = {
+        "schema_version": "1.7.0",
+        "events": [{"tax_events": [{"tax_year": 2025, "accrual_date": "2025-12-31"}]}],
+    }
+    from portman_parsers.api import normalize_result_payload
+    normalized = normalize_result_payload(legacy)
+    assert normalized["schema_version"] == "1.8.0"
+    assert normalized["events"][0]["tax_events"][0]["tax_year_evidence_ids"] == []
+    assert normalized["events"][0]["tax_events"][0]["accrual_date_evidence_ids"] == []
+    assert normalized["events"][0]["tax_events"][0]["exemption_order_used_evidence_ids"] == []
+
+
+def test_event_date_and_dividend_reversal_details_preserve_meaning_and_evidence():
+    details = ReversalDetails(
+        original_reference="ORIGINAL-12345", original_reference_evidence_ids=("ev-ref",),
+        original_ex_date=date(2025, 5, 1), original_ex_date_evidence_ids=("ev-ex",),
+        original_payment_date=date(2025, 5, 3), original_payment_date_evidence_ids=("ev-pay",),
+        original_business_date=date(2025, 5, 2), original_business_date_evidence_ids=("ev-business",),
+        original_value_date=date(2025, 5, 3), original_value_date_evidence_ids=("ev-value",),
+        original_booking_date=date(2025, 5, 4), original_booking_date_evidence_ids=("ev-book",),
+        quantity=Decimal("1.2500000000000000001"), quantity_evidence_ids=("ev-qty",),
+    )
+    event = FinancialEvent(
+        "event-1", "doc-1", "REVERSAL", event_date=date(2025, 5, 5),
+        event_date_type="value_date", event_date_evidence_ids=("ev-date",),
+        reversal_details=details,
+    )
+    evidence = tuple(Evidence(evidence_id, "doc-1", 1, evidence_id) for evidence_id in
+                     ("ev-ref", "ev-ex", "ev-pay", "ev-business", "ev-value", "ev-book", "ev-qty", "ev-date"))
+    payload = json.loads(ParsedDocument("result-1", "doc-1", "demo", "1", "handler",
+                                        events=(event,), evidence=evidence).to_json())
+    event_payload = payload["events"][0]
+    assert event_payload["event_date_type"] == "value_date"
+    assert event_payload["event_date_evidence_ids"] == ["ev-date"]
+    reversal = event_payload["reversal_details"]
+    assert reversal["original_reference"] == "ORIGINAL-12345"
+    assert reversal["quantity"] == "1.2500000000000000001"
+    assert reversal["original_payment_date_evidence_ids"] == ["ev-pay"]
+    assert reversal["original_business_date_evidence_ids"] == ["ev-business"]
+    assert reversal["original_value_date_evidence_ids"] == ["ev-value"]
+
+    legacy = normalize_result_payload({"schema_version": "1.7.0", "events": [{}]})
+    assert legacy["events"][0]["event_date_type"] == MissingValue.UNKNOWN.value
+    assert legacy["events"][0]["event_date_evidence_ids"] == []
+    assert legacy["events"][0]["reversal_details"] is None
 
 
 def test_structured_exchange_rate_and_payment_fields_round_trip_with_exact_evidence():
