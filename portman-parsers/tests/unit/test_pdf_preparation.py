@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal
 import json
 from pathlib import Path
 import sys
@@ -145,6 +146,41 @@ def test_embedded_u_font_artifacts_trigger_pdfium_fallback(monkeypatch, tmp_path
     assert "Christoph Buehring" in page.normalized_text
     assert "UUUUUUUU" not in page.normalized_text
     assert page.original_text == original
+
+
+def test_comdirect_ertragsgutschrift_mit_s_glyphen_nutzt_kuerzeren_pdfium_text(monkeypatch, tmp_path):
+    from portman_parsers.extraction import preparation
+    from portman_parsers.registry import default_registry
+
+    damaged = "\n".join(("comdirect", "Abrechnung Ertragsgutschrift", *("S" * 120 for _ in range(4))))
+    corrected = """@@@@@@@@@@@@@@@@
+comdirect
+Abrechnung Ertragsgutschrift
+Depotbestand Wertpapier-Bezeichnung WKN/ISIN
+per 12.10.2023 716460 SAP SE
+STK 5,000 DE0007164600 Inhaber-Aktien o.N.
+zahlbar ab 15.10.2023
+Verrechnung über Konto (IBAN) Valuta Zu Ihren Gunsten vor Steuern
+DE00 0000 0000 0000 0000 01 EUR 18.10.2023 EUR 10,50
+(Referenz-Nr. ABCD01234567).
+"""
+    path = tmp_path / "ertragsgutschrift.pdf"
+    path.write_bytes(simple_pdf(damaged))
+    monkeypatch.setattr(preparation, "_pdfium_page", lambda _path, _page: (corrected, (), "test-pdfium"))
+
+    document = extract_pdf(path)
+    assert document.pages[0].extraction_method == "pdfium:suspicious"
+    assert "REPEATED_S_GLYPH_RUN" in document.metadata["text_preparation_json"]
+    registry = default_registry()
+    result = registry.parse(document, registry.select(document))
+    event, = result.events
+    assert (event.security_wkn, event.security_isin, event.security_name) == (
+        "716460", "DE0007164600", "SAP SE Inhaber-Aktien o.N.",
+    )
+    assert event.bank_reference == "ABCD01234567"
+    assert event.cash_movements[0].amount == Decimal("10.50")
+    assert not result.issues
+    assert all(item.page_number == 1 for item in result.evidence)
 
 
 class _ConcurrencyTracker:
