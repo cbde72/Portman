@@ -1,4 +1,8 @@
 import json
+from datetime import date
+from decimal import Decimal
+
+import pytest
 
 from portman_parsers.api import PdfDocument, PdfPage
 from portman_parsers.plugins import ComdirectPlugin
@@ -67,6 +71,45 @@ def test_name_fragments_before_identifiers_are_combined_in_row_order():
     )
     assert identity.name == "SAP SE Inhaber-Aktien o.N."
     assert identity.status == "RECOGNIZED"
+
+
+@pytest.mark.parametrize("identity_row", [
+    "STK 0,750 XF0001234560 Nachbesserung Liquizlg. ETF987",
+    "STK 0,750 Nachbesserung Liquidationszahlung ETF987 XF0001234560",
+])
+def test_liquidationsnachzahlung_ist_beleg_ohne_buchung_oder_stueckabgang(identity_row):
+    document = _document(
+        "comdirect\nAbrechnung Einlösung\nDepotbestand Wertpapier-Bezeichnung WKN/ISIN\n"
+        "per 26.01.2023 123456 Musterfonds UCITS ETF\n"
+        f"{identity_row}\n"
+        "Einlösung zum Kurs von 0,20 USD fällig per: 27.01.2023\n"
+        "Verrechnung über Konto (IBAN) Valuta Zu Ihren Gunsten vor Steuern\n"
+        "DE00 0000 0000 0000 0000 01 EUR 03.04.2023 EUR 0,15\n"
+        "(Referenz-Nr. ABCD01234567)."
+    )
+    plugin = ComdirectPlugin()
+    result = plugin.parse(document, plugin.detect(document)[0])
+    event, = result.events
+    assert (event.security_wkn, event.security_isin) == ("123456", "XF0001234560")
+    assert "ETF987" in event.security_name
+    assert event.bank_reference == "ABCD01234567"
+    assert event.event_date == date(2023, 4, 3)
+    assert not event.security_movements and not event.trades
+    cash, = event.cash_movements
+    assert (cash.amount, cash.currency, cash.status.value) == (Decimal("0.15"), "EUR", "EXPECTED")
+    assert {issue.code for issue in result.issues} == {"COMDIRECT_LIQUIDATION_ADJUSTMENT_UNCONFIRMED"}
+    assert any(evidence.field == "reference_holding_quantity" and evidence.excerpt == "STK 0,750"
+               for evidence in result.evidence)
+
+
+def test_liquidationsnachzahlung_mit_zweiter_kennung_bleibt_mehrdeutig():
+    identity = _identity(
+        "Depotbestand Wertpapier-Bezeichnung WKN/ISIN\n"
+        "per 26.01.2023 123456 Musterfonds UCITS ETF\n"
+        "STK 0,750 Nachbesserung Liquizlg. ETF987 XF0001234560\n"
+        "654321\n"
+    )
+    assert identity.status == "AMBIGUOUS"
 
 
 def test_multi_line_name_continuation_between_identifier_rows_is_used():

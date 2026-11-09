@@ -29,6 +29,8 @@ IDENTITY_REASON={"PARTIAL":"nur WKN oder Name erkannt","AMBIGUOUS":"mehrere Kenn
 QTY=re.compile(r"(?:Stk\.?|STK)\s*("+A+r")",re.I); NENNWERT_QTY=re.compile(r"Nennwert\s*Zum\s*(?:Misch)?Kurs\s*von\s*(?:St\.?|Stk\.?)\s*("+A+r")",re.I); VALUTA=re.compile(r"(?:Valuta|zahlbar\s+ab)\s*("+D+r")",re.I)
 WKN=re.compile(r"\bWKN\s*:?[ \t]*([A-Z0-9]{6})\b",re.I)
 BANK_REFERENCE=re.compile(r"\bReferenz(?:\s*[- ]?\s*(?:Nr\.?|nummer))?\s*:?\s*([A-Z0-9][A-Z0-9\s]*?)(?=\s*(?:Referenz|Depotnummer|Depotnr|Kundennummer|comdirect)|[^A-Z0-9\s]|\n\s*\n|$)",re.I)
+LIQUIDATION_ADJUSTMENT=re.compile(r"\bNachbesserung[ \t]+(?:Liquizlg\b\.?|Liquidationszahlung\b)(?:[ \t]+(ETF[0-9]{3})\b)?",re.I)
+SETTLEMENT_DATE=re.compile(r"\b("+D+r")\b")
 TRADE_LINE=re.compile(r"Stk\.?\s*(?P<qty>\d[\d.]*(?:,\d+)?)\s+(?P<name>.+?)\s*,?\s*WKN\s*/\s*ISIN\s*:\s*(?P<wkn>[A-Z0-9]{6})\s*/\s*(?P<isin>[A-Z]{2}[A-Z0-9]{9}\d)",re.I)
 TRADE_EXECUTION=re.compile(r"Nennwert\s*Zum\s*(?:Misch)?Kurs\s*von\s*(?:St\.\s*(?P<qty>\d[\d.]*(?:,\d+)?)\s*)?EUR\s*(?P<price>\d[\d.]*(?:,\d+)?)\s*Kurswert\s*:?\s*EUR\s*(?P<market>"+A+r")",re.I)
 TRADE_DAY=re.compile(r"(?:Wertpapierkauf|Wertpapierverkauf|Gesch\.ftsvorgang)\s*Nr\.?\s*\d+\s*vom\s*("+D+r")",re.I)
@@ -270,6 +272,10 @@ def _extract_comdirect_security_identity(text, layout_text=None):
     isins = _isin_candidates(row)
     raw_isin_spans = [match.span() for match in ISIN_CANDIDATE.finditer(row)]
     wkns = _wkn_candidates(row, raw_isin_spans)
+    adjustment_name = LIQUIDATION_ADJUSTMENT.search(row)
+    if adjustment_name and adjustment_name.group(1) and any(item[3] for item in isins) and any(entry[2] for entry in parsed):
+     # Die ETF-Nummer in der Namensfortsetzung ist keine zweite WKN.
+     wkns = [item for item in wkns if item[1:] != adjustment_name.span(1)]
     parsed.append((row, isins, wkns))
    identifier_rows = [position for position, (_, isins, wkns) in enumerate(parsed) if isins or wkns]
    if not identifier_rows:
@@ -497,6 +503,9 @@ class ComdirectPlugin:
    candidate=dec(exec_match.group("qty"))
    if candidate>0: qty=candidate
   settlement=SETTLE.search(text); valuta=VALUTA.search(text); event_id=stable_id("event",doc.document_id,h,isin,settlement.group("a") if settlement else "")
+  adjustment=LIQUIDATION_ADJUSTMENT.search(head) if kind=="REDEMPTION" else None
+  if adjustment and settlement:
+   valuta=SETTLEMENT_DATE.search(text,settlement.start(),settlement.end()) or valuta
   issues=[]
   identity = identity or _SecurityIdentity()
   labelled_wkn = next((match.group(1).upper() for match in WKN.finditer(text)), None)
@@ -522,6 +531,15 @@ class ComdirectPlugin:
                        "Kurs und Kurswert stehen in einer defekten eingebetteten Schrift und sind nicht eindeutig entschlüsselbar; sie bleiben leer.",
                        event_id=event_id,nature=IssueNature.MISSING_INFORMATION))
   event_ev=ev("economic_event",settlement if settlement else re.search(next(p for x,p in TITLES if x==h),text,re.I|re.S)); iban=IBAN.search(text); account_id=None; accounts=()
+  event_evidence=(event_ev,)
+  if adjustment:
+   adjustment_ev=ev("liquidation_adjustment",adjustment)
+   event_evidence+=(adjustment_ev,)
+   if quantity_match:
+    event_evidence+=(ev("reference_holding_quantity",quantity_match),)
+   issues.append(Issue(stable_id("issue",event_id,"liquidation-adjustment"),"COMDIRECT_LIQUIDATION_ADJUSTMENT_UNCONFIRMED",
+                       IssueSeverity.WARNING,"Liquidationsnachzahlung: Der gebuchte Endbetrag ist separat zu belegen.",
+                       evidence_id=adjustment_ev,event_id=event_id,nature=IssueNature.MISSING_INFORMATION))
   if iban:
    iban_value=re.sub(r"\s","",iban.group(0)); ie=ev("iban",iban); account_id=stable_id("account","comdirect",iban_value); accounts=(Account(account_id,bank_name=fv("comdirect",ie),iban=fv(iban_value,ie),currency=fv("EUR",ie)),)
   links=()
@@ -530,10 +548,15 @@ class ComdirectPlugin:
   cash=()
   security=()
   if settlement:
-    sign=-1 if kind=="BUY" or (settlement.group("dir") or "").lower()=="lasten" else 1; cash=(CashMovement(stable_id("cash",event_id),event_id,dec(settlement.group("a"))*sign,settlement.group("cur"),CashStatus.ACTUAL if account_id else CashStatus.EXPECTED,account_id=account_id,evidence_ids=(event_ev,),movement_type=CashMovementType.SECURITY_BUY if kind=="BUY" else CashMovementType.SECURITY_SELL if kind in {"SELL","REDEMPTION"} else CashMovementType.DIVIDEND_CREDIT),)
+    sign=-1 if kind=="BUY" or (settlement.group("dir") or "").lower()=="lasten" else 1
+    cash_status=CashStatus.ACTUAL if account_id and not adjustment else CashStatus.EXPECTED
+    movement_type=(CashMovementType.OTHER if adjustment else CashMovementType.SECURITY_BUY if kind=="BUY" else
+                   CashMovementType.SECURITY_SELL if kind in {"SELL","REDEMPTION"} else CashMovementType.DIVIDEND_CREDIT)
+    cash=(CashMovement(stable_id("cash",event_id),event_id,dec(settlement.group("a"))*sign,settlement.group("cur"),cash_status,
+                       account_id=account_id,evidence_ids=(event_ev,),movement_type=movement_type),)
   # A dividend credit carries identity but is not a purchase, sale or depot
   # position change.  Never synthesize a SecurityMovement for it.
-  security=() if kind not in {"BUY", "SELL", "REDEMPTION"} or not(qty and isin) else (SecurityMovement(stable_id("security",event_id),event_id,isin,qty if kind=="BUY" else -qty,(event_ev,),depot_id),)
+  security=() if adjustment or kind not in {"BUY", "SELL", "REDEMPTION"} or not(qty and isin) else (SecurityMovement(stable_id("security",event_id),event_id,isin,qty if kind=="BUY" else -qty,(event_ev,),depot_id),)
   fees=tuple(FeeEvent(stable_id("fee",event_id,k),"trading",k,dec(m.group(1)),"EUR",date(valuta.group(1)) if valuta else date("01.01.1970"),FeeEffect.INCLUDED_IN_SETTLEMENT,doc.document_id,"comdirect",depot_id=depot_id,account_id=account_id,security_id=isin,transaction_id=event_id,evidence_ids=(event_ev,)) for k,p in FEE for m in [re.search(p,text,re.I)] if m)
   # Nur Käufe: dort ist die Belastung vor Steuern genau Kurswert plus Entgelte; Klartextgebühren haben Vorrang.
   if kind=="BUY" and cipher and not fees:
@@ -541,7 +564,7 @@ class ComdirectPlugin:
   # Die "Steuerliche Behandlung" eines Kaufs wirkt nur auf den Verrechnungstopf; ihre 0,00-Zeilen sind keine einbehaltene Steuer.
   comps=tuple(TaxComponent(k,dec(m.group(1)),"EUR") for k,p in TAX for m in [re.search(p,text,re.I)] if m and (kind!="BUY" or dec(m.group(1))>0)); taxes=(TaxEvent(stable_id("tax",event_id),event_id,"WITHHOLDING",comps,evidence_ids=(event_ev,),depot_id=depot_id,isin=isin,bank_id="comdirect",account_id=account_id),) if comps else ()
   trades=()
-  if kind in {"BUY","SELL","REDEMPTION"}:
+  if not adjustment and kind in {"BUY","SELL","REDEMPTION"}:
    pm=PRICE.search(head); mm=MARKET_VALUE.search(head); gm=GROSS.search(head); fx=FX.search(head); nm=NAME.search(text); tm=TRADE_DATE.search(text); xm=EXECUTION_DATE.search(text); dm=TRADE_DAY.search(text)
    name_value=nm.group(1).strip() if nm else None
    if name_value and not re.sub(r"[/\s]|WPKNR|WKN|ISIN","",name_value,flags=re.I): name_value=None
@@ -570,7 +593,7 @@ class ComdirectPlugin:
                        "COMDIRECT_BANK_REFERENCE_" + reference_status, IssueSeverity.WARNING,
                        "Bankreferenz ist nicht eindeutig bzw. formal ungültig.", event_id=event_id,
                        nature=IssueNature.UNSECURED_ASSIGNMENT))
-  event=FinancialEvent(event_id,doc.document_id,kind,date(valuta.group(1)) if valuta else None,cash,security,tax_events=taxes,fee_events=fees,evidence_ids=(event_ev,),trades=trades,security_name=security_name or MissingValue.UNKNOWN,security_wkn=resolved_wkn or MissingValue.UNKNOWN,security_isin=isin or MissingValue.UNKNOWN,security_identity_evidence_ids=identity_evidence,bank_reference=reference,bank_reference_status=reference_status,bank_reference_evidence_ids=reference_evidence); return self.result(doc,d,evidence,(event,),depots,accounts,tuple(issues),links)
+  event=FinancialEvent(event_id,doc.document_id,kind,date(valuta.group(1)) if valuta else None,cash,security,tax_events=taxes,fee_events=fees,evidence_ids=event_evidence,trades=trades,security_name=security_name or MissingValue.UNKNOWN,security_wkn=resolved_wkn or MissingValue.UNKNOWN,security_isin=isin or MissingValue.UNKNOWN,security_identity_evidence_ids=identity_evidence,bank_reference=reference,bank_reference_status=reference_status,bank_reference_evidence_ids=reference_evidence); return self.result(doc,d,evidence,(event,),depots,accounts,tuple(issues),links)
  def result(self,doc,d,evidence,events,depots=(),accounts=(),issues=(),links=(),tax_calculations=(),tax_carryforwards=()): return ParsedDocument(stable_id("result",doc.document_id,self.metadata.version),doc.document_id,self.metadata.plugin_id,self.metadata.version,d.handler_id,events=events,evidence=tuple(evidence),issues=issues,depots=depots,accounts=accounts,depot_account_links=links,tax_calculations=tax_calculations,tax_carryforwards=tax_carryforwards)
 
 FR_NAMES=("Girokonto","Tagesgeld PLUS-Konto","Tagesgeld PLUS","Tagesgeldkonto","Verrechnungskonto","O&F-Konto")
