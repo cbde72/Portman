@@ -148,14 +148,19 @@ def test_embedded_u_font_artifacts_trigger_pdfium_fallback(monkeypatch, tmp_path
     assert page.original_text == original
 
 
-def test_comdirect_ertragsgutschrift_mit_s_glyphen_nutzt_kuerzeren_pdfium_text(monkeypatch, tmp_path):
+@pytest.mark.parametrize(("glyph", "title"), [
+    ("S", "Ertragsgutschrift"),
+    ("R", "Dividendengutschrift"),
+    ("x", "Ertragsgutschrift"),
+])
+def test_comdirect_gutschrift_mit_glyphen_nutzt_kuerzeren_pdfium_text(monkeypatch, tmp_path, glyph, title):
     from portman_parsers.extraction import preparation
     from portman_parsers.registry import default_registry
 
-    damaged = "\n".join(("comdirect", "Abrechnung Ertragsgutschrift", *("S" * 120 for _ in range(4))))
-    corrected = """@@@@@@@@@@@@@@@@
+    damaged = "\n".join(("comdirect", f"Abrechnung {title}", *(glyph * 120 for _ in range(4))))
+    corrected = f"""@@@@@@@@@@@@@@@@
 comdirect
-Abrechnung Ertragsgutschrift
+Abrechnung {title}
 Depotbestand Wertpapier-Bezeichnung WKN/ISIN
 per 12.10.2023 716460 SAP SE
 STK 5,000 DE0007164600 Inhaber-Aktien o.N.
@@ -170,7 +175,7 @@ DE00 0000 0000 0000 0000 01 EUR 18.10.2023 EUR 10,50
 
     document = extract_pdf(path)
     assert document.pages[0].extraction_method == "pdfium:suspicious"
-    assert "REPEATED_S_GLYPH_RUN" in document.metadata["text_preparation_json"]
+    assert "REPEATED_LETTER_GLYPH_RUN" in document.metadata["text_preparation_json"]
     registry = default_registry()
     result = registry.parse(document, registry.select(document))
     event, = result.events
@@ -181,6 +186,22 @@ DE00 0000 0000 0000 0000 01 EUR 18.10.2023 EUR 10,50
     assert event.cash_movements[0].amount == Decimal("10.50")
     assert not result.issues
     assert all(item.page_number == 1 for item in result.evidence)
+
+
+def test_einzelne_buchstabenfolge_bleibt_erhalten(tmp_path, monkeypatch):
+    from portman_parsers.extraction import preparation
+
+    text = "Referenz RRRRRRRRRRRRRRRR\nBetrag EUR 10,50"
+    path = tmp_path / "sample.pdf"
+    path.write_bytes(simple_pdf(text))
+
+    def unexpected_fallback(_path, _page):
+        pytest.fail("Eine einzelne Buchstabenfolge soll keinen Fallback auslösen")
+
+    monkeypatch.setattr(preparation, "_pdfium_page", unexpected_fallback)
+    document = extract_pdf(path)
+    assert document.pages[0].extraction_method == "pypdf:ok"
+    assert text in document.pages[0].text
 
 
 class _ConcurrencyTracker:

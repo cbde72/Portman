@@ -9,6 +9,7 @@ loads a PDF library.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import asdict, dataclass
 import re
 import threading
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-PREPARATION_VERSION = "7.3.1"
+PREPARATION_VERSION = "7.3.2"
 # PDFium is a native library without thread synchronisation.  Parallel PDF Lab
 # workers that hit the PDFium fallback used to corrupt the process heap
 # (Windows 0xc0000374) while opening documents and reading text pages.  All
@@ -27,7 +28,7 @@ _PDFIUM_LOCK = threading.RLock()
 _REPLACEMENT = "\ufffd"
 _ARTIFACT_TOKEN = re.compile(r"\b[A-Z]{1,4}\d{4,10}\b")
 _AT_RUN = re.compile(r"@{8,}")
-_S_RUN = re.compile(r"S{16,}")
+_LETTER_GLYPH_RUN = re.compile(r"([A-Za-z])\1{15,}")
 _U_RUN_LINE = re.compile(r"(?m)^[ \\t]*U{16,}[ \\t]*$")
 _NUMBER = re.compile(r"[-+]?\d+(?:[,.]\d+)?")
 
@@ -112,10 +113,10 @@ def _diagnose(text: str) -> tuple[str, ...]:
         diagnostics.append("REPEATED_SUSPICIOUS_TOKEN_SP010000")
     if _AT_RUN.search(text):
         diagnostics.append("REPEATED_AT_GLYPH_RUN")
-    # Alte eingebettete Schriften bilden auch Leerraum auf S ab.
-    # Mehrere lange Läufe kennzeichnen eine defekte Textebene.
-    if len(_S_RUN.findall(text)) >= 3:
-        diagnostics.append("REPEATED_S_GLYPH_RUN")
+    # Falsch dekodierte Leerzeichen erscheinen als lange Folgen desselben
+    # Buchstabens. Das konkrete Zeichen hängt von der eingebetteten Schrift ab.
+    if any(count >= 3 for count in Counter(_LETTER_GLYPH_RUN.findall(text)).values()):
+        diagnostics.append("REPEATED_LETTER_GLYPH_RUN")
     if _U_RUN_LINE.search(text):
         diagnostics.append("ISOLATED_REPEATED_U_GLYPH_LINE")
     if re.search(r"U{12,}", text):
@@ -138,7 +139,7 @@ def _quality(text: str, diagnostics: Iterable[str]) -> str:
     diagnostics = tuple(diagnostics)
     if not text.strip():
         return "NO_TEXT"
-    severe = {"UNICODE_REPLACEMENT_CHARACTER", "LOW_CHARACTER_VARIETY", "REPEATED_S_GLYPH_RUN"}
+    severe = {"UNICODE_REPLACEMENT_CHARACTER", "LOW_CHARACTER_VARIETY", "REPEATED_LETTER_GLYPH_RUN"}
     if severe.intersection(diagnostics):
         return "UNRELIABLE"
     if "REPEATED_U_GLYPH_RUN" in diagnostics:
