@@ -3,9 +3,6 @@ from pathlib import Path
 import subprocess
 import sys
 
-import portman_parsers.api
-
-
 ROOT = Path(__file__).parents[2]
 SOURCE = ROOT / "src" / "portman_parsers"
 

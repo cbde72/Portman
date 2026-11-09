@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from enum import StrEnum
+from typing import Any, Mapping
 
 from .values import MissingValue
 
@@ -202,6 +203,55 @@ class SecurityTrade:
 
 
 @dataclass(frozen=True, slots=True)
+class ExchangeRate:
+    """Belegter Kurs: eine Einheit der Basiswährung entspricht rate Kurseinheiten."""
+
+    exchange_rate_id: str
+    event_id: str
+    rate: Decimal
+    base_currency: str
+    quote_currency: str
+    rate_date: date | MissingValue = MissingValue.UNKNOWN
+    rate_type: str | MissingValue = MissingValue.UNKNOWN
+    evidence_ids: tuple[str, ...] = ()
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "ExchangeRate":
+        """Rebuild an ExchangeRate from its JSON-compatible dictionary."""
+        raw_rate = payload["rate"]
+        if isinstance(raw_rate, float):
+            raise TypeError("exchange rate JSON value must preserve Decimal as a string")
+        rate = raw_rate if isinstance(raw_rate, Decimal) else Decimal(str(raw_rate))
+        raw_date = payload.get("rate_date", MissingValue.UNKNOWN.value)
+        rate_date = MissingValue.UNKNOWN if raw_date == MissingValue.UNKNOWN.value else date.fromisoformat(raw_date)
+        raw_type = payload.get("rate_type", MissingValue.UNKNOWN.value)
+        rate_type = MissingValue.UNKNOWN if raw_type == MissingValue.UNKNOWN.value else raw_type
+        return cls(
+            str(payload["exchange_rate_id"]), str(payload["event_id"]), rate,
+            str(payload["base_currency"]), str(payload["quote_currency"]), rate_date, rate_type,
+            tuple(payload.get("evidence_ids", ())),
+        )
+
+    def __post_init__(self) -> None:
+        if not self.exchange_rate_id or not self.event_id:
+            raise ValueError("exchange-rate and parent-event identities are required")
+        object.__setattr__(self, "rate", _decimal(self.rate))
+        if not self.rate.is_finite() or self.rate <= 0:
+            raise ValueError("exchange rate must be finite and positive")
+        object.__setattr__(self, "base_currency", _currency(self.base_currency))
+        object.__setattr__(self, "quote_currency", _currency(self.quote_currency))
+        if self.base_currency == self.quote_currency:
+            raise ValueError("exchange-rate currencies must be different")
+        if self.rate_date is not MissingValue.UNKNOWN and not isinstance(self.rate_date, date):
+            raise TypeError("exchange-rate date must be a date or UNKNOWN")
+        if self.rate_type is not MissingValue.UNKNOWN and (not isinstance(self.rate_type, str) or not self.rate_type.strip()):
+            raise ValueError("exchange-rate type must be a non-empty string or UNKNOWN")
+        object.__setattr__(self, "evidence_ids", tuple(self.evidence_ids))
+        if not self.evidence_ids:
+            raise ValueError("exchange rate requires evidence")
+
+
+@dataclass(frozen=True, slots=True)
 class TaxComponent:
     kind: str
     amount: Decimal
@@ -394,17 +444,33 @@ class FinancialEvent:
     bank_reference: str | MissingValue = MissingValue.UNKNOWN
     bank_reference_status: str = "MISSING"
     bank_reference_evidence_ids: tuple[str, ...] = ()
+    exchange_rates: tuple[ExchangeRate, ...] = ()
+    counterparty: str | MissingValue = MissingValue.UNKNOWN
+    counterparty_evidence_ids: tuple[str, ...] = ()
+    purpose: str | MissingValue = MissingValue.UNKNOWN
+    purpose_evidence_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.event_id or not self.document_id or not self.kind:
             raise ValueError("event identity, document identity and kind are required")
-        for name in ("cash_movements", "security_movements", "tax_events", "cost_events", "evidence_ids", "fee_events", "trades"):
+        for name in ("cash_movements", "security_movements", "tax_events", "cost_events", "evidence_ids", "fee_events", "trades", "exchange_rates"):
             object.__setattr__(self, name, tuple(getattr(self, name)))
         object.__setattr__(self, "security_identity_evidence_ids", tuple(self.security_identity_evidence_ids))
         if self.bank_reference_status not in {"RECOGNIZED", "MISSING", "INVALID", "AMBIGUOUS"}:
             raise ValueError("invalid bank reference status")
         object.__setattr__(self, "bank_reference_evidence_ids", tuple(self.bank_reference_evidence_ids))
-        children = (*self.cash_movements, *self.security_movements, *self.tax_events, *self.cost_events, *self.trades)
+        for name in ("counterparty", "purpose"):
+            value = getattr(self, name)
+            evidence_name = f"{name}_evidence_ids"
+            evidence_ids = tuple(getattr(self, evidence_name))
+            object.__setattr__(self, evidence_name, evidence_ids)
+            if value is not MissingValue.UNKNOWN and (not isinstance(value, str) or not value.strip()):
+                raise ValueError(f"{name} must be a non-empty raw string or UNKNOWN")
+            if value is not MissingValue.UNKNOWN and not evidence_ids:
+                raise ValueError(f"{name} requires evidence")
+            if value is MissingValue.UNKNOWN and evidence_ids:
+                raise ValueError(f"unknown {name} cannot reference evidence")
+        children = (*self.cash_movements, *self.security_movements, *self.tax_events, *self.cost_events, *self.trades, *self.exchange_rates)
         if any(child.event_id != self.event_id for child in children):
             raise ValueError("all child records must reference their parent event")
 

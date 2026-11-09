@@ -4,7 +4,13 @@ from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
 from itertools import product
 import re
-from portman_parsers.api import *
+from portman_parsers.api import (
+    Account, AccountBalance, AccountFunction, AccountType, AdvanceTaxCalculation, AdvanceTaxCarryforward,
+    CashMovement, CashMovementType, CashStatus, CostEvent, CostInformationType, Depot, DepotAccountLink,
+    DepotPosition, DepotSnapshot, DepotType, Detection, Evidence, FeeEffect, FeeEvent, FieldValue,
+    FinancialEvent, Issue, IssueNature, IssueSeverity, MissingValue, ParsedDocument, ReviewStatus,
+    SecurityMovement, SecurityTrade, TaxApprovalStatus, TaxComponent, TaxEvent,
+)
 from portman_parsers.registry.allowlist import APPROVED_PLUGINS
 from portman_parsers.utilities import stable_id
 
@@ -774,7 +780,7 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
  def parse(self,doc,d):
   text=doc.text; ev,fv,evidence=evidence_recorder(doc,self.metadata.plugin_id,d.handler_id,self.metadata.version)
   deferred_evidence=[]
-  header=re.search(r"Finanzreport\s+Nr\.?\s*(\S*)",text,re.I); header_ev=ev("document_type",header)
+  header=re.search(r"Finanzreport\s+Nr\.?\s*(\S*)",text,re.I); ev("document_type",header)
   period=re.search(r"(?:Berichtszeitraum|Zeitraum)\s*:?[ \t]*("+D+r")\s*(?:bis|-)\s*("+D+r")",text,re.I)
   report_dates={hit.group(1) for hit in FR_REPORT_DATE.finditer(text)}
   report_date=report_dates.pop() if len(report_dates)==1 else None

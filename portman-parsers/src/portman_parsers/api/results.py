@@ -17,8 +17,8 @@ from .issues import Issue
 from .values import FieldValue, MissingValue
 
 
-SCHEMA_VERSION = "1.6.0"
-LEGACY_SCHEMA_VERSIONS = frozenset({"1.5.0"})
+SCHEMA_VERSION = "1.7.0"
+LEGACY_SCHEMA_VERSIONS = frozenset({"1.5.0", "1.6.0"})
 
 
 def normalize_result_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -41,6 +41,11 @@ def normalize_result_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
             event.setdefault("bank_reference", MissingValue.UNKNOWN.value)
             event.setdefault("bank_reference_status", "MISSING")
             event.setdefault("bank_reference_evidence_ids", [])
+            event.setdefault("exchange_rates", [])
+            event.setdefault("counterparty", MissingValue.UNKNOWN.value)
+            event.setdefault("counterparty_evidence_ids", [])
+            event.setdefault("purpose", MissingValue.UNKNOWN.value)
+            event.setdefault("purpose_evidence_ids", [])
     result["schema_version"] = SCHEMA_VERSION
     return result
 

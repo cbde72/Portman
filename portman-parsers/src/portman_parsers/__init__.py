@@ -2,7 +2,7 @@
 
 from .api import API_VERSION, SCHEMA_VERSION
 
-__version__ = "0.7.3"
+__version__ = "0.8.0"
 
 __all__ = ["API_VERSION", "SCHEMA_VERSION", "__version__"]
 

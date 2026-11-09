@@ -1,10 +1,9 @@
-from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
-from portman_parsers.api import AccountType, PdfDocument, PdfPage
+from portman_parsers.api import AccountType, MissingValue, PdfDocument, PdfPage
 from portman_parsers.plugins import BankOfScotlandPlugin
 from portman_parsers.plugins.bank_of_scotland import BankOfScotlandParseError
 
@@ -83,3 +82,77 @@ def test_mult_page_statement_preserves_page_evidence():
 
 def test_reimport_is_deterministic():
     assert parse().to_json() == parse().to_json()
+
+
+def test_labeled_counterparty_purpose_and_explicit_rate_are_row_scoped():
+    marked = TEXT.replace(
+        "Überweisung 100,00",
+        "Überweisung 1 USD = 0,923456 EUR Auftraggeber: Beispiel GmbH "
+        "Verwendungszweck: Rechnung 42 100,00",
+    )
+    result = parse(marked)
+    first, second = result.events[:2]
+    assert first.counterparty == "Beispiel GmbH"
+    assert first.purpose == "Rechnung 42"
+    assert first.exchange_rates[0].rate == Decimal("0.923456")
+    assert first.exchange_rates[0].base_currency == "USD"
+    assert first.exchange_rates[0].quote_currency == "EUR"
+    assert first.exchange_rates[0].evidence_ids
+    assert first.counterparty_evidence_ids and first.purpose_evidence_ids
+    evidence_by_id = {item.evidence_id: item for item in result.evidence}
+    assert evidence_by_id[first.counterparty_evidence_ids[0]].field == "counterparty"
+    assert evidence_by_id[first.purpose_evidence_ids[0]].field == "purpose"
+    assert evidence_by_id[first.exchange_rates[0].evidence_ids[0]].field == "exchange_rate"
+    assert second.counterparty is MissingValue.UNKNOWN
+    assert second.purpose is MissingValue.UNKNOWN
+    assert second.exchange_rates == ()
+
+
+def test_ambiguous_labeled_counterparties_are_not_selected():
+    marked = TEXT.replace(
+        "Überweisung 100,00",
+        "Überweisung Auftraggeber: Eins GmbH Empfänger: Zwei GmbH 100,00",
+    )
+    result = parse(marked)
+    assert result.events[0].counterparty is MissingValue.UNKNOWN
+    assert result.events[0].counterparty_evidence_ids == ()
+    assert "COUNTERPARTY_AMBIGUOUS" in {issue.code for issue in result.issues}
+
+
+def test_counterparty_and_long_purpose_are_independent_raw_values():
+    purpose = "Übertrag ÄÖÜß-00042 / Rechnung 00042 " + ("Zusatztext " * 24)
+    marked = TEXT.replace(
+        "Überweisung 100,00",
+        f"Überweisung Zahlungsempfänger: Müller & Söhne AG Verwendungszweck: {purpose}100,00",
+    )
+    event = parse(marked).events[0]
+    assert event.counterparty == "Müller & Söhne AG"
+    assert event.purpose == purpose.strip()
+    assert event.exchange_rates == ()
+
+
+def test_multiple_explicit_exchange_rates_are_left_unknown_with_warning():
+    marked = TEXT.replace(
+        "Überweisung 100,00",
+        "Überweisung 1 USD = 0,923 EUR 1 GBP = 1,120 EUR 100,00",
+    )
+    result = parse(marked)
+    assert result.events[0].exchange_rates == ()
+    assert "EXCHANGE_RATE_AMBIGUOUS" in {issue.code for issue in result.issues}
+
+
+def test_counterparty_and_purpose_can_be_missing_independently():
+    party_only = parse(TEXT.replace(
+        "Überweisung 100,00", "Überweisung Zahlungsempfänger: Beispiel AG 100,00")).events[0]
+    purpose_only = parse(TEXT.replace(
+        "Überweisung 100,00", "Überweisung Verwendungszweck: Rechnung 100,00")).events[0]
+    assert party_only.counterparty == "Beispiel AG"
+    assert party_only.purpose is MissingValue.UNKNOWN
+    assert purpose_only.counterparty is MissingValue.UNKNOWN
+    assert purpose_only.purpose == "Rechnung"
+
+
+def test_incomplete_exchange_rate_pair_stays_unknown():
+    result = parse(TEXT.replace(
+        "Überweisung 100,00", "Überweisung 1 USD = 0,923456 100,00"))
+    assert result.events[0].exchange_rates == ()

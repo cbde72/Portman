@@ -12,7 +12,7 @@ from decimal import Decimal
 import re
 
 from portman_parsers.api import (
-    AdvanceTaxCalculation, AdvanceTaxCarryforward, CashMovement, CashMovementType,
+    AdvanceTaxCalculation, CashMovement, CashMovementType,
     CashStatus, Detection, Evidence, FeeEffect, FeeEvent, FinancialEvent,
     Issue, IssueNature, IssueSeverity, MissingValue, ParsedDocument,
     SecurityMovement, SecurityTrade, TaxApprovalStatus, TaxComponent, TaxEvent,

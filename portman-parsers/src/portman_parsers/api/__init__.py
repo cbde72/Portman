@@ -13,6 +13,7 @@ from .events import (
     CashStatus,
     CostEvent,
     CostInformationType,
+    ExchangeRate,
     FeeAllocation,
     FeeEffect,
     FeeEvent,
@@ -32,12 +33,12 @@ from .issues import Issue, IssueNature, IssueSeverity
 from .results import MissingValue, ParsedDocument, SCHEMA_VERSION as RESULT_SCHEMA_VERSION, normalize_result_payload, to_json_compatible
 from .values import FieldValue, ReviewStatus, ValueSource
 
-API_VERSION = "0.6"
+API_VERSION = "0.7"
 SCHEMA_VERSION = RESULT_SCHEMA_VERSION
 
 __all__ = [
     "API_VERSION", "SCHEMA_VERSION", "Account", "AccountBalance", "AccountFunction", "AccountType", "AdvanceTaxCalculation", "AdvanceTaxCarryforward", "AllocationStatus",
-    "CashMovement", "CashMovementType", "CashStatus", "CostEvent", "CostInformationType",
+    "CashMovement", "CashMovementType", "CashStatus", "CostEvent", "CostInformationType", "ExchangeRate",
     "Depot", "DepotAccountLink", "DepotPosition", "DepotSnapshot", "DepotType",
     "Detection", "Evidence", "FeeAllocation", "FeeEffect", "FeeEvent", "FinancialEvent",
     "Issue", "IssueNature", "IssueSeverity",

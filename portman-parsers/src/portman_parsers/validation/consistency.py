@@ -36,6 +36,13 @@ def validate_parsed_document(result: ParsedDocument) -> tuple[Issue, ...]:
                         event.security_identity_evidence_ids)
         evidence_issues(f"Event {event.event_id} bank reference", event.event_id,
                         event.bank_reference_evidence_ids)
+        evidence_issues(f"Event {event.event_id} counterparty", event.event_id,
+                        event.counterparty_evidence_ids)
+        evidence_issues(f"Event {event.event_id} purpose", event.event_id,
+                        event.purpose_evidence_ids)
+        for exchange_rate in event.exchange_rates:
+            evidence_issues(f"Exchange rate {exchange_rate.exchange_rate_id}", event.event_id,
+                            exchange_rate.evidence_ids)
         for trade in event.trades:
             evidence_issues(f"Trade {trade.trade_id}", event.event_id, trade.evidence_ids)
         for movement in (*event.cash_movements, *event.security_movements):

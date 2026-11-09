@@ -11,6 +11,7 @@ from portman_parsers.api import (
     SCHEMA_VERSION,
     CashMovement,
     CashStatus,
+    ExchangeRate,
     Evidence,
     FinancialEvent,
     MissingValue,
@@ -21,10 +22,10 @@ from portman_parsers.api import (
 
 
 def test_api_and_schema_are_versioned():
-    assert __version__ == "0.7.3"
+    assert __version__ == "0.8.0"
     assert version("portman-parsers") == __version__
-    assert API_VERSION == "0.6"
-    assert SCHEMA_VERSION == "1.6.0"
+    assert API_VERSION == "0.7"
+    assert SCHEMA_VERSION == "1.7.0"
 
 
 def test_pdf_document_orders_pages_without_binary_payload():
@@ -68,6 +69,62 @@ def test_evidence_references_document_and_serialization_is_deterministic():
     first = result.to_json()
     assert first == result.to_json()
     assert json.loads(first)["evidence"][0]["document_id"] == "doc-1"
+
+
+def test_structured_exchange_rate_and_payment_fields_round_trip_with_exact_evidence():
+    evidence = (
+        Evidence("ev-rate", "doc-1", 1, "exchange_rate", "1 USD = 0.923456 EUR"),
+        Evidence("ev-party", "doc-1", 1, "counterparty", "Auftraggeber: Beispiel GmbH"),
+        Evidence("ev-purpose", "doc-1", 1, "purpose", "Verwendungszweck: Rechnung Ä-17"),
+    )
+    rate = ExchangeRate("fx-1", "event-1", Decimal("0.9234560001"), "USD", "EUR",
+                        date(2026, 2, 3), evidence_ids=("ev-rate",))
+    event = FinancialEvent(
+        "event-1", "doc-1", "CASH_BOOKING", counterparty="Beispiel GmbH",
+        counterparty_evidence_ids=("ev-party",), purpose="Rechnung Ä-17",
+        purpose_evidence_ids=("ev-purpose",), exchange_rates=(rate,),
+    )
+    result = ParsedDocument("result-1", "doc-1", "demo", "1", "handler",
+                            events=(event,), evidence=evidence)
+    payload = json.loads(result.to_json())["events"][0]
+    assert payload["counterparty"] == "Beispiel GmbH"
+    assert payload["purpose"] == "Rechnung Ä-17"
+    assert payload["exchange_rates"][0]["rate"] == "0.9234560001"
+    assert payload["exchange_rates"][0]["base_currency"] == "USD"
+    assert payload["exchange_rates"][0]["quote_currency"] == "EUR"
+    assert ExchangeRate.from_dict(payload["exchange_rates"][0]) == rate
+    assert payload["exchange_rates"][0]["evidence_ids"] == ["ev-rate"]
+
+
+def test_exchange_rate_deserializer_rejects_float_precision_loss():
+    payload = {
+        "exchange_rate_id": "fx-1", "event_id": "event-1", "rate": 0.923456,
+        "base_currency": "USD", "quote_currency": "EUR", "evidence_ids": ["ev-1"],
+    }
+    with pytest.raises(TypeError, match="Decimal as a string"):
+        ExchangeRate.from_dict(payload)
+
+
+@pytest.mark.parametrize("rate", [Decimal("0"), Decimal("-1"), Decimal("NaN"), Decimal("Infinity")])
+def test_structured_exchange_rate_must_be_finite_and_positive(rate):
+    with pytest.raises(ValueError, match="finite and positive"):
+        ExchangeRate("fx-1", "event-1", rate, "USD", "EUR", evidence_ids=("ev-1",))
+
+
+def test_structured_exchange_rate_requires_different_currencies_and_evidence():
+    with pytest.raises(ValueError, match="different"):
+        ExchangeRate("fx-1", "event-1", Decimal("1.1"), "EUR", "EUR", evidence_ids=("ev-1",))
+    with pytest.raises(ValueError, match="requires evidence"):
+        ExchangeRate("fx-1", "event-1", Decimal("1.1"), "USD", "EUR")
+    with pytest.raises(ValueError, match="currency"):
+        ExchangeRate("fx-1", "event-1", Decimal("1.1"), "US", "EUR", evidence_ids=("ev-1",))
+
+
+def test_structured_event_values_require_their_own_evidence():
+    with pytest.raises(ValueError, match="counterparty requires evidence"):
+        FinancialEvent("event-1", "doc-1", "CASH_BOOKING", counterparty="Beispiel GmbH")
+    with pytest.raises(ValueError, match="purpose requires evidence"):
+        FinancialEvent("event-1", "doc-1", "CASH_BOOKING", purpose="Rechnung 17")
 
 
 def test_duplicate_evidence_ids_are_rejected():

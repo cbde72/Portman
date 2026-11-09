@@ -5,6 +5,25 @@ contains immutable DTOs, deterministic plugin selection, evidence tracking and
 bank-independent financial validation. It has no dependency on Portman V09,
 PDF Lab, GUI frameworks or persistence code.
 
+## Version 0.8.0
+
+Version `0.8.0` changes the public DTO/API contract to `0.7` and the serialized
+result schema to `1.7.0`. `FinancialEvent.exchange_rates` carries explicit
+currency pairs and direction (`1 base_currency = rate quote_currency`), with
+optional rate date/type and evidence. Events also expose independently sourced
+`counterparty` and `purpose` strings, each with its own evidence identifiers.
+`ExchangeRate.from_dict` restores the exact decimal, date, and evidence IDs from
+the JSON-compatible DTO shape; JSON floats are rejected to avoid precision loss.
+Unknown values remain `MissingValue.UNKNOWN`; the parser does not infer these
+fields from surrounding text or identifiers. The Bank of Scotland statement
+handler currently extracts only explicitly labeled counterparty/purpose values
+and explicitly directed rates from the same booking row.
+
+Result payloads with schemas `1.5.0` and `1.6.0` remain readable through
+`normalize_result_payload`, which supplies unknown/empty defaults and returns
+the current schema shape. Existing unstructured `SecurityTrade.exchange_rate`
+values are not silently converted into directed `ExchangeRate` entries.
+
 ## Version 0.7.1
 
 Version `0.7.1` adds a separate legacy parser path for historical comdirect

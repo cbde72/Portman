@@ -11,9 +11,8 @@ from decimal import Decimal
 
 import pytest
 
-from portman_parsers.api import (Account, AccountBalance, CashMovement, CashMovementType, CashStatus,
-                                 DepotAccountLink, DepotPosition, DepotSnapshot, Depot, Evidence,
-                                 FieldValue, FinancialEvent, MissingValue, ParsedDocument, PdfDocument, PdfPage)
+from portman_parsers.api import (Account, Evidence, FieldValue, MissingValue, ParsedDocument,
+                                 PdfDocument, PdfPage)
 from portman_parsers.plugins.comdirect import (ComdirectFinanzreportPlugin, ComdirectPlugin,
                                                evidence_page, evidence_recorder, _page_for_offset)
 

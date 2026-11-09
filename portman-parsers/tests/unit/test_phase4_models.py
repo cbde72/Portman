@@ -3,7 +3,7 @@ from decimal import Decimal
 
 from portman_parsers.api import (
     Account, AccountFunction, AccountType, CashMovement, CashMovementType, CashStatus,
-    Depot, DepotAccountLink, FieldValue,
+    DepotAccountLink, FieldValue,
 )
 from portman_parsers.validation import (
     deduplicate_cash_movements, resolve_depot_account, validate_internal_transfer,
