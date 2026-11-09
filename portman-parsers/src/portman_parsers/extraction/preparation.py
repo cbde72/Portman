@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-PREPARATION_VERSION = "7.3.2"
+PREPARATION_VERSION = "7.3.3"
 # PDFium is a native library without thread synchronisation.  Parallel PDF Lab
 # workers that hit the PDFium fallback used to corrupt the process heap
 # (Windows 0xc0000374) while opening documents and reading text pages.  All
@@ -28,7 +28,7 @@ _PDFIUM_LOCK = threading.RLock()
 _REPLACEMENT = "\ufffd"
 _ARTIFACT_TOKEN = re.compile(r"\b[A-Z]{1,4}\d{4,10}\b")
 _AT_RUN = re.compile(r"@{8,}")
-_LETTER_GLYPH_RUN = re.compile(r"([A-Za-z])\1{15,}")
+_WORD_GLYPH_RUN = re.compile(r"(\w)\1{15,}")
 _U_RUN_LINE = re.compile(r"(?m)^[ \\t]*U{16,}[ \\t]*$")
 _NUMBER = re.compile(r"[-+]?\d+(?:[,.]\d+)?")
 
@@ -115,7 +115,8 @@ def _diagnose(text: str) -> tuple[str, ...]:
         diagnostics.append("REPEATED_AT_GLYPH_RUN")
     # Falsch dekodierte Leerzeichen erscheinen als lange Folgen desselben
     # Buchstabens. Das konkrete Zeichen hängt von der eingebetteten Schrift ab.
-    if any(count >= 3 for count in Counter(_LETTER_GLYPH_RUN.findall(text)).values()):
+    repeated_letters = Counter(glyph for glyph in _WORD_GLYPH_RUN.findall(text) if glyph.isalpha())
+    if any(count >= 3 for count in repeated_letters.values()):
         diagnostics.append("REPEATED_LETTER_GLYPH_RUN")
     if _U_RUN_LINE.search(text):
         diagnostics.append("ISOLATED_REPEATED_U_GLYPH_LINE")

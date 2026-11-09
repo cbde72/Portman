@@ -152,6 +152,7 @@ def test_embedded_u_font_artifacts_trigger_pdfium_fallback(monkeypatch, tmp_path
     ("S", "Ertragsgutschrift"),
     ("R", "Dividendengutschrift"),
     ("x", "Ertragsgutschrift"),
+    ("ü", "Ertragsgutschrift"),
 ])
 def test_comdirect_gutschrift_mit_glyphen_nutzt_kuerzeren_pdfium_text(monkeypatch, tmp_path, glyph, title):
     from portman_parsers.extraction import preparation
@@ -188,15 +189,19 @@ DE00 0000 0000 0000 0000 01 EUR 18.10.2023 EUR 10,50
     assert all(item.page_number == 1 for item in result.evidence)
 
 
-def test_einzelne_buchstabenfolge_bleibt_erhalten(tmp_path, monkeypatch):
+@pytest.mark.parametrize("reference", [
+    "Referenz RRRRRRRRRRRRRRRR",
+    "Referenz 1111111111111111\nBeleg 1111111111111111\nAuftrag 1111111111111111",
+])
+def test_gueltige_referenzen_loesen_keinen_glyphenfallback_aus(tmp_path, monkeypatch, reference):
     from portman_parsers.extraction import preparation
 
-    text = "Referenz RRRRRRRRRRRRRRRR\nBetrag EUR 10,50"
+    text = f"{reference}\nBetrag EUR 10,50"
     path = tmp_path / "sample.pdf"
     path.write_bytes(simple_pdf(text))
 
     def unexpected_fallback(_path, _page):
-        pytest.fail("Eine einzelne Buchstabenfolge soll keinen Fallback auslösen")
+        pytest.fail("Gültige Referenzen sollen keinen Fallback auslösen")
 
     monkeypatch.setattr(preparation, "_pdfium_page", unexpected_fallback)
     document = extract_pdf(path)
