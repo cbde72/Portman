@@ -5,15 +5,13 @@ contains immutable DTOs, deterministic plugin selection, evidence tracking and
 bank-independent financial validation. It has no dependency on Portman V09,
 PDF Lab, GUI frameworks or persistence code.
 
-## Version 0.8.7
+## Version 0.8.8
 
-Version `0.8.7` completes the selected V10 parser work for Finanzreport booking
-boundaries, structured security identity and bank references, and source-linked
-document diagnostics. Explicitly directed comdirect FX rates are exposed through
-the existing `ExchangeRate` DTO; unlabelled scalar rates remain unchanged.
-Depot snapshots now expose a source-linked custody type when the report labels
-it. The API is `0.9` and result schema `1.9.0`; schemas `1.5.0` through `1.8.0`
-remain readable with unknown defaults for new fields.
+Version `0.8.8` adds source-linked purchase value, gain/loss and accrued interest
+to comdirect depot positions, and recognizes the Finanzreport 2017 WKN-only
+layout and overview total. Unrecognized depot contents now produce an explicit
+issue. The API is `0.10` and result schema `1.10.0`; schemas `1.5.0` through
+`1.9.0` remain readable with unknown defaults for new fields.
 
 Earlier `0.8.6` work added separate evidence references for tax year, accrual
 date, and explicitly consumed exemption-order amounts. Comdirect accepts a tax

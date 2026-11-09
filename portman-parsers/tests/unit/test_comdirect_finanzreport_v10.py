@@ -261,3 +261,82 @@ Depotgesamtwert 20,00 EUR"""
     assert "A1JX52" in evidence_by_id[position.security_id.evidence_ids[0]].excerpt
     assert "Girosammelverwahrung" in evidence_by_id[position.custody_type.evidence_ids[0]].excerpt
     assert "2,000 10,00 USD 20,00" in evidence_by_id[position.quantity.evidence_ids[0]].excerpt
+
+
+def test_finanzreport_position_financial_details_have_values_and_source_evidence():
+    text = """comdirect
+Finanzreport Nr. 7 per 31.01.2026
+Depotnummer: 123456
+Depot
+A1JX52 / Girosammelverwahrung
+Muster ETF Welt
+2,000 10,00 EUR 20,00
++0,00
+15,00 +5,00
+Depotgesamtwert 20,00 EUR"""
+    source = PdfDocument("synthetic-position-details", "e" * 64, (PdfPage(1, text),))
+    plugin = ComdirectFinanzreportPlugin()
+    result = plugin.parse(source, plugin.detect(source)[0])
+
+    position = result.depot_snapshots[0].positions[0]
+    assert position.purchase_value.value == Decimal("15.00")
+    assert position.purchase_value_currency.value == "EUR"
+    assert position.gain_loss.value == Decimal("5.00")
+    assert position.accrued_interest.value == Decimal("0.00")
+    assert position.accrued_interest.evidence_ids
+    evidence_by_id = {item.evidence_id: item for item in result.evidence}
+    assert evidence_by_id[position.purchase_value.evidence_ids[0]].excerpt == "15,00 +5,00"
+    assert evidence_by_id[position.gain_loss.evidence_ids[0]].excerpt == "15,00 +5,00"
+    restored = normalize_result_payload(json.loads(result.to_json()))
+    restored_position = restored["depot_snapshots"][0]["positions"][0]
+    assert restored_position["purchase_value"]["value"] == "15.00"
+    assert restored_position["gain_loss"]["value"] == "5.00"
+
+
+def test_finanzreport_2017_layout_recognizes_wkn_only_and_depot_overview():
+    text = """comdirect
+Finanzreport Nr. 10 per 01.11.2017
+Depotnummer: 123456
+Depot +20,00
+Depot
+Depotbestand EUR EUR EUR
+Bezeichnung Anzahl/Nominal letzter
+Kurs
+Währung Kurswert
+Stückzinsen
+Kaufwert Gewinn/Verlust
+A1JX52
+Muster ETF Welt
+2,000 10,00 EUR 20,00
++0,00
+15,00 +5,00
+Depotgesamtwert 20,00 EUR"""
+    source = PdfDocument("synthetic-layout-2017", "f" * 64, (PdfPage(1, text),))
+    plugin = ComdirectFinanzreportPlugin()
+    result = plugin.parse(source, plugin.detect(source)[0])
+
+    assert len(result.depot_snapshots) == 1
+    assert result.depot_snapshots[0].total_value.value == Decimal("20.00")
+    position = result.depot_snapshots[0].positions[0]
+    assert position.security_id.value == "A1JX52"
+    assert position.custody_type.value is MissingValue.UNKNOWN
+    assert position.purchase_value.value == Decimal("15.00")
+    assert position.gain_loss.value == Decimal("5.00")
+    assert not any(issue.code == "DEPOT_OVERVIEW_MISMATCH" for issue in result.issues)
+
+
+def test_finanzreport_depot_without_recognized_positions_is_reported():
+    text = """comdirect
+Finanzreport Nr. 10 per 01.11.2017
+Depotnummer: 123456
+Depot +20,00
+Depot
+Depotbestand EUR EUR EUR
+Unbekanntes Wertpapierlayout"""
+    source = PdfDocument("synthetic-unknown-depot-layout", "9" * 64, (PdfPage(1, text),))
+    plugin = ComdirectFinanzreportPlugin()
+    result = plugin.parse(source, plugin.detect(source)[0])
+
+    issue = next(item for item in result.issues if item.code == "DEPOT_POSITIONS_UNRECOGNIZED")
+    evidence = next(item for item in result.evidence if item.evidence_id == issue.evidence_id)
+    assert "Depot" in evidence.excerpt

@@ -17,8 +17,8 @@ from .issues import Issue
 from .values import FieldValue, MissingValue
 
 
-SCHEMA_VERSION = "1.9.0"
-LEGACY_SCHEMA_VERSIONS = frozenset({"1.5.0", "1.6.0", "1.7.0", "1.8.0"})
+SCHEMA_VERSION = "1.10.0"
+LEGACY_SCHEMA_VERSIONS = frozenset({"1.5.0", "1.6.0", "1.7.0", "1.8.0", "1.9.0"})
 
 
 def normalize_result_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -69,6 +69,14 @@ def normalize_result_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
                         "page_number": None,
                         "evidence_ids": [],
                     })
+                    for field_name in ("purchase_value", "purchase_value_currency", "gain_loss", "accrued_interest"):
+                        position.setdefault(field_name, {
+                            "value": MissingValue.UNKNOWN.value,
+                            "source": "NOT_PROVIDED",
+                            "review_status": "UNREVIEWED",
+                            "page_number": None,
+                            "evidence_ids": [],
+                        })
     result["schema_version"] = SCHEMA_VERSION
     return result
 

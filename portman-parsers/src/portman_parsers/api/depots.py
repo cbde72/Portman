@@ -42,11 +42,15 @@ class DepotPosition:
     price: FieldValue[Decimal] = field(default_factory=FieldValue.unknown)
     price_date: FieldValue[date] = field(default_factory=FieldValue.unknown)
     custody_type: FieldValue[str] = field(default_factory=FieldValue.unknown)
+    purchase_value: FieldValue[Decimal] = field(default_factory=FieldValue.unknown)
+    purchase_value_currency: FieldValue[str] = field(default_factory=FieldValue.unknown)
+    gain_loss: FieldValue[Decimal] = field(default_factory=FieldValue.unknown)
+    accrued_interest: FieldValue[Decimal] = field(default_factory=FieldValue.unknown)
 
     def __post_init__(self) -> None:
         if not self.position_id:
             raise ValueError("position identity is required")
-        for item in (self.quantity, self.market_value, self.price):
+        for item in (self.quantity, self.market_value, self.price, self.purchase_value, self.gain_loss, self.accrued_interest):
             if not isinstance(item.value, (Decimal, MissingValue)):
                 raise TypeError("known position amounts and quantities must use Decimal")
 

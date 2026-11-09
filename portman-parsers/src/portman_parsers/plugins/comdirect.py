@@ -728,6 +728,7 @@ FR_DIRECT_DEBIT_REFERENCE=re.compile(
 )
 FR_HISTORICAL_AMOUNT=re.compile(r"(?<!\d)([+-]"+A+r")(?!\d)")
 FR_POSITION_HEAD=re.compile(r"^([A-Z0-9]{6})\s*/\s*(Girosammelverwahrung|Wertpapierrechnung)$")
+FR_POSITION_WKN_ONLY=re.compile(r"^[A-Z0-9]{6}$")
 FR_POSITION_VALUES=re.compile(r"^("+A+r")\s+("+A+r")(?:\s+([A-Z]{3}))?\s+("+A+r")$")
 FR_POSITION_REST=re.compile(r"^([+-]?"+A+r")(?:\s+([+-]"+A+r"))?$")
 FR_POSITION_ROW=re.compile(r"^([A-Z]{2}[A-Z0-9]{9}\d)\s+("+A+r")\s+("+A+r")\s+EUR\s+("+A+r")\s+EUR\s+("+D+r")$")
@@ -944,6 +945,7 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
   current=None; depot_mode=False; depot_done=False
   pending=None
   positions=[]; pos=None; depot_values=[]; depot_total_excerpt=None; depot_total_offset=None
+  depot_section_evidence=None; unrecognized_position_rows=[]
 
   def account_dto(name,iban,bic,excerpt,offset):
    if iban in by_iban: return by_iban[iban]
@@ -1062,15 +1064,15 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
    if pos is None: return
    block,pos=pos,None
    if block["value"] is None:
-    raise ValueError("Finanzreport: Depotposition ohne Kurswertzeile: "+block["wkn"])
+    unrecognized_position_rows.append(("\n".join(block["raw"]),block["offset"]))
+    return
    if not block["name"] and block["require_name"]:
     raise ValueError("Finanzreport: Wertpapiername fehlt: "+block["wkn"])
    if re.search(r"(?:^|\s|[·|])(?:Vorgang|Verwendungszweck)\s*:",block["name"] or "",re.I):
     raise ValueError("Finanzreport: Buchungstext als Wertpapiername erkannt: "+block["wkn"])
-   rest=[dec(value) for value in block["rest"]]
+   rest=[dec(value) for value,_,_ in block["rest"]]
    if len(rest)>=3: block["cost"],block["profit"]=rest[1],rest[2]
    elif len(rest)==2: block["cost"],block["profit"]=rest[0],rest[1]
-   elif len(rest)==1: block["cost"]=rest[0]
    if block["cost"] is not None and block["profit"] is not None and abs(block["value"]-block["cost"]-block["profit"])>Decimal("0.02"):
     issues.append(Issue(stable_id("issue",doc.document_id,"position",block["wkn"]),"DEPOT_POSITION_MISMATCH",IssueSeverity.ERROR,"Kurswert, Kaufwert und Gewinn/Verlust der Position %s sind nicht abgestimmt."%block["wkn"],nature=IssueNature.MATHEMATICAL_INCONSISTENCY))
    positions.append(block)
@@ -1100,12 +1102,16 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
    index+=1
    if line.startswith(("Finanzreport ","Kundennummer","comdirect","25449 Quickborn","USt-ID:","Gesamtsaldo","Depotgesamtwert ","Die Kaufwerte")) or line in FR_SKIP_EXACT:
     continue
+   depot_overview=re.fullmatch(r"Depot\s+([+-]?"+A+r")",line)
+   if depot_overview:
+    depot_expected=dec(depot_overview.group(1)); continue
    if line=="Depot":
     following=lines[index][2] if index<len(lines) else ""
     match=re.fullmatch(r"Depot\s+([+-]?"+A+r")",line)
     if match: depot_expected=dec(match.group(1)); continue
     if FR_AMOUNT.fullmatch(following): depot_expected=dec(following); index+=1; continue
-    flush_booking(); current=None; depot_mode=True; depot_done=False; continue
+    flush_booking(); current=None; depot_mode=True; depot_done=False
+    depot_section_evidence=(line,offset); continue
    account=FR_ACCOUNT_LINE.match(line)
    if account:
     name,iban=account.group(1),re.sub(r"\s","",account.group(2))
@@ -1160,13 +1166,15 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
     head=FR_POSITION_HEAD.match(line)
     if head:
      flush_position(); pos={"wkn":head.group(1),"custody_type":head.group(2),"page":page,"offset":offset,"raw":[line],"rows":[(line,offset)],"name":"","quantity":None,"price":None,"price_currency":None,"value":None,"cost":None,"profit":None,"rest":[],"require_name":True}; continue
+    if FR_POSITION_WKN_ONLY.fullmatch(line):
+     flush_position(); pos={"wkn":line,"custody_type":None,"page":page,"offset":offset,"raw":[line],"rows":[(line,offset)],"name":"","quantity":None,"price":None,"price_currency":None,"value":None,"cost":None,"profit":None,"rest":[],"require_name":True}; continue
     if pos is not None:
      values=FR_POSITION_VALUES.match(line)
      if values and pos["value"] is None:
       pos.update(quantity=dec(values.group(1)),price=dec(values.group(2)),price_currency=values.group(3),value=dec(values.group(4))); pos["raw"].append(line); pos["rows"].append((line,offset)); continue
      rest=FR_POSITION_REST.match(line)
      if rest and pos["value"] is not None:
-      pos["rest"].extend(value for value in rest.groups() if value); pos["raw"].append(line); pos["rows"].append((line,offset)); continue
+      pos["rest"].extend((value,line,offset) for value in rest.groups() if value); pos["raw"].append(line); pos["rows"].append((line,offset)); continue
      if pos["value"] is None:
       if re.match(r"^[A-Z0-9]{6}(?: /| \d[\d.]*,)",line):
        raise ValueError("Finanzreport: nicht unterstützte Depotposition: "+line)
@@ -1317,7 +1325,7 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
     issues.append(Issue(stable_id("issue",aid,"overview"),"OVERVIEW_BALANCE_MISMATCH",IssueSeverity.ERROR,"Kontoübersicht und Endsaldo widersprechen sich.",evidence_id=overview_evidence,nature=IssueNature.MATHEMATICAL_INCONSISTENCY))
 
   depots=[]; snapshots=[]
-  if positions or depot_expected is not None:
+  if positions or depot_expected is not None or depot_section_evidence is not None:
    depot_m=DEPOT.search(text); customer=FR_CUSTOMER.search(text)
    if depot_m: number,depot_excerpt=depot_m.group(1),depot_m
    elif customer: number,depot_excerpt=customer.group(1),customer
@@ -1361,7 +1369,15 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
      price,price_currency=block["price"],block["price_currency"]
      price_field=fv(price,price_ev) if price_currency=="EUR" or (price_currency is None and price==0) else FieldValue.unknown()
      price_date_ev=ev("depot_position_price_date",next((row_text for row_text,_ in position_rows if FR_POSITION_ROW.match(row_text)),position_rows[0][0]),offset=next((row_offset for row_text,row_offset in position_rows if FR_POSITION_ROW.match(row_text)),position_rows[0][1])) if block.get("price_date") else snapshot_date_ev
-     dto_positions.append(DepotPosition(stable_id("position",did,block["wkn"]),fv(block["wkn"],security_ev),fv(block["quantity"],quantity_ev),security_name=fv(block["name"],name_ev) if block["name"] and name_ev else FieldValue.unknown(),market_value=fv(block["value"],market_value_ev),currency=fv("EUR",currency_ev),price=price_field,price_date=fv(price_date,price_date_ev) if price_date_ev else FieldValue.unknown(),custody_type=fv(block["custody_type"],custody_ev) if custody_ev else FieldValue.unknown()))
+     def rest_evidence(value):
+      item=next(((row_text,row_offset) for number,row_text,row_offset in block["rest"] if dec(number)==value),None)
+      return ev("depot_position_financial_detail",item[0],offset=item[1]) if item else None
+     cost_ev=rest_evidence(block["cost"]) if block["cost"] is not None else None
+     profit_ev=rest_evidence(block["profit"]) if block["profit"] is not None else None
+     interest_value=None
+     if len(block["rest"])>=3: interest_value=dec(block["rest"][0][0])
+     interest_ev=rest_evidence(interest_value) if interest_value is not None else None
+     dto_positions.append(DepotPosition(stable_id("position",did,block["wkn"]),fv(block["wkn"],security_ev),fv(block["quantity"],quantity_ev),security_name=fv(block["name"],name_ev) if block["name"] and name_ev else FieldValue.unknown(),market_value=fv(block["value"],market_value_ev),currency=fv("EUR",currency_ev),price=price_field,price_date=fv(price_date,price_date_ev) if price_date_ev else FieldValue.unknown(),custody_type=fv(block["custody_type"],custody_ev) if custody_ev else FieldValue.unknown(),purchase_value=fv(block["cost"],cost_ev) if block["cost"] is not None and cost_ev else FieldValue.unknown(),purchase_value_currency=fv("EUR",cost_ev) if cost_ev else FieldValue.unknown(),gain_loss=fv(block["profit"],profit_ev) if block["profit"] is not None and profit_ev else FieldValue.unknown(),accrued_interest=fv(interest_value,interest_ev) if interest_value is not None and interest_ev else FieldValue.unknown()))
     snapshots.append(DepotSnapshot(stable_id("snapshot",did,asof,doc.document_id),did,fv(asof,snapshot_date_ev) if snapshot_date_ev else FieldValue.unknown(),tuple(dto_positions),total_value,fv("EUR",te) if te else FieldValue.unknown()))
     reported=depot_values[0] if depot_values else (dec(total.group(1)) if (total:=re.search(r"Depotgesamtwert\s+("+A+r")\s+EUR",text,re.I)) else None)
     if reported is not None:
@@ -1370,6 +1386,10 @@ class ComdirectFinanzreportPlugin(ComdirectPlugin):
       issues.append(Issue(stable_id("issue",did,"total"),"DEPOT_TOTAL_MISMATCH",IssueSeverity.ERROR,"Depot position sum differs from total.",te,nature=IssueNature.MATHEMATICAL_INCONSISTENCY))
      if depot_expected is not None and reported!=depot_expected:
       issues.append(Issue(stable_id("issue",did,"expected"),"DEPOT_OVERVIEW_MISMATCH",IssueSeverity.ERROR,"Kontoübersicht und Depotgesamtwert widersprechen sich.",te,nature=IssueNature.MATHEMATICAL_INCONSISTENCY))
+   if unrecognized_position_rows or (depot_section_evidence is not None and not positions):
+    excerpt,offset=unrecognized_position_rows[0] if unrecognized_position_rows else depot_section_evidence
+    position_ev=ev("depot_positions_unrecognized",excerpt,offset=offset)
+    issues.append(Issue(stable_id("issue",did,"positions-unrecognized"),"DEPOT_POSITIONS_UNRECOGNIZED",IssueSeverity.ERROR,"Depotbestand ist im Beleg ausgewiesen, aber mindestens eine Depotposition konnte nicht erkannt werden.",position_ev,nature=IssueNature.MISSING_INFORMATION))
   links=[]; seen_links=set()
   if depots and accounts:
    for match in re.finditer(r"(?:Abrechnungs|Verrechnungs|Settlement)konto\s*:?[ \t]*(DE(?:\s*\d){20})",text,re.I):

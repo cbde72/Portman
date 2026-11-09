@@ -34,7 +34,7 @@ from .issues import Issue, IssueNature, IssueSeverity
 from .results import MissingValue, ParsedDocument, SCHEMA_VERSION as RESULT_SCHEMA_VERSION, normalize_result_payload, to_json_compatible
 from .values import FieldValue, ReviewStatus, ValueSource
 
-API_VERSION = "0.9"
+API_VERSION = "0.10"
 SCHEMA_VERSION = RESULT_SCHEMA_VERSION
 
 __all__ = [

@@ -61,8 +61,18 @@ Importregeln und Weboberfläche sind nicht geändert.
   für Wertpapierkennung, Name, Stückzahl, Kurswert, Währung und erkannte
   Verwahrart. Ein USD-Stückkurs macht den Kurs UNKNOWN, verhindert aber nicht
   den belegten Bestand. Verwahrart ist ein neues optionales DTO-Feld.
-- [x] **API-/Schema-Versionierung:** Paket/API `0.8.7` / `0.9`, Ergebnis-
-  schema `1.9.0`; ältere Ergebnis-Schemata `1.5.0` bis `1.8.0` werden
+- [x] **V10-86 / Abschnitt 4.10:** Depotpositionen enthalten Kaufwert und
+  Gewinn/Verlust als exakte Dezimalwerte mit je eigener Fundstelle; Kaufwert-
+  Währung folgt der EUR-Spalte. Stückzinsen werden nur bei expliziter Zeile
+  ausgegeben. Fehlende Einzelwerte bleiben unbekannt; die bestehende
+  Abstimmungsmeldung bleibt erhalten.
+- [x] **V10-94 / Abschnitt 4.11:** Das 2017er Layout erkennt eine alleinstehende
+  WKN mit anschließendem Namen und Wertezeile; Verwahrart bleibt unbekannt.
+  `Depot +Betrag` wird als Übersichtswert geprüft. Ein Depotabschnitt ohne
+  erkannte Position erzeugt `DEPOT_POSITIONS_UNRECOGNIZED` mit Fundstelle.
+  Bestehende Layouts bleiben regressionsgeprüft.
+- [x] **API-/Schema-Versionierung:** Paket/API `0.8.8` / `0.10`, Ergebnis-
+  schema `1.10.0`; ältere Ergebnis-Schemata `1.5.0` bis `1.9.0` werden
   rückwärts normalisiert.
 - [ ] **V10-Integration:** Parserpin, V10-Allowlist, Importregeln und Web-UI
   sind nicht geändert und bleiben separate V10-Arbeiten.
@@ -71,18 +81,19 @@ Importregeln und Weboberfläche sind nicht geändert.
 
 Prüfstand am 9. November 2026:
 
-- Parsersuite: `337 passed`.
+- Parsersuite: `340 passed`.
 - Ruff: `python -m ruff check src tests` – sauber.
 - `git diff --check` – sauber.
-- Wheel gebaut: `portman_parsers-0.8.7-py3-none-any.whl`.
+- Wheel gebaut: `portman_parsers-0.8.8-py3-none-any.whl`.
 - Wheel in getrenntes Zielverzeichnis installiert; Import dort bestätigt
-  Paket `0.8.7`, API `0.9`, Schema `1.9.0` und `DepotPosition.custody_type`.
-- SHA-256: `19b62297cbee5678cc803c945b69a232d1e90553566248b0ffe5cc43c7fe5698`.
+  Paket `0.8.8`, API `0.10`, Schema `1.10.0` sowie Kaufwert-, Gewinn/Verlust-
+  und Stückzinsfelder.
+- SHA-256: `0eadb036c97229d357bb2704dcc8850fbfd0b30d8ba5e099289982efc6a5431f`.
 
 ## Übergabegrenze
 
 Keine echten Belege wurden hinzugefügt. Die synthetischen Ergebnisse belegen nur
 die ausdrücklich genannten Textmuster, nicht alle comdirect-Layoutvarianten.
 V10s dokumentierter Parserpin `0.7.0` / API `0.6` / Schema `1.6.0` muss separat
-mit Paket `0.8.7` / API `0.9` / Schema `1.9.0` abgeglichen werden.
+mit Paket `0.8.8` / API `0.10` / Schema `1.10.0` abgeglichen werden.
 Die V10-Integration ist daher ausdrücklich kein abgeschlossener ParserLab-Schritt.

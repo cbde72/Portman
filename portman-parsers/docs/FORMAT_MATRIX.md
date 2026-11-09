@@ -1,8 +1,8 @@
 # Parser- und Formatmatrix
 
 Stand: 9. November 2026
-Repository/Arbeitszweig/Ausgangscommit: `portman-parsers`, `codex/parser-pdf-lab`, `0b4f248`
-Paket/API/Ergebnisschema: `0.8.7` / `0.9` / `1.9.0`
+Repository/Arbeitszweig/Ausgangscommit: `portman-parsers`, `codex/parser-pdf-lab`, `d12cc18`
+Paket/API/Ergebnisschema: `0.8.8` / `0.10` / `1.10.0`
 
 ## Versionsabgleich und Aussagegrenze
 
@@ -10,7 +10,7 @@ V10s dokumentierter Pin zeigt auf Paket `0.7.0`, API `0.6`, Schema `1.6.0`, Comm
 
 Die aktuelle Registry hat 42 Handler: 35 mit `IMPLEMENTED`, sieben `METADATA_ONLY`. „Ausführbar“ bedeutet hier Registry-Implementierung und synthetische Tests, nicht geprüfte Abdeckung aller Originalbelege oder Layoutversionen einer Bank. Die im Folgenden genannten positiven und negativen Fälle sind synthetisch, soweit nicht ausdrücklich anders vermerkt. In dieser Bestandsaufnahme wurden keine realen Belege ausgewertet.
 
-`FinancialEvent` liefert je nach Handler Geld-/Wertpapierbewegungen, Steuer-/Kostenereignisse, Wertpapiergeschäfte, Referenzen und Belegfundstellen. Mit API `0.9` sind außerdem gerichtete `ExchangeRate`-Werte, getrennte Gegenpartei-/Zweckfelder, belegte Datumsarten und ein strukturierter Datensatz zur stornierten Dividendengutschrift verfügbar. FX und Gegenpartei/Zweck werden nur aus ausdrücklich belegten Angaben ausgegeben: Bank of Scotland aus der Buchungszeile, Comdirect-FX nur bei genau einem ausdrücklich gerichteten Währungspaar. Alte `SecurityTrade.exchange_rate`-Decimalwerte bleiben ungerichtet und werden nicht umgedeutet. Depot-Snapshotpositionen können zusätzlich die belegte Verwahrart tragen.
+`FinancialEvent` liefert je nach Handler Geld-/Wertpapierbewegungen, Steuer-/Kostenereignisse, Wertpapiergeschäfte, Referenzen und Belegfundstellen. Depot-Snapshotpositionen liefern zusätzlich belegte Verwahrart sowie bei comdirect Kaufwert, Gewinn/Verlust und ausdrücklich ausgewiesene Stückzinsen mit Fundstellen. Das comdirect-Finanzreportlayout 2017 mit WKN auf eigener Zeile ist synthetisch abgedeckt; unbekannte Depotlayouts werden gemeldet.
 
 **Confidence-Lesart:** `IMPLEMENTED` bedeutet, dass ein Handler ausführbar und mit mindestens synthetischen Fällen getestet ist; das ist mittlere Sicherheit nur für die genannten Fälle, keine Layoutfreigabe. Eine konkret dokumentierte Varianten-/Regressionstestfamilie erhöht die Sicherheit für genau diese Variante, nicht für andere Bankbelege. `METADATA_ONLY` hat keine Extraktionssicherheit. Für keine Variante liegt in dieser Bestandsaufnahme ein echter Belegnachweis vor; daher wird keine allgemeine hohe Formatqualität behauptet. Die Registry liefert Erkennung mit `Detection.confidence`; das ist keine Confidence der extrahierten Buchungswerte.
 
@@ -92,4 +92,4 @@ Layoutproben als bereinigte oder synthetische Regression festzulegen.
 
 Für den ersten begrenzten V10-31-Kandidaten wurde bereits **Baader `wertpapierabrechnung` als Zweitbeleg für einen existierenden Kauf/Verkauf** ausgewählt. Der Parserhandler ist vorhanden und hat synthetische Kauf-/Verkaufs-, Gebühren-/Steuer-, Valuta-, Referenz-, Wiederholung- und Storno-Prüfungen. Die Auswahl ist eine Parserformat-Empfehlung für diese konkrete Handler-ID; sie erlaubt weder eigenständigen Baader-Cashimport noch pauschale Freigabe anderer Baader-Untertypen. Echte Baaderbelege und historische Layoutvarianten wurden nicht geprüft.
 
-Vor einer V10-Integration müssen beide Repositories den Parserstand und die Paket-/API-/Schema-Version explizit abgleichen. V10s dokumentierter 0.7.0-Pin liegt hinter diesem aktuellen 0.8.7-Checkout (API 0.9, Schema 1.9.0). Der Parserauftrag nimmt keine Änderung an V10s Allowlist, Speicherung, Buchungswirkung oder Oberfläche vor.
+Vor einer V10-Integration müssen beide Repositories den Parserstand und die Paket-/API-/Schema-Version explizit abgleichen. V10s dokumentierter 0.7.0-Pin liegt hinter diesem aktuellen 0.8.8-Checkout (API 0.10, Schema 1.10.0). Der Parserauftrag nimmt keine Änderung an V10s Allowlist, Speicherung, Buchungswirkung oder Oberfläche vor.
