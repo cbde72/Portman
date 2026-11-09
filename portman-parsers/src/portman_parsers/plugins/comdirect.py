@@ -27,6 +27,7 @@ IDENTITY_ROW_STOP=re.compile(r"^(?:Emissionsland|zahlbar|Abrechnung|Bruttobetrag
 IDENTITY_ROW_PREFIX=re.compile(r"^\s*(?:p\s*e\s*r\s+\d{2}\.\d{2}\.\d{4}|(?:S\s*T\s*K)\.?\s*-?\s*[\d.,]+)\s*",re.I)  # Layouttext trennt Buchstaben ("p er", "S TK")
 IDENTITY_REASON={"PARTIAL":"nur WKN oder Name erkannt","AMBIGUOUS":"mehrere Kennungen im selben Wertpapierblock","INVALID":"ISIN-Prüfziffer oder ISIN-Format ungültig"}
 QTY=re.compile(r"(?:Stk\.?|STK)\s*("+A+r")",re.I); NENNWERT_QTY=re.compile(r"Nennwert\s*Zum\s*(?:Misch)?Kurs\s*von\s*(?:St\.?|Stk\.?)\s*("+A+r")",re.I); VALUTA=re.compile(r"(?:Valuta|zahlbar\s+ab)\s*("+D+r")",re.I)
+DIVIDEND_REVERSAL=re.compile(r"\bStorno\s*[-–]?\s*Abrechnung\s+(?:Dividenden|Ertrags)gutschrift\b",re.I)
 WKN=re.compile(r"\bWKN\s*:?[ \t]*([A-Z0-9]{6})\b",re.I)
 BANK_REFERENCE=re.compile(r"\bReferenz(?:\s*[- ]?\s*(?:Nr\.?|nummer))?\s*:?\s*([A-Z0-9][A-Z0-9\s]*?)(?=\s*(?:Referenz|Depotnummer|Depotnr|Kundennummer|comdirect)|[^A-Z0-9\s]|\n\s*\n|$)",re.I)
 LIQUIDATION_ADJUSTMENT=re.compile(r"\bNachbesserung[ \t]+(?:Liquizlg\b\.?|Liquidationszahlung\b)(?:[ \t]+(ETF[0-9]{3})\b)?",re.I)
@@ -488,6 +489,9 @@ class ComdirectPlugin:
   return self.transaction(doc,d,evidence,ev,fv,depots,depot_id,isin,eid,security_name,column_wkn,column_isin,identity)
  def transaction(self,doc,d,evidence,ev,fv,depots,depot_id,isin,eid,security_name=None,column_wkn=None,column_isin=None,identity=None):
   text=doc.text; h=d.handler_id; kind="BUY" if h=="wertpapierkauf" else "SELL" if h=="wertpapierverkauf" else "REDEMPTION" if h=="einloesung" else "DIVIDEND"
+  reversal=DIVIDEND_REVERSAL.search(text) if kind=="DIVIDEND" else None
+  if reversal:
+   kind="REVERSAL"
   # Werte aus der "Steuerlichen Behandlung" sind nur Ersatz, wenn die Abrechnung selbst keinen Wert liefert.
   tax_section=re.search(r"Steuerliche\s*Behandlung",text); head=text[:tax_section.start()] if tax_section else text
   quantity_match=NENNWERT_QTY.search(head) or QTY.search(head) or QTY.search(text)
@@ -502,9 +506,12 @@ class ComdirectPlugin:
   if quantity_match is None and qty is None and exec_match is not None and exec_match.group("qty"):
    candidate=dec(exec_match.group("qty"))
    if candidate>0: qty=candidate
-  settlement=SETTLE.search(text); valuta=VALUTA.search(text); event_id=stable_id("event",doc.document_id,h,isin,settlement.group("a") if settlement else "")
+  settlement=SETTLE.search(text,reversal.end() if reversal else 0); valuta=VALUTA.search(text)
+  if reversal and settlement and (settlement.group("dir") or "").lower()!="lasten":
+   settlement=None
+  event_id=stable_id("event",doc.document_id,h,isin,settlement.group("a") if settlement else "")
   adjustment=LIQUIDATION_ADJUSTMENT.search(head) if kind=="REDEMPTION" else None
-  if adjustment and settlement:
+  if (adjustment or reversal) and settlement:
    valuta=SETTLEMENT_DATE.search(text,settlement.start(),settlement.end()) or valuta
   issues=[]
   identity = identity or _SecurityIdentity()
@@ -532,6 +539,12 @@ class ComdirectPlugin:
                        event_id=event_id,nature=IssueNature.MISSING_INFORMATION))
   event_ev=ev("economic_event",settlement if settlement else re.search(next(p for x,p in TITLES if x==h),text,re.I|re.S)); iban=IBAN.search(text); account_id=None; accounts=()
   event_evidence=(event_ev,)
+  if reversal:
+   reversal_ev=ev("dividend_reversal",reversal)
+   event_evidence+=(reversal_ev,)
+   issues.append(Issue(stable_id("issue",event_id,"dividend-reversal"),"COMDIRECT_DIVIDEND_REVERSAL_UNLINKED",
+                       IssueSeverity.WARNING,"Dividendenstorno: Originalbuchung und gebuchten Endbetrag separat abgleichen.",
+                       evidence_id=reversal_ev,event_id=event_id,nature=IssueNature.UNSECURED_ASSIGNMENT))
   if adjustment:
    adjustment_ev=ev("liquidation_adjustment",adjustment)
    event_evidence+=(adjustment_ev,)
@@ -549,8 +562,8 @@ class ComdirectPlugin:
   security=()
   if settlement:
     sign=-1 if kind=="BUY" or (settlement.group("dir") or "").lower()=="lasten" else 1
-    cash_status=CashStatus.ACTUAL if account_id and not adjustment else CashStatus.EXPECTED
-    movement_type=(CashMovementType.OTHER if adjustment else CashMovementType.SECURITY_BUY if kind=="BUY" else
+    cash_status=CashStatus.ACTUAL if account_id and not (adjustment or reversal) else CashStatus.EXPECTED
+    movement_type=(CashMovementType.REVERSAL if reversal else CashMovementType.OTHER if adjustment else CashMovementType.SECURITY_BUY if kind=="BUY" else
                    CashMovementType.SECURITY_SELL if kind in {"SELL","REDEMPTION"} else CashMovementType.DIVIDEND_CREDIT)
     cash=(CashMovement(stable_id("cash",event_id),event_id,dec(settlement.group("a"))*sign,settlement.group("cur"),cash_status,
                        account_id=account_id,evidence_ids=(event_ev,),movement_type=movement_type),)
@@ -562,7 +575,8 @@ class ComdirectPlugin:
   if kind=="BUY" and cipher and not fees:
    fees=tuple(FeeEvent(stable_id("fee",event_id,k),"trading",k,amount,"EUR",date(valuta.group(1)) if valuta else date("01.01.1970"),FeeEffect.INCLUDED_IN_SETTLEMENT,doc.document_id,"comdirect",depot_id=depot_id,account_id=account_id,security_id=isin,transaction_id=event_id,evidence_ids=(event_ev,)) for k,amount in _cipher_fees(head,text[len(head):],cipher))
   # Die "Steuerliche Behandlung" eines Kaufs wirkt nur auf den Verrechnungstopf; ihre 0,00-Zeilen sind keine einbehaltene Steuer.
-  comps=tuple(TaxComponent(k,dec(m.group(1)),"EUR") for k,p in TAX for m in [re.search(p,text,re.I)] if m and (kind!="BUY" or dec(m.group(1))>0)); taxes=(TaxEvent(stable_id("tax",event_id),event_id,"WITHHOLDING",comps,evidence_ids=(event_ev,),depot_id=depot_id,isin=isin,bank_id="comdirect",account_id=account_id),) if comps else ()
+  comps=tuple(TaxComponent(k,dec(m.group(1)),"EUR") for k,p in TAX for m in [re.search(p,text,re.I)] if m and (kind!="BUY" or dec(m.group(1))>0)) if not reversal else ()
+  taxes=(TaxEvent(stable_id("tax",event_id),event_id,"WITHHOLDING",comps,evidence_ids=(event_ev,),depot_id=depot_id,isin=isin,bank_id="comdirect",account_id=account_id),) if comps else ()
   trades=()
   if not adjustment and kind in {"BUY","SELL","REDEMPTION"}:
    pm=PRICE.search(head); mm=MARKET_VALUE.search(head); gm=GROSS.search(head); fx=FX.search(head); nm=NAME.search(text); tm=TRADE_DATE.search(text); xm=EXECUTION_DATE.search(text); dm=TRADE_DAY.search(text)

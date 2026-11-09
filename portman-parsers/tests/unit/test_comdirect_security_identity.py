@@ -10,6 +10,7 @@ from portman_parsers.plugins.comdirect import (
     _extract_comdirect_security_identity,
     extract_comdirect_security_identity,
 )
+from portman_parsers.validation import validate_parsed_document
 
 
 def _identity(text, layout_text=None):
@@ -110,6 +111,42 @@ def test_liquidationsnachzahlung_mit_zweiter_kennung_bleibt_mehrdeutig():
         "654321\n"
     )
     assert identity.status == "AMBIGUOUS"
+
+
+@pytest.mark.parametrize(("title", "direction", "kind", "amount", "issues"), [
+    ("Storno-Abrechnung Dividendengutschrift", "Lasten", "REVERSAL", Decimal("-4.25"),
+     {"COMDIRECT_DIVIDEND_REVERSAL_UNLINKED"}),
+    ("Storno-Abrechnung Ertragsgutschrift", "Gunsten", "REVERSAL", None,
+     {"COMDIRECT_DIVIDEND_REVERSAL_UNLINKED", "COMDIRECT_SETTLEMENT_MISSING"}),
+    ("Abrechnung Dividendengutschrift", "Lasten", "DIVIDEND", Decimal("-4.25"), {"DIVIDEND_CASH_SIGN"}),
+])
+def test_dividendenstorno_verlangt_expliziten_belegtitel_und_belastung(title, direction, kind, amount, issues):
+    document = _document(
+        "comdirect\nDepotbestand Wertpapier-Bezeichnung WKN/ISIN\n"
+        "per 08.06.2022 716460 SAP SE\n"
+        "STK 3,000 DE0007164600 Inhaber-Aktien o.N.\n"
+        f"{title}\nKapitalertragsteuer EUR 1,00\n"
+        f"Verrechnung über Konto (IBAN) Valuta Zu Ihren {direction} vor Steuern\n"
+        "DE00 0000 0000 0000 0000 01 EUR 13.06.2022 EUR 4,25\n"
+        "(Referenz-Nr. ABCD01234567)."
+    )
+    plugin = ComdirectPlugin()
+    result = plugin.parse(document, plugin.detect(document)[0])
+    event, = result.events
+    assert event.kind == kind and not event.security_movements
+    assert event.bank_reference == "ABCD01234567"
+    assert event.reversal_of_event_id is None
+    assert {issue.code for issue in validate_parsed_document(result)} == issues
+    if amount is None:
+        assert not event.cash_movements
+    else:
+        cash, = event.cash_movements
+        assert cash.amount == amount
+        if kind == "REVERSAL":
+            assert event.event_date == date(2022, 6, 13)
+            assert cash.status.value == "EXPECTED" and cash.movement_type.value == "REVERSAL"
+            assert not event.tax_events
+            assert any(item.field == "dividend_reversal" and item.excerpt == title for item in result.evidence)
 
 
 def test_multi_line_name_continuation_between_identifier_rows_is_used():
