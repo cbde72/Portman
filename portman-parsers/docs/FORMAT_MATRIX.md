@@ -12,6 +12,29 @@ Die aktuelle Registry hat 42 Handler: 35 mit `IMPLEMENTED`, sieben `METADATA_ONL
 
 `FinancialEvent` liefert je nach Handler Geld-/Wertpapierbewegungen, Steuer-/Kostenereignisse, Wertpapiergeschäfte, Referenzen und Belegfundstellen. Depot-Snapshotpositionen liefern zusätzlich belegte Verwahrart sowie bei comdirect Kaufwert, Gewinn/Verlust und ausdrücklich ausgewiesene Stückzinsen mit Fundstellen. Das comdirect-Finanzreportlayout 2017 mit WKN auf eigener Zeile ist synthetisch abgedeckt; unbekannte Depotlayouts werden gemeldet.
 
+### comdirect-Finanzreport: geprüfte Muster und Formatgrenze
+
+Die Bezeichnung `IMPLEMENTED` für `finanzreport` gilt nur für die jeweils
+nachgewiesenen Textmuster. Die historischen Regressionen sind synthetische
+Texte, keine aus Original-PDFs extrahierten Seiten. Sie prüfen Parserverhalten
+nach der Textextraktion, nicht die Stabilität gegenüber abweichender PDF-
+Codierung, Spaltenpositionen, Seitenumbrüchen oder jeder Jahrgangsvariante.
+
+| Regressionstest | Nachgewiesenes Muster | Aussagegrenze |
+|---|---|---|
+| `tests/unit/test_comdirect_historical_finanzreport.py` | Konto-/IBAN-Zuordnung historischer Reports; 2007 mit Kontonummer, BLZ und Kopf-IBAN; getrennte und komprimierte Buchungs-/Depotzeilen; 2013-Tabellenspalten und wiederholte Seitenköpfe; 2017 kompakter Dispositionskredit | Belegt nur die jeweils im Test festgelegte Textreihenfolge und die geprüften Negativfälle, nicht alle historischen Finanzreports oder PDF-Extraktionen |
+| `tests/unit/test_comdirect_finanzreport_v10.py` | Synthetische 2015-Buchungen mit Betrag am Zweckzeilenende, Trennung unvollständiger Buchungen, Name/WKN/ISIN und eng formatierte Referenz | Keine Aussage zu abweichenden 2015-Dokumenten, weiteren Kontoabschnitten oder anderen Wertpapier-/Referenzlayouts |
+| `tests/unit/test_comdirect_finanzreport_2017.py` | Synthetische 2017-Depotposition mit alleinstehender WKN und Wertzeile, Depotübersicht und unbekanntem Depotlayout | Keine allgemeine Freigabe des Jahrgangs 2017; nicht beschriebene Positionsvarianten bleiben ungeprüft |
+
+Nicht durch diese Nachweise abgedeckt sind beliebige Jahrgänge und Konto-/Depotvarianten,
+anders angeordnete oder fehlende Spalten, PDF-Text-Reihenfolgen, die von den
+Fixtures abweichen, beschädigte/fehlende Glyphen sowie nicht getestete
+Seitenumbrüche. `IMPLEMENTED` ist deshalb keine Zusage, dass jeder historische
+comdirect-Finanzreport erkannt oder vollständig geparst wird. Für eine konkrete
+zusätzliche Layoutfreigabe ist eine eigene synthetische oder datenschutzgerecht
+bereinigte Regression samt Positiv- und Negativfall erforderlich; echte
+Kontodaten und Originalbelege gehören nicht in das Repository.
+
 **Confidence-Lesart:** `IMPLEMENTED` bedeutet, dass ein Handler ausführbar und mit mindestens synthetischen Fällen getestet ist; das ist mittlere Sicherheit nur für die genannten Fälle, keine Layoutfreigabe. Eine konkret dokumentierte Varianten-/Regressionstestfamilie erhöht die Sicherheit für genau diese Variante, nicht für andere Bankbelege. `METADATA_ONLY` hat keine Extraktionssicherheit. Für keine Variante liegt in dieser Bestandsaufnahme ein echter Belegnachweis vor; daher wird keine allgemeine hohe Formatqualität behauptet. Die Registry liefert Erkennung mit `Detection.confidence`; das ist keine Confidence der extrahierten Buchungswerte.
 
 ## Handlerübersicht
@@ -41,7 +64,7 @@ Layoutproben als bereinigte oder synthetische Regression festzulegen.
 | `vorabpauschale` | Baader / Vorabpauschale | `IMPLEMENTED`; synthetische Steuerabrechnung | Steuerdaten, mögliche erwartete Geldbewegung, Bestand/Instrumentdetails, Komponenten und Evidence | Keine getrennten Felder | Komponenten müssen zum belegten Gesamtbetrag passen; kein realer Belegnachweis |
 | `depotuebertrag` | Baader / Depotein-/auslieferung | `IMPLEMENTED`; synthetischer Übertrag | `FinancialEvent` mit Mengenbewegung und Wertpapieridentität; keine synthetische Geldbewegung | Keine getrennten Felder | Nur dokumentierte Wertpapierwirkung; keine realen Proben |
 | `wertpapierabrechnung` | Baader / Wertpapierabrechnung | `IMPLEMENTED`; synthetischer Kauf/Verkauf mit Gebühren, Steuer, Valuta, Referenz und Wiederholung | `BUY`/`SELL`, erwartete Cashbewegung, Stückbewegung, `SecurityTrade`, Datum, WKN/ISIN, Gebühren/Steuern, Evidence | Nicht im Schema bzw. Belegfall nicht strukturiert | Storno wird zurückgehalten; beschädigte echte PDFs und historische Layouts nicht geprüft. Dies ist die bereits vom Nutzer gewählte V10-31-Variante „Baader als Zweitbeleg“; daraus folgt keine breite V10-Freigabe. |
-| `finanzreport` | comdirect / Finanzreport | `IMPLEMENTED`; aktuelles IBAN-/Tabellenlayout, ältere getrennte/kompaktierte Spalten, 2007-Variante, Betragsende in Zweckzeile und Finanzreport-2015-Wertpapierangabe synthetisch abgedeckt | `CASH_BOOKING` je Zeile, Salden und Depot-Snapshots; tatsächliche signierte Geldbewegung, Datum, Wertpapierkennung (WKN/ISIN laut Beleg), Name, Bankreferenz, Verwahrart sowie feldbezogene Evidence | Rohtext/Buchungsevidence kann Text enthalten; Gegenpartei/Zweck bleiben UNKNOWN ohne explizite Labels | Historische Blöcke ohne Betrag werden mit `INCOMPLETE_BOOKING` und Belegstelle getrennt. Bankreferenz nur bei engem Format eindeutig; echte Layoutabdeckung lückenhaft. Gegenpartei/Zweck nicht aus Nachbarzeilen ableiten. |
+| `finanzreport` | comdirect / Finanzreport | `IMPLEMENTED`; die geprüften synthetischen Muster sind in „comdirect-Finanzreport: geprüfte Muster und Formatgrenze“ einzeln aufgeführt | `CASH_BOOKING` je Zeile, Salden und Depot-Snapshots; tatsächliche signierte Geldbewegung, Datum, Wertpapierkennung (WKN/ISIN laut Beleg), Name, Bankreferenz, Verwahrart sowie feldbezogene Evidence | Rohtext/Buchungsevidence kann Text enthalten; Gegenpartei/Zweck bleiben UNKNOWN ohne explizite Labels | Testnachweise gelten nur für Fixture-Textmuster, nicht als allgemeine Jahrgangs- oder PDF-Layoutfreigabe. Unvollständige Blöcke werden mit `INCOMPLETE_BOOKING` und Belegstelle getrennt; Gegenpartei/Zweck nicht aus Nachbarzeilen ableiten. |
 | `umsatzabrechnung` | FNZ/finvesto / Umsatzabrechnung | `IMPLEMENTED`; synthetische Ausschüttungswiederanlage und Kauf, unbekanntes Settlementkonto, FX-Steuerabgleich | Finanzereignisse, Geld-/Mengenbewegungen, Komponenten und Belege; ein Wechselkurswert wird für Berechnungen genutzt, aber nicht als gerichtetes Währungspaar ausgegeben | Keine getrennten Felder | Fremdwährungsfälle mit Synthesedaten; Rate-Richtung/Pair ist im DTO nicht belegt. |
 | `depotauszug` | FNZ/finvesto / Depotauszug | `IMPLEMENTED`; synthetische Depotposition, vertikale Zeilenvariante und Seitenbeleg | Depot-Snapshot, Positionen, Mengen/Kurswerte und Evidence | Nicht zutreffend | Nur getestete synthetische Layouts; keine realen Varianten |
 | `generic` | Generischer Fallback / prüfpflichtiges Dokument | `METADATA_ONLY`; kein ausführbarer Parser | Kein Parserereignis | Nicht zutreffend | Keine Erkennung/Extraktion als freigegebener Handler |
